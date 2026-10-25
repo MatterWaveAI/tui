@@ -1,0 +1,3 @@
+event: moderation_block
+data: {"detail": "MatterWave would not send this message.", "code": "moderation", "request_id": "req-mod-1"}
+

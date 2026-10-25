@@ -1,0 +1,71 @@
+[project]
+name = "matterwave-tui"
+version = "0.1.0"
+description = "A terminal client for MatterWave chat: the same conversations as the web app"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "matterwave-sdk",
+    "httpx>=0.27",
+    "keyring>=25",
+    "textual>=0.86",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Environment :: Console",
+    "Typing :: Typed",
+]
+
+[project.scripts]
+matterwave-tui = "matterwave_tui.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "respx>=0.21",
+    "ruff>=0.7",
+    "mypy>=1.13",
+]
+
+# The SDK is a sibling in this repo; once it is published with the
+# conversation routes this becomes an ordinary version pin.
+[tool.uv.sources]
+matterwave-sdk = { path = "../../sdk/python", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/matterwave_tui"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "strict"
+markers = [
+    "e2e: drives the TUI against a deployed cluster (needs E2E_ADMIN_EMAIL / E2E_ADMIN_PASSWORD; skipped otherwise)",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "ASYNC", "S"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S105", "S106"]
+"__init__.py" = ["F401"]
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+files = ["src/matterwave_tui"]
+
+[[tool.mypy.overrides]]
+# keyring ships no type information.
+module = "keyring.*"
+ignore_missing_imports = true

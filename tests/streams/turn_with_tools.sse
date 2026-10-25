@@ -1,0 +1,58 @@
+event: message
+data: {"id": "u1", "conversation_id": "c1", "role": "user", "parts": [{"type": "text", "text": "Weather in Oslo?"}], "content": "Weather in Oslo?", "content_version": 1, "created_at": "2026-10-18T10:00:00+00:00", "parent_id": null, "model": null, "truncated": false}
+
+event: title
+data: {"title": "Weather in Oslo?"}
+
+: mw-heartbeat
+
+id: g1:0
+event: part_start
+data: {"index": 0, "type": "reasoning"}
+
+id: g1:1
+event: delta
+data: {"reasoning": "Need a search.", "index": 0}
+
+id: g1:2
+event: part_end
+data: {"index": 0}
+
+id: g1:3
+event: part_start
+data: {"index": 1, "type": "tool_call", "id": "call_1", "name": "web_search", "arguments": "{\"query\": \"Oslo weather\"}"}
+
+id: g1:4
+event: part_end
+data: {"index": 1}
+
+id: g1:5
+event: part_start
+data: {"index": 2, "type": "tool_result", "id": "call_1", "output": "Rain, 9C", "is_error": false}
+
+id: g1:6
+event: part_end
+data: {"index": 2}
+
+id: g1:7
+event: part_start
+data: {"index": 3, "type": "text"}
+
+id: g1:8
+event: delta
+data: {"content": "It is raining", "index": 3}
+
+id: g1:9
+event: delta
+data: {"content": ", 9C.", "index": 3}
+
+id: g1:10
+event: part_end
+data: {"index": 3}
+
+event: context
+data: {"prompt_tokens": 120, "completion_tokens": 30, "context_window": 8192}
+
+event: done
+data: {"id": "a1", "conversation_id": "c1", "role": "assistant", "parts": [{"type": "reasoning", "text": "Need a search."}, {"type": "tool_call", "id": "call_1", "name": "web_search", "arguments": "{\"query\": \"Oslo weather\"}"}, {"type": "tool_result", "id": "call_1", "output": "Rain, 9C", "is_error": false}, {"type": "text", "text": "It is raining, 9C."}], "content": "It is raining, 9C.", "content_version": 1, "created_at": "2026-10-18T10:00:02+00:00", "parent_id": "u1", "model": "grt-nano", "truncated": false}
+

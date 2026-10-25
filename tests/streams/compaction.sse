@@ -1,0 +1,23 @@
+event: compaction
+data: {"message": {"id": "s1", "role": "system", "parts": [{"type": "summary", "text": "They discussed **Oslo**.", "covers_from": "u1", "covers_to": "a1", "tokens_before": 900, "tokens_after": 120}], "content": "", "parent_id": "a1", "truncated": false}, "covers_from": "u1", "covers_to": "a1", "tokens_before": 900, "tokens_after": 120}
+
+event: notice
+data: {"detail": "This branch is close to the model's context limit.", "code": "compaction"}
+
+event: message
+data: {"id": "u3", "role": "user", "parts": [{"type": "text", "text": "And tomorrow?"}], "content": "And tomorrow?", "parent_id": "s1", "truncated": false}
+
+id: g2:0
+event: part_start
+data: {"index": 0, "type": "text"}
+
+id: g2:1
+event: delta
+data: {"content": "Sun.", "index": 0}
+
+event: future_event
+data: {"anything": 1}
+
+event: done
+data: {"id": "a3", "role": "assistant", "parts": [{"type": "text", "text": "Sun."}], "content": "Sun.", "parent_id": "u3", "model": "grt-nano", "truncated": false}
+

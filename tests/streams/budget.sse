@@ -1,0 +1,6 @@
+event: message
+data: {"id": "u2", "role": "user", "parts": [{"type": "text", "text": "hi"}], "content": "hi", "parent_id": null, "truncated": false}
+
+event: error
+data: {"detail": "Your organisation's monthly token budget is used up: the plan's included tokens and any overage its cap allows", "code": "budget"}
+

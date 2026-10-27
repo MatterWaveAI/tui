@@ -10,7 +10,7 @@ uvx matterwave-tui                 # run without installing
 pipx install matterwave-tui        # or install it once
 ```
 
-From this repo: `cd clients/tui && uv sync && uv run matterwave-tui`.
+From a checkout of this repo: `uv sync && uv run matterwave-tui`.
 
 ## Sign in
 
@@ -46,9 +46,23 @@ or the environment is never replaced behind your back.
 | `m` | transcript | model picker |
 | `n` | transcript | new conversation |
 | `/` | transcript | search conversations |
+| `F2` | anywhere | rename the open conversation |
+| `p` | anywhere | pin / unpin the open conversation |
+| `a` | anywhere | archive / unarchive the open conversation |
+| `d` | anywhere | delete the open conversation (asks first) |
+| `f` | transcript | fork the conversation from the selected message |
+| `s` | anywhere | create a share link for the conversation |
+| `w` | anywhere | export the conversation to a Markdown file (the working directory) |
+| `i` | anywhere | attach a file (its path); it is uploaded and sent with the next message |
+| `o` | anywhere | cycle the sidebar list: default → pinned → archived → all |
 | `Ctrl+Q` | anywhere | quit |
 
 Letter keys apply when focus is not in the composer or the search box; `Esc` gets you there.
+
+The status line also carries the org's balance for the period (`usage used/included (%)`, read
+once at start-up from `/api/me/usage`) and any files attached but not sent yet. An attached
+image or document renders in the transcript as an `[image: filename]` placeholder line — the
+same line the Markdown export writes — and its id goes out with the next turn.
 
 A draft is kept per conversation while the app runs. The model picker groups models as the web
 does — GRT, partner, research preview — and shows a model your plan does not include with the plan
@@ -72,6 +86,9 @@ uv sync --extra dev
 uv run ruff check . && uv run mypy --strict src && uv run pytest -q
 ```
 
-The wire is the Python SDK's (`sdk/python`, by path): `client.conversations.*`, its typed
-frames and its stream resume. This package keeps what is terminal-specific: the tree in memory,
-the failure copy, and the one re-login a 401 gets before it stands.
+The wire is the Python SDK's (`matterwave-sdk` from your package index): `client.conversations.*`,
+its typed frames and its stream resume, plus `client.attachments`, `client.shares` and
+`client.usage` for the rest. The routes the SDK has no method for yet (`/api/models`, the
+conversation delete, pin and archive) go through the same client. This package keeps what is
+terminal-specific: the tree in memory, the failure copy, and the one re-login a 401 gets before
+it stands.

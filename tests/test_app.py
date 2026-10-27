@@ -15,7 +15,7 @@ from textual.widgets import ListView, Markdown, Static, TextArea
 from matterwave_tui.api import Cut, HttpChatAPI, Opened, StreamItem
 from matterwave_tui.app import MatterWaveApp
 from matterwave_tui.auth import DeviceCode
-from matterwave_tui.screens import DeviceLogin, ModelPicker
+from matterwave_tui.screens import Confirm, DeviceLogin, ModelPicker, Prompt
 from matterwave_tui.widgets import DividerView, MessageView
 
 from .fake_api import FakeAPI, conversation, happy_script, message
@@ -39,6 +39,10 @@ def banner(app: MatterWaveApp) -> str:
 
 def sidebar_titles(app: MatterWaveApp) -> list[str]:
     return [item.conversation.title for item in app.query_one("#conversations", ListView).children]
+
+
+def sidebar_captions(app: MatterWaveApp) -> list[str]:
+    return [item.caption() for item in app.query_one("#conversations", ListView).children]
 
 
 def capture_notify(app: MatterWaveApp) -> list[str]:
@@ -68,6 +72,8 @@ def json_routes(request: httpx.Request) -> httpx.Response | None:
     if path == "/api/conversations/c1/tree":
         return httpx.Response(200, json={**CONV, "messages": []})
     if path == "/api/conversations/c1/context":
+        return httpx.Response(404, json={"detail": "Not Found"})
+    if path == "/api/me/usage":
         return httpx.Response(404, json={"detail": "Not Found"})
     return None
 
@@ -549,3 +555,168 @@ async def test_switching_conversations_mid_stream_keeps_the_answer_out_of_the_ne
         assert not app.streaming
         assert app.live is None
         assert app.failure is None
+
+@pytest.mark.asyncio
+async def test_pin_archive_and_the_list_filters_make_them_actions():
+    api = FakeAPI()
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("escape", "p")
+        await settle(app, pilot)
+        assert api.pins == [("c1", True)]
+        assert sidebar_captions(app) == ["📌 New chat"]
+        await pilot.press("p")
+        await settle(app, pilot)
+        assert api.pins[-1] == ("c1", False)
+        assert sidebar_captions(app) == ["New chat"]
+
+        await pilot.press("a")
+        await settle(app, pilot)
+        assert api.archives == [("c1", True)]
+        assert sidebar_captions(app) == []  # the default slice hides the archived
+        await pilot.press("o", "o")  # pinned, then archived
+        await settle(app, pilot)
+        assert app.list_filter == "archived"
+        assert sidebar_captions(app) == ["🗄 New chat"]
+        await pilot.press("a")
+        await settle(app, pilot)
+        assert api.archives[-1] == ("c1", False)
+        await pilot.press("o", "o")  # all, then back to default
+        await settle(app, pilot)
+        assert app.list_filter == "default"
+        assert sidebar_captions(app) == ["New chat"]
+
+
+@pytest.mark.asyncio
+async def test_rename_asks_for_the_title_then_updates_sidebar_and_conversation():
+    api = FakeAPI()
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("escape", "f2")
+        await settle(app, pilot)
+        assert isinstance(app.screen, Prompt)
+        box = app.screen.query_one("#prompt-input")
+        assert box.value == "New chat"
+        box.value = "Renamed"
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.renames == [("c1", "Renamed")]
+        assert app.conversation is not None and app.conversation.title == "Renamed"
+        assert sidebar_titles(app) == ["Renamed"]
+        assert "Renamed." in shown
+
+
+@pytest.mark.asyncio
+async def test_delete_confirms_then_clears_the_open_conversation():
+    api = FakeAPI()
+    api.conversations.append(conversation("c2", title="Other"))
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("escape", "d")
+        await settle(app, pilot)
+        assert isinstance(app.screen, Confirm)
+        await pilot.press("n")
+        await settle(app, pilot)
+        assert api.deletes == []
+        await pilot.press("d")
+        await settle(app, pilot)
+        await pilot.press("y")
+        await settle(app, pilot)
+        assert api.deletes == ["c1"]
+        assert app.conversation is None
+        assert not app.thread.messages
+        assert sidebar_titles(app) == ["Other"]
+        assert any("Deleted" in s for s in shown)
+
+
+@pytest.mark.asyncio
+async def test_fork_copies_from_the_selected_message_and_opens_the_copy():
+    api = FakeAPI()
+    api.tree_messages = [
+        message("u1", "user", "q"),
+        message("a1", "assistant", "one", parent="u1", created_at="2"),
+    ]
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("escape", "f")
+        await settle(app, pilot)
+        assert api.forks == [("c1", "a1")]
+        assert app.conversation is not None and app.conversation.id == "c2"
+        assert app.conversation.title == "Fork of New chat"
+        assert [c.id for c in app.conversations] == ["c2", "c1"]
+
+
+@pytest.mark.asyncio
+async def test_share_hands_back_a_link():
+    api = FakeAPI()
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("escape", "s")
+        await settle(app, pilot)
+        assert api.shares == ["c1"]
+        assert any("https://matterwave.test/share/tok-c1" in s for s in shown)
+
+
+@pytest.mark.asyncio
+async def test_export_writes_the_active_path_as_markdown(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    api = FakeAPI()
+    api.tree_messages = [
+        message("u1", "user", "What is TUI?"),
+        message("a1", "assistant", "A terminal UI.", parent="u1", created_at="2", model="grt-nano"),
+    ]
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("escape", "w")
+        await settle(app, pilot)
+        files = list(tmp_path.glob("*.md"))
+        assert len(files) == 1
+        text = files[0].read_text(encoding="utf-8")
+        assert text.startswith("# New chat")
+        assert "## You" in text and "What is TUI?" in text
+        assert "## Assistant · grt-nano" in text and "A terminal UI." in text
+
+
+@pytest.mark.asyncio
+async def test_attach_uploads_then_sends_the_ids_with_the_next_turn(tmp_path):
+    picture = tmp_path / "picture.png"
+    picture.write_bytes(b"PNGDATA")
+    api = FakeAPI(happy_script("Seen."))
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("escape", "i")
+        await settle(app, pilot)
+        assert isinstance(app.screen, Prompt)
+        box = app.screen.query_one("#prompt-input")
+        box.value = str(picture)
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert [name for name, _ in api.uploads] == ["picture.png"]
+        assert "attached: picture.png" in status(app)
+        app.query_one("#composer", TextArea).focus()
+        await pilot.press("h", "i", "ctrl+s")
+        await settle(app, pilot)
+        assert api.sent == [("c1", "hi", "grt-nano")]
+        assert api.sent_attachment_ids == [["att1"]]
+        assert "attached" not in status(app)
+
+
+@pytest.mark.asyncio
+async def test_the_status_line_shows_the_usage_balance():
+    app = MatterWaveApp(FakeAPI())
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert "usage 1,234/100,000 (1%)" in status(app)
+        app.usage_balance = replace(app.usage_balance, exhausted=True)
+        app.render_status()
+        assert "budget used up" in status(app)

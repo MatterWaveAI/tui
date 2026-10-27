@@ -9,7 +9,14 @@ from typing import Any
 
 from matterwave_sdk import frames as fr
 from matterwave_sdk.errors import ConflictError
-from matterwave_sdk.models import Conversation, ConversationContext, ConversationMessage, Me
+from matterwave_sdk.models import (
+    Attachment,
+    Conversation,
+    ConversationContext,
+    ConversationMessage,
+    Me,
+    UsageBalance,
+)
 
 from matterwave_tui.api import Opened, StreamItem
 
@@ -42,6 +49,26 @@ def message(
     )
 
 
+def usage_balance(**fields: Any) -> UsageBalance:
+    return UsageBalance.from_dict(
+        {
+            "unit": "tokens",
+            "used": 1234,
+            "included": 100000,
+            "remaining": 98766,
+            "percent": 1.234,
+            "warn": False,
+            "in_overage": False,
+            "exhausted": False,
+            "period_start": "2026-10-01",
+            "resets_at": "2026-11-01",
+            "plan": {"name": "Free"},
+            "overage": {},
+            **fields,
+        }
+    )
+
+
 class FakeAPI:
     def __init__(
         self,
@@ -57,11 +84,20 @@ class FakeAPI:
         self.refusal = refusal
         self.conversations: list[Conversation] = [conversation()]
         self.tree_messages: list[ConversationMessage] = []
+        self.balance = usage_balance()
         self.sent: list[tuple[str, str, str | None]] = []
+        self.sent_attachment_ids: list[list[str] | None] = []
         self.leaf_moves: list[str] = []
         self.model_updates: list[tuple[str, str | None]] = []
         self.searches: list[str] = []
         self.compacted: list[str] = []
+        self.renames: list[tuple[str, str]] = []
+        self.deletes: list[str] = []
+        self.pins: list[tuple[str, bool]] = []
+        self.archives: list[tuple[str, bool]] = []
+        self.forks: list[tuple[str, str]] = []
+        self.shares: list[str] = []
+        self.uploads: list[tuple[str, bytes]] = []
         self.tree_reads = 0
         self.streams_closed = 0
 
@@ -72,7 +108,13 @@ class FakeAPI:
         return {"data": MODELS, "default_model": "grt-nano"}
 
     async def list_conversations(self, filter: str = "default") -> list[Conversation]:
-        return list(self.conversations)
+        if filter == "all":
+            return list(self.conversations)
+        if filter == "pinned":
+            return [c for c in self.conversations if c.pinned_at and not c.archived_at]
+        if filter == "archived":
+            return [c for c in self.conversations if c.archived_at]
+        return [c for c in self.conversations if not c.archived_at]
 
     async def search_conversations(self, query: str) -> list[Conversation]:
         self.searches.append(query)
@@ -99,6 +141,59 @@ class FakeAPI:
     async def set_default_model(self, conversation_id: str, model: str | None) -> Conversation:
         self.model_updates.append((conversation_id, model))
         conv = replace(self._find(conversation_id), default_model=model)
+        self.conversations = [conv if c.id == conversation_id else c for c in self.conversations]
+        return conv
+
+    async def rename_conversation(self, conversation_id: str, title: str) -> Conversation:
+        self.renames.append((conversation_id, title))
+        return self._replace(conversation_id, title=title)
+
+    async def delete_conversation(self, conversation_id: str) -> None:
+        self.deletes.append(conversation_id)
+        self.conversations = [c for c in self.conversations if c.id != conversation_id]
+
+    async def set_pinned(self, conversation_id: str, pinned: bool) -> Conversation:
+        self.pins.append((conversation_id, pinned))
+        return self._replace(
+            conversation_id, pinned_at="2026-10-27T00:00:00Z" if pinned else None
+        )
+
+    async def set_archived(self, conversation_id: str, archived: bool) -> Conversation:
+        self.archives.append((conversation_id, archived))
+        return self._replace(
+            conversation_id, archived_at="2026-10-27T00:00:00Z" if archived else None
+        )
+
+    async def fork_conversation(
+        self, conversation_id: str, message_id: str, title: str | None = None
+    ) -> Conversation:
+        self.forks.append((conversation_id, message_id))
+        source = self._find(conversation_id)
+        forked = conversation(
+            f"c{len(self.conversations) + 1}", title=title or f"Fork of {source.title}"
+        )
+        self.conversations.insert(0, forked)
+        return forked
+
+    async def share_conversation(self, conversation_id: str) -> str:
+        self.shares.append(conversation_id)
+        return f"https://matterwave.test/share/tok-{conversation_id}"
+
+    async def usage(self) -> UsageBalance:
+        return self.balance
+
+    async def upload_attachment(
+        self, data: bytes, filename: str, conversation_id: str | None = None
+    ) -> Attachment:
+        self.uploads.append((filename, data))
+        return Attachment.from_dict(
+            {"id": f"att{len(self.uploads)}", "filename": filename,
+             "content_type": "application/octet-stream", "size_bytes": len(data),
+             "scan_status": "clean", "created_at": "1"}
+        )
+
+    def _replace(self, conversation_id: str, **fields: Any) -> Conversation:
+        conv = replace(self._find(conversation_id), **fields)
         self.conversations = [conv if c.id == conversation_id else c for c in self.conversations]
         return conv
 
@@ -131,8 +226,11 @@ class FakeAPI:
         finally:
             self.streams_closed += 1
 
-    def send(self, conversation_id, content, model=None) -> AsyncIterator[StreamItem]:
+    def send(
+        self, conversation_id, content, model=None, attachment_ids=None
+    ) -> AsyncIterator[StreamItem]:
         self.sent.append((conversation_id, content, model))
+        self.sent_attachment_ids.append(attachment_ids)
         return self._play()
 
     def edit(self, conversation_id, message_id, content, model=None) -> AsyncIterator[StreamItem]:

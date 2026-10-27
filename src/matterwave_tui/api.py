@@ -4,8 +4,9 @@ The wire is the SDK's: `AsyncMatterWave.conversations` for the routes, its
 `AsyncConversationStream` for a turn (named events, typed frames, one resume
 by `Last-Event-ID`), its errors with the request id on them. What stays here
 is the TUI's own policy: a 401 is answered once with a fresh credential
-before it stands, a write is never retried, and the one route the SDK has
-no method for yet (the picker's `/api/models`) goes through the same client.
+before it stands, a write is never retried, and the routes the SDK has no
+method for yet (`/api/models` and the conversation delete, pin and archive
+routes) go through the same client.
 """
 
 from __future__ import annotations
@@ -22,7 +23,14 @@ from matterwave_sdk import _base as sdk_base
 from matterwave_sdk._client import USER_AGENT as SDK_USER_AGENT
 from matterwave_sdk.errors import APIConnectionError, AuthenticationError
 from matterwave_sdk.frames import TERMINAL_FRAMES, ConversationFrame
-from matterwave_sdk.models import Conversation, ConversationContext, ConversationMessage, Me
+from matterwave_sdk.models import (
+    Attachment,
+    Conversation,
+    ConversationContext,
+    ConversationMessage,
+    Me,
+    UsageBalance,
+)
 
 from . import __version__
 
@@ -73,12 +81,36 @@ class ChatAPI(Protocol):
 
     async def set_default_model(self, conversation_id: str, model: str | None) -> Conversation: ...
 
+    async def rename_conversation(self, conversation_id: str, title: str) -> Conversation: ...
+
+    async def delete_conversation(self, conversation_id: str) -> None: ...
+
+    async def set_pinned(self, conversation_id: str, pinned: bool) -> Conversation: ...
+
+    async def set_archived(self, conversation_id: str, archived: bool) -> Conversation: ...
+
+    async def fork_conversation(
+        self, conversation_id: str, message_id: str, title: str | None = None
+    ) -> Conversation: ...
+
+    async def share_conversation(self, conversation_id: str) -> str: ...
+
+    async def usage(self) -> UsageBalance: ...
+
+    async def upload_attachment(
+        self, data: bytes, filename: str, conversation_id: str | None = None
+    ) -> Attachment: ...
+
     async def context(self, conversation_id: str) -> ConversationContext: ...
 
     async def compact(self, conversation_id: str) -> ConversationMessage: ...
 
     def send(
-        self, conversation_id: str, content: str, model: str | None = None
+        self,
+        conversation_id: str,
+        content: str,
+        model: str | None = None,
+        attachment_ids: list[str] | None = None,
     ) -> AsyncIterator[StreamItem]: ...
 
     def edit(
@@ -186,6 +218,13 @@ class HttpChatAPI:
         response = await client._send(sdk_base.Request(method, path, body, True, False))
         return sdk_base.parse_json_object(response)
 
+    async def _app_none(
+        self, client: _Client, method: str, path: str, body: dict[str, Any] | None = None
+    ) -> None:
+        """As `_app_json`, for a route that answers no body."""
+        response = await client._send(sdk_base.Request(method, path, body, True, False))
+        await response.aclose()
+
     # --- routes --------------------------------------------------------------
 
     async def me(self) -> Me:
@@ -221,6 +260,61 @@ class HttpChatAPI:
         the same value twice, so it may take the reads' retries."""
         return await self._reads.conversations.update(conversation_id, default_model=model)
 
+    async def rename_conversation(self, conversation_id: str, title: str) -> Conversation:
+        """The SDK's update with a title: a PATCH that lands twice writes
+        the same title twice, so it may take the reads' retries."""
+        return await self._reads.conversations.update(conversation_id, title=title)
+
+    async def delete_conversation(self, conversation_id: str) -> None:
+        """`DELETE /api/conversations/{id}`: gone for good, answered with no
+        body. A delete that lands twice deletes the same nothing, but a
+        delete is still a write: no retries."""
+        await self._app_none(self._writes, "DELETE", _path("conversations", conversation_id))
+
+    async def set_pinned(self, conversation_id: str, pinned: bool) -> Conversation:
+        """`POST` / `DELETE /api/conversations/{id}/pin`, answered with the
+        updated conversation."""
+        method = "POST" if pinned else "DELETE"
+        return Conversation.from_dict(
+            await self._app_json(self._reads, method, _path("conversations", conversation_id, "pin"))
+        )
+
+    async def set_archived(self, conversation_id: str, archived: bool) -> Conversation:
+        """`POST` / `DELETE /api/conversations/{id}/archive`, answered with
+        the updated conversation."""
+        method = "POST" if archived else "DELETE"
+        return Conversation.from_dict(
+            await self._app_json(
+                self._reads, method, _path("conversations", conversation_id, "archive")
+            )
+        )
+
+    async def fork_conversation(
+        self, conversation_id: str, message_id: str, title: str | None = None
+    ) -> Conversation:
+        """The SDK's fork: a new conversation holding the path up to the
+        message, which the caller then opens like any other."""
+        return await self._writes.conversations.fork(conversation_id, message_id, title=title)
+
+    async def share_conversation(self, conversation_id: str) -> str:
+        """A read-only link to a snapshot of the active path, as a full URL
+        against this deployment."""
+        created = await self._writes.shares.create(conversation_id)
+        return str(self._reads.base_url).rstrip("/") + created.path
+
+    async def usage(self) -> UsageBalance:
+        """`GET /api/me/usage` by way of the SDK: the org's balance this
+        period, for the status line."""
+        return await self._reads.usage.get()
+
+    async def upload_attachment(
+        self, data: bytes, filename: str, conversation_id: str | None = None
+    ) -> Attachment:
+        """`POST /api/attachments` by way of the SDK: the id the next turn
+        names in `attachment_ids`. An upload that lands twice would store
+        the file twice, so it is a write: no retries."""
+        return await self._writes.attachments.upload(data, filename, conversation_id=conversation_id)
+
     async def context(self, conversation_id: str) -> ConversationContext:
         return await self._reads.conversations.context(conversation_id)
 
@@ -228,9 +322,17 @@ class HttpChatAPI:
         return await self._writes.conversations.compact(conversation_id)
 
     def send(
-        self, conversation_id: str, content: str, model: str | None = None
+        self,
+        conversation_id: str,
+        content: str,
+        model: str | None = None,
+        attachment_ids: list[str] | None = None,
     ) -> AsyncIterator[StreamItem]:
-        return self._stream(self._writes.conversations.send(conversation_id, content, model=model))
+        return self._stream(
+            self._writes.conversations.send(
+                conversation_id, content, model=model, attachment_ids=attachment_ids
+            )
+        )
 
     def edit(
         self, conversation_id: str, message_id: str, content: str, model: str | None = None

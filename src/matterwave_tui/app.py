@@ -6,11 +6,12 @@ import asyncio
 import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from matterwave_sdk import frames as fr
 from matterwave_sdk.errors import APIConnectionError, APIError, ConflictError
-from matterwave_sdk.models import Conversation, ConversationMessage
+from matterwave_sdk.models import Attachment, Conversation, ConversationMessage, UsageBalance
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -19,9 +20,10 @@ from textual.widget import Widget
 from textual.widgets import Footer, Input, Label, ListItem, ListView, Static, TextArea
 
 from .api import ChatAPI, Cut, Opened, StreamItem
+from .export import conversation_markdown, export_filename
 from .failures import Failure, classify, retry_in
 from .models import model_window
-from .screens import DeviceLogin, DeviceLoginFn, ModelPicker
+from .screens import Confirm, DeviceLogin, DeviceLoginFn, ModelPicker, Prompt
 from .thread import Divider, Message, Thread
 from .widgets import DividerView, MessageView
 
@@ -32,12 +34,22 @@ OFFLINE_PROBE_S = 5.0
 SEARCH_DEBOUNCE_S = 0.3
 # The id of the answer being streamed, before the server has named it.
 LIVE_ID = "_live"
+# The sidebar list's slices, in the order the `List` key cycles them. The
+# archived ones are only reachable here, which is what makes unarchiving
+# possible at all.
+LIST_FILTERS = ("default", "pinned", "archived", "all")
 
 
 def estimate_tokens(text: str) -> int:
     """The server's own rough count (characters / 4), so the meter and the
     server's compaction decision agree to within the estimate."""
     return (len(text) + 3) // 4
+
+
+def _read_attachment(path_text: str) -> tuple[bytes, str]:
+    """The file's bytes and its name, off the event loop (it may be large)."""
+    path = Path(path_text).expanduser()
+    return path.read_bytes(), path.name
 
 
 class ConversationItem(ListItem):
@@ -52,6 +64,11 @@ class ConversationItem(ListItem):
 
     def retitle(self, title: str) -> None:
         self.conversation = replace(self.conversation, title=title)
+        self.query_one(Label).update(self.caption())
+
+    def replace_conversation(self, conversation: Conversation) -> None:
+        """The conversation changed on the server (pin, archive): redraw the row."""
+        self.conversation = conversation
         self.query_one(Label).update(self.caption())
 
 
@@ -122,6 +139,15 @@ class MatterWaveApp(App[None]):
         Binding("right_square_bracket", "branch(1)", "Next branch"),
         Binding("x", "toggle_originals", "Originals"),
         Binding("c", "compact", "Compact"),
+        Binding("f2", "rename", "Rename"),
+        Binding("p", "toggle_pin", "Pin"),
+        Binding("a", "toggle_archive", "Archive"),
+        Binding("d", "delete_conversation", "Delete"),
+        Binding("f", "fork", "Fork"),
+        Binding("s", "share", "Share"),
+        Binding("w", "export_markdown", "Export"),
+        Binding("i", "attach", "Attach"),
+        Binding("o", "cycle_filter", "List"),
         Binding("escape", "leave_composer", "Transcript", show=False),
         Binding("ctrl+q", "quit", "Quit", priority=True),
     ]
@@ -149,6 +175,13 @@ class MatterWaveApp(App[None]):
         self.connection = "online"
         self.context_used: int | None = None
         self.context_window: int | None = None
+        # The org's balance this period, for the status line; None until the
+        # usage route has answered (or forever, when it is not there).
+        self.usage_balance: UsageBalance | None = None
+        # Files uploaded but not sent yet; their ids go with the next turn.
+        self.pending_attachments: list[Attachment] = []
+        # Which slice of the conversations the sidebar shows.
+        self.list_filter = "default"
         # When the server's `Retry-After` runs out, on the monotonic clock.
         self.rate_limited_until: float | None = None
         self._search_seq = 0
@@ -187,6 +220,17 @@ class MatterWaveApp(App[None]):
             used = (self.context_used or 0) + draft
             pct = min(100, round(100 * used / window))
             bits.append(f"context {used:,}/{window:,} ({pct}%)")
+        balance = self.usage_balance
+        if balance is not None:
+            if balance.exhausted:
+                bits.append("budget used up")
+            else:
+                warn = "⚠ " if balance.warn else ""
+                bits.append(f"{warn}usage {balance.used:,}/{balance.included:,} "
+                            f"({round(balance.percent)}%)")
+        if self.pending_attachments:
+            names = ", ".join(a.filename for a in self.pending_attachments)
+            bits.append(f"attached: {names}")
         if self.streaming:
             bits.append("streaming… (Esc stops)")
         bits.append(self.connection)
@@ -269,6 +313,7 @@ class MatterWaveApp(App[None]):
     async def load_initial(self) -> None:
         await self.load_models()
         await self.refresh_conversations()
+        self.load_usage()
         if self.conversations:
             await self.open_conversation(self.conversations[0].id)
         self.render_status()
@@ -290,7 +335,7 @@ class MatterWaveApp(App[None]):
             if query:
                 found = await self.api.search_conversations(query)
             else:
-                found = await self.api.list_conversations()
+                found = await self.api.list_conversations(filter=self.list_filter)
         except Exception as exc:
             self.fail_from_exception(exc)
             return
@@ -299,6 +344,17 @@ class MatterWaveApp(App[None]):
         view = self.query_one("#conversations", ListView)
         await view.clear()
         await view.extend([ConversationItem(c) for c in found])
+
+    @work(group="usage", exclusive=True)
+    async def load_usage(self) -> None:
+        try:
+            balance = await self.api.usage()
+        except Exception:
+            # No usage route on this deployment, or a key without the scope:
+            # no line, like a model with no context window.
+            return
+        self.usage_balance = balance
+        self.render_status()
 
     @on(Input.Changed, "#search")
     def _search_changed(self, event: Input.Changed) -> None:
@@ -453,20 +509,23 @@ class MatterWaveApp(App[None]):
         text = composer.text.strip()
         if not text or self.streaming:
             return
+        attachment_ids = [a.id for a in self.pending_attachments] or None
         if self.conversation is None:
-            self.run_worker(self._create_then_send(text), group="stream", exclusive=True)
+            self.run_worker(self._create_then_send(text, attachment_ids), group="stream",
+                            exclusive=True)
             return
         cid = self.conversation.id
         if self.editing:
             stream = self.api.edit(cid, self.editing, text, self.model)
         else:
-            stream = self.api.send(cid, text, self.model)
+            stream = self.api.send(cid, text, self.model, attachment_ids=attachment_ids)
         composer.text = ""
         self.drafts.pop(cid, None)
         self.editing = None
+        self.pending_attachments = []
         self.consume(stream)
 
-    async def _create_then_send(self, text: str) -> None:
+    async def _create_then_send(self, text: str, attachment_ids: list[str] | None = None) -> None:
         try:
             conv = await self.api.create_conversation(model=self.model)
         except Exception as exc:
@@ -475,7 +534,8 @@ class MatterWaveApp(App[None]):
         await self.refresh_conversations()
         await self.open_conversation(conv.id)
         self.query_one("#composer", TextArea).text = ""
-        await self._consume(self.api.send(conv.id, text, self.model))
+        self.pending_attachments = []
+        await self._consume(self.api.send(conv.id, text, self.model, attachment_ids=attachment_ids))
 
     def action_edit(self) -> None:
         message = self.selected_message()
@@ -551,6 +611,181 @@ class MatterWaveApp(App[None]):
         self.thread.leaf = summary.id
         await self.render_thread()
         self.load_context(self.conversation.id)
+
+    # --- conversation management -------------------------------------------------
+
+    def _sync_conversation(self, updated: Conversation) -> None:
+        """The server's state of one conversation, applied to the sidebar and
+        the open conversation without a refetch."""
+        self.conversations = [updated if c.id == updated.id else c for c in self.conversations]
+        if self.conversation is not None and self.conversation.id == updated.id:
+            self.conversation = updated
+        for child in self.query_one("#conversations", ListView).children:
+            if isinstance(child, ConversationItem) and child.conversation.id == updated.id:
+                child.replace_conversation(updated)
+
+    def action_rename(self) -> None:
+        if self.conversation is None:
+            return
+
+        def chosen(title: str | None) -> None:
+            if title:
+                self.apply_rename(title)
+
+        self.push_screen(Prompt("Rename conversation", self.conversation.title), chosen)
+
+    @work(group="action")
+    async def apply_rename(self, title: str) -> None:
+        if self.conversation is None:
+            return
+        try:
+            updated = await self.api.rename_conversation(self.conversation.id, title)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return
+        self._retitle(updated.id, updated.title)
+        self.notify("Renamed.")
+
+    @work(group="action")
+    async def action_toggle_pin(self) -> None:
+        if self.conversation is None:
+            return
+        pinned = self.conversation.pinned_at is None
+        try:
+            updated = await self.api.set_pinned(self.conversation.id, pinned)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return
+        self._sync_conversation(updated)
+        self.notify("Pinned." if pinned else "Unpinned.")
+
+    @work(group="action")
+    async def action_toggle_archive(self) -> None:
+        if self.conversation is None:
+            return
+        archived = self.conversation.archived_at is None
+        try:
+            updated = await self.api.set_archived(self.conversation.id, archived)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return
+        self._sync_conversation(updated)
+        # An archived conversation leaves the slice the sidebar shows (and an
+        # unarchived one returns to it), so the list is read again.
+        await self.refresh_conversations()
+        self.notify("Archived." if archived else "Unarchived.")
+
+    def action_delete_conversation(self) -> None:
+        if self.conversation is None:
+            return
+        target = self.conversation
+
+        def chosen(confirmation: bool | None) -> None:
+            if confirmation:
+                self.apply_delete(target.id)
+
+        self.push_screen(Confirm(f"Delete “{target.title}”? This cannot be undone."), chosen)
+
+    @work(group="action")
+    async def apply_delete(self, conversation_id: str) -> None:
+        try:
+            await self.api.delete_conversation(conversation_id)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return
+        if self.conversation is not None and self.conversation.id == conversation_id:
+            if self.streaming:
+                self._detach_turn()
+            self.conversation = None
+            self.thread = Thread()
+            self.editing = None
+            self.live = None
+            await self.render_thread()
+        self.conversations = [c for c in self.conversations if c.id != conversation_id]
+        view = self.query_one("#conversations", ListView)
+        await view.clear()
+        await view.extend([ConversationItem(c) for c in self.conversations])
+        self.notify("Deleted.")
+        self.render_status()
+
+    @work(group="action")
+    async def action_fork(self) -> None:
+        if self.conversation is None or self.streaming:
+            return
+        message = self.selected_message() or self.thread.messages.get(self.thread.leaf or "")
+        if message is None:
+            self.notify("Nothing to fork yet.")
+            return
+        try:
+            forked = await self.api.fork_conversation(self.conversation.id, message.id)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return
+        await self.refresh_conversations()
+        await self.open_conversation(forked.id)
+        self.notify(f"Forked as “{forked.title}”.")
+
+    @work(group="action")
+    async def action_share(self) -> None:
+        if self.conversation is None:
+            return
+        try:
+            url = await self.api.share_conversation(self.conversation.id)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return
+        self.notify(f"Share link: {url}")
+
+    @work(group="action")
+    async def action_export_markdown(self) -> None:
+        if self.conversation is None:
+            return
+        conversation, thread = self.conversation, self.thread
+        path = Path.cwd() / export_filename(conversation)
+        document = conversation_markdown(conversation, thread)
+
+        def write() -> None:
+            path.write_text(document, encoding="utf-8")
+
+        try:
+            await asyncio.to_thread(write)
+        except OSError as exc:
+            self.notify(f"Could not write {path.name}: {exc}", severity="error")
+            return
+        self.notify(f"Exported to {path}")
+
+    def action_attach(self) -> None:
+        def chosen(path_text: str | None) -> None:
+            if path_text:
+                self.apply_attach(path_text)
+
+        self.push_screen(Prompt("Attach a file (its path):"), chosen)
+
+    @work(group="action")
+    async def apply_attach(self, path_text: str) -> None:
+        try:
+            data, filename = await asyncio.to_thread(_read_attachment, path_text)
+        except OSError as exc:
+            self.notify(f"Could not read {path_text}: {exc}", severity="error")
+            return
+        conversation_id = self.conversation.id if self.conversation else None
+        try:
+            attachment = await self.api.upload_attachment(
+                data, filename, conversation_id=conversation_id
+            )
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return
+        self.pending_attachments.append(attachment)
+        self.notify(f"Attached {attachment.filename}.")
+        self.render_status()
+
+    @work(group="action")
+    async def action_cycle_filter(self) -> None:
+        index = LIST_FILTERS.index(self.list_filter)
+        self.list_filter = LIST_FILTERS[(index + 1) % len(LIST_FILTERS)]
+        await self.refresh_conversations()
+        self.notify(f"Showing {self.list_filter} conversations.")
 
     # --- the stream --------------------------------------------------------------
 

@@ -213,3 +213,130 @@ async def test_the_picker_routes_go_through_the_same_client_as_the_tui():
     # The TUI names itself on the wire, ahead of the SDK it is built on.
     assert all(r.headers["user-agent"].startswith("matterwave-tui/") for r in seen)
     assert all("matterwave-python/" in r.headers["user-agent"] for r in seen)
+
+
+PINNED = {**CONV, "pinned_at": "2026-10-27T00:00:00Z"}
+ARCHIVED = {**CONV, "archived_at": "2026-10-27T00:00:00Z"}
+USAGE = {
+    "unit": "tokens", "used": 1234, "included": 100000, "remaining": 98766,
+    "percent": 1.234, "warn": False, "in_overage": False, "exhausted": False,
+    "period_start": "2026-10-01", "resets_at": "2026-11-01",
+    "plan": {"name": "Free"}, "overage": {},
+}
+
+
+@pytest.mark.asyncio
+async def test_rename_pin_and_archive_take_their_routes():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        path, method = request.url.path, request.method
+        if method == "PATCH":
+            return httpx.Response(200, json={**CONV, "title": json.loads(request.content)["title"]})
+        if path == "/api/conversations/c1/pin":
+            return httpx.Response(200, json=PINNED if method == "POST" else CONV)
+        if path == "/api/conversations/c1/archive":
+            return httpx.Response(200, json=ARCHIVED if method == "POST" else CONV)
+        return httpx.Response(404, json={"detail": path})
+
+    api = make(handler)
+    renamed = await api.rename_conversation("c1", "New name")
+    assert renamed.title == "New name"
+    pinned = await api.set_pinned("c1", True)
+    assert pinned.pinned_at == "2026-10-27T00:00:00Z"
+    unpinned = await api.set_pinned("c1", False)
+    assert unpinned.pinned_at is None
+    archived = await api.set_archived("c1", True)
+    assert archived.archived_at == "2026-10-27T00:00:00Z"
+    unarchived = await api.set_archived("c1", False)
+    assert unarchived.archived_at is None
+    assert [(r.method, r.url.path) for r in seen] == [
+        ("PATCH", "/api/conversations/c1"),
+        ("POST", "/api/conversations/c1/pin"),
+        ("DELETE", "/api/conversations/c1/pin"),
+        ("POST", "/api/conversations/c1/archive"),
+        ("DELETE", "/api/conversations/c1/archive"),
+    ]
+    assert json.loads(seen[0].content) == {"title": "New name"}
+
+
+@pytest.mark.asyncio
+async def test_a_delete_is_a_bare_write_that_is_never_retried():
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        assert (request.method, request.url.path) == ("DELETE", "/api/conversations/c1")
+        return httpx.Response(503, json={"detail": "busy"})
+
+    with pytest.raises(ServerError):
+        await make(handler).delete_conversation("c1")
+    assert calls == 1
+
+    def gone(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(204)
+
+    await make(gone).delete_conversation("c1")
+
+
+@pytest.mark.asyncio
+async def test_fork_share_and_usage_go_through_the_sdk():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        path = request.url.path
+        if path == "/api/conversations/c1/fork":
+            return httpx.Response(200, json={**CONV, "id": "c2", "title": "Fork"})
+        if path == "/api/conversations/c1/share":
+            return httpx.Response(
+                200, json={"share": {"id": "s1"}, "token": "tok", "path": "/share/tok"}
+            )
+        if path == "/api/me/usage":
+            return httpx.Response(200, json=USAGE)
+        return httpx.Response(404, json={"detail": path})
+
+    api = make(handler)
+    forked = await api.fork_conversation("c1", "m1")
+    assert (forked.id, forked.title) == ("c2", "Fork")
+    assert json.loads(seen[0].content) == {"message_id": "m1"}
+    assert seen[0].url.path == "/api/conversations/c1/fork"
+    assert await api.share_conversation("c1") == BASE + "/share/tok"
+    balance = await api.usage()
+    assert (balance.used, balance.included, balance.percent) == (1234, 100000, 1.234)
+
+
+@pytest.mark.asyncio
+async def test_an_attachment_is_uploaded_as_multipart():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert (request.method, request.url.path) == ("POST", "/api/attachments")
+        assert request.url.params["conversation_id"] == "c1"
+        body = request.content.decode("utf-8", "replace")
+        assert "picture.png" in body and "PNGDATA" in body
+        return httpx.Response(
+            200,
+            json={"id": "att1", "filename": "picture.png", "content_type": "image/png",
+                  "size_bytes": 7, "scan_status": "clean", "created_at": "1"},
+        )
+
+    attachment = await make(handler).upload_attachment(b"PNGDATA", "picture.png", "c1")
+    assert attachment.id == "att1"
+    assert attachment.content_type == "image/png"
+
+
+DONE_ONLY = 'event: done\ndata: {"id": "a1", "role": "assistant", "truncated": false}\n\n'
+
+
+@pytest.mark.asyncio
+async def test_send_names_the_attachments_on_the_wire():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {
+            "content": "look", "model": "grt-nano", "attachment_ids": ["att1"],
+        }
+        return sse(200, DONE_ONLY, 1)
+
+    items = [i async for i in make(handler).send("c1", "look", "grt-nano",
+                                                 attachment_ids=["att1"])]
+    assert isinstance(items[-1], fr.DoneFrame)

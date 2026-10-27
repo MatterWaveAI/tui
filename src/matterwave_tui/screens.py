@@ -1,4 +1,5 @@
-"""Modal screens: the model picker and the in-app device sign-in."""
+"""Modal screens: the model picker, the in-app device sign-in, and the
+one-line prompt and yes/no the conversation actions share."""
 
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import ModalScreen
-from textual.widgets import OptionList, Static
+from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from .auth import DeviceCode, LoginError
@@ -61,6 +62,66 @@ class ModelPicker(ModalScreen[str | None]):
 
 
 DeviceLoginFn = Callable[[Callable[[DeviceCode], None]], Awaitable[str]]
+
+
+class Prompt(ModalScreen[str | None]):
+    """One line of text: a new title, a file's path to attach. Enter hands
+    the value back, Esc hands back None."""
+
+    BINDINGS = [Binding("escape", "dismiss_none", "Cancel")]
+    DEFAULT_CSS = """
+    Prompt { align: center middle; }
+    Prompt > Vertical { width: 60; height: auto; border: round $accent;
+        background: $surface; padding: 1 2; }
+    """
+
+    def __init__(self, title: str, text: str = "") -> None:
+        super().__init__()
+        self.title_text = title
+        self.initial = text
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(self.title_text, markup=False)
+            yield Input(value=self.initial, id="prompt-input")
+
+    def on_mount(self) -> None:
+        self.query_one("#prompt-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value.strip() or None)
+
+    def action_dismiss_none(self) -> None:
+        self.dismiss(None)
+
+
+class Confirm(ModalScreen[bool]):
+    """A destructive action's yes or no. Enter or y confirms, Esc or n cancels."""
+
+    BINDINGS = [
+        Binding("escape,n", "no", "Cancel"),
+        Binding("enter,y", "yes", "Confirm"),
+    ]
+    DEFAULT_CSS = """
+    Confirm { align: center middle; }
+    Confirm > Vertical { width: 60; height: auto; border: round $error;
+        background: $surface; padding: 1 2; }
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__()
+        self.message = message
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(self.message, markup=False)
+            yield Static("Enter confirms, Esc cancels.", classes="hint", markup=False)
+
+    def action_yes(self) -> None:
+        self.dismiss(True)
+
+    def action_no(self) -> None:
+        self.dismiss(False)
 
 
 class DeviceLogin(ModalScreen[str | None]):

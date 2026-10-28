@@ -10,12 +10,19 @@ import pytest
 from matterwave_sdk import frames as fr
 from matterwave_sdk.errors import APIError, RateLimitError
 from matterwave_sdk.models import Conversation
-from textual.widgets import ListView, Markdown, Static, TextArea
+from textual.widgets import Collapsible, Input, ListView, Markdown, Static, TextArea
 
 from matterwave_tui.api import Cut, HttpChatAPI, Opened, StreamItem
-from matterwave_tui.app import MatterWaveApp
+from matterwave_tui.app import TEMPORARY_NOTICE, MatterWaveApp
 from matterwave_tui.auth import DeviceCode
-from matterwave_tui.screens import Confirm, DeviceLogin, ModelPicker, Prompt
+from matterwave_tui.screens import (
+    Confirm,
+    DeviceLogin,
+    FeedbackDialog,
+    InstructionsEditor,
+    ModelPicker,
+    Prompt,
+)
 from matterwave_tui.widgets import DividerView, MessageView
 
 from .fake_api import FakeAPI, conversation, happy_script, message
@@ -73,6 +80,8 @@ def json_routes(request: httpx.Request) -> httpx.Response | None:
         return httpx.Response(200, json={**CONV, "messages": []})
     if path == "/api/conversations/c1/context":
         return httpx.Response(404, json={"detail": "Not Found"})
+    if path == "/api/conversations/c1/feedback":
+        return httpx.Response(200, json={"data": []})
     if path == "/api/me/usage":
         return httpx.Response(404, json={"detail": "Not Found"})
     return None
@@ -682,8 +691,9 @@ async def test_export_writes_the_active_path_as_markdown(tmp_path, monkeypatch):
         assert len(files) == 1
         text = files[0].read_text(encoding="utf-8")
         assert text.startswith("# New chat")
+        assert "Exported from MatterWave on " in text
         assert "## You" in text and "What is TUI?" in text
-        assert "## Assistant · grt-nano" in text and "A terminal UI." in text
+        assert "## Assistant (grt-nano)" in text and "A terminal UI." in text
 
 
 @pytest.mark.asyncio
@@ -720,3 +730,193 @@ async def test_the_status_line_shows_the_usage_balance():
         app.usage_balance = replace(app.usage_balance, exhausted=True)
         app.render_status()
         assert "budget used up" in status(app)
+
+
+@pytest.mark.asyncio
+async def test_a_new_chat_offers_the_temporary_toggle_before_anything_is_sent():
+    api = FakeAPI()
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        # Esc first: a regular chat, as before.
+        await pilot.press("escape", "n")
+        await settle(app, pilot)
+        assert isinstance(app.screen, Confirm)
+        await pilot.press("n")
+        await settle(app, pilot)
+        assert api.creates == [(None, None, False)]
+        assert app.conversation is not None and app.conversation.id == "c2"
+        assert not app.temporary_chat
+        assert not isinstance(app.screen, Confirm)
+
+        # Enter this time: a temporary chat, created with the flag on.
+        await pilot.press("escape", "n")
+        await settle(app, pilot)
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.creates[-1] == (None, None, True)
+        assert app.temporary_chat
+        assert TEMPORARY_NOTICE in str(app.query_one("#temporary", Static).render())
+        # The server keeps it out of every list, so the sidebar has neither.
+        assert [c.id for c in app.conversations] == ["c1"]
+        # Share and fork are not commands while the temporary chat is open.
+        assert app.check_action("share", ()) is False
+        assert app.check_action("fork", ()) is False
+        await pilot.press("s")
+        await settle(app, pilot)
+        await pilot.press("f")
+        await settle(app, pilot)
+        assert api.shares == [] and api.forks == []
+        # Pin reaches the server and its 409 detail is the message.
+        await pilot.press("p")
+        await settle(app, pilot)
+        assert any("cannot be pinned" in s for s in shown)
+        assert app.failure is None
+
+        # Opening another conversation ends the temporary state.
+        await app.open_conversation("c1")
+        await settle(app, pilot)
+        assert not app.temporary_chat
+        assert app.check_action("share", ()) is True
+
+
+@pytest.mark.asyncio
+async def test_the_instructions_editor_saves_the_thread_prompt():
+    api = FakeAPI()
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("escape", "t")
+        await settle(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, InstructionsEditor)
+        area = editor.query_one("#instructions", TextArea)
+        assert area.text == ""
+        counter = editor.query_one("#instructions-count", Static)
+        assert "0 / 2000" in str(counter.render())
+        # The effective instructions from the conversation GET are the reference.
+        assert "Be brief." in str(app.screen.query(Collapsible).first().query_one(Static).render())
+        await pilot.press(*"Be terse.")
+        assert "9 / 2000" in str(counter.render())
+        await pilot.press("ctrl+t")
+        await settle(app, pilot)
+        assert api.instructions_puts == [("c1", "Be terse.")]
+        assert "Instructions saved." in shown
+        assert not isinstance(app.screen, InstructionsEditor)
+
+        # The editor opens on the text as the server now holds it.
+        await pilot.press("escape", "t")
+        await settle(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, InstructionsEditor)
+        assert editor.query_one("#instructions", TextArea).text == "Be terse."
+
+
+@pytest.mark.asyncio
+async def test_thumbs_rate_and_withdraw_a_reply():
+    api = FakeAPI()
+    api.tree_messages = [
+        message("u1", "user", "q"),
+        message("a1", "assistant", "one", parent="u1", created_at="2"),
+    ]
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        views = app.query(MessageView)
+        assert len(views) == 2
+        # Only the assistant reply carries thumbs.
+        assert not views.first().query("#thumb-up")
+        up = views.last().query_one("#thumb-up")
+        await pilot.click("#thumb-up")
+        await settle(app, pilot)
+        assert api.feedback_puts == [("a1", 1, [], None)]
+        assert up.has_class("active")
+        assert "Feedback sent." in shown
+        # The same thumb again withdraws.
+        await pilot.click("#thumb-up")
+        await settle(app, pilot)
+        assert api.feedback_deletes == ["a1"]
+        assert not up.has_class("active")
+        assert "Feedback withdrawn." in shown
+
+
+@pytest.mark.asyncio
+async def test_feedback_is_restored_on_open_and_the_dialog_edits_reasons():
+    api = FakeAPI()
+    api.tree_messages = [
+        message("u1", "user", "q"),
+        message("a1", "assistant", "one", parent="u1", created_at="2"),
+    ]
+    api.feedback_rows = [
+        {"message_id": "a1", "rating": -1, "reasons": ["wrong"], "comment": "no"}
+    ]
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        # Rehydrated from GET /api/conversations/c1/feedback.
+        assert app.query(MessageView).last().query_one("#thumb-down").has_class("active")
+
+        await pilot.press("escape", "b")
+        await settle(app, pilot)
+        dialog = app.screen
+        assert isinstance(dialog, FeedbackDialog)
+        assert dialog.query_one("#feedback-reasons", Input).value == "wrong"
+        assert dialog.query_one("#feedback-comment", TextArea).text == "no"
+        # An unknown reason is refused in place; the dialog stays open.
+        reasons = dialog.query_one("#feedback-reasons", Input)
+        reasons.value = "wrong, nonsense"
+        await pilot.press("ctrl+t")
+        await settle(app, pilot)
+        assert isinstance(app.screen, FeedbackDialog)
+        assert any("nonsense" in s for s in shown)
+        reasons.value = "wrong, unhelpful"
+        await pilot.press("ctrl+t")
+        await settle(app, pilot)
+        assert api.feedback_puts == [("a1", -1, ["wrong", "unhelpful"], "no")]
+        assert "Feedback sent." in shown
+        assert not isinstance(app.screen, FeedbackDialog)
+
+
+@pytest.mark.asyncio
+async def test_an_image_is_refused_when_the_model_cannot_see_and_a_document_is_not(
+    tmp_path, monkeypatch
+):
+    api = FakeAPI()
+    api.models_payload = [
+        {"id": "grt-nano", "label": "GRT Nano", "supports_vision": False},
+        {"id": "grt-see", "label": "GRT See", "supports_vision": True},
+        {"id": "grt-too", "label": "GRT Too", "supports_vision": True},
+        {"id": "grt-three", "label": "GRT Three", "supports_vision": True},
+        {"id": "grt-four", "label": "GRT Four", "supports_vision": True},
+        {"id": "mystery", "label": "Mystery"},
+    ]
+    monkeypatch.chdir(tmp_path)
+    picture = tmp_path / "picture.png"
+    picture.write_bytes(b"PNGDATA")
+    (tmp_path / "notes.txt").write_bytes(b"notes")
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+
+        def attach(name: str) -> None:
+            app.apply_attach(name)
+
+        attach("picture.png")
+        await settle(app, pilot)
+        assert api.uploads == []
+        message = shown[-1]
+        assert "grt-nano cannot read images" in message
+        # Up to three vision-capable ids, and no more.
+        assert "grt-see, grt-too, grt-three" in message
+        assert "grt-four" not in message
+
+        # A model the list does not know, and a non-image, both go through.
+        app.model = "mystery"
+        attach("notes.txt")
+        await settle(app, pilot)
+        assert [name for name, _ in api.uploads] == ["notes.txt"]

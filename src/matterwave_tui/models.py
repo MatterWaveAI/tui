@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from matterwave_sdk.models import vision_of
+
 # The web picker's headings (web/src/lib/billing.ts, ModelPicker.tsx).
 GRT_HEADING = "GRT models"
 PARTNER_HEADING = "Partner models"
@@ -88,3 +90,40 @@ def model_window(models: list[dict[str, Any]], model_id: str | None) -> int | No
             window = model.get("context_window")
             return window if isinstance(window, int) else None
     return None
+
+
+# --- vision ---------------------------------------------------------------------
+#
+# Which models accept images, from the same `GET /api/models` rows the
+# picker reads. The tri-state is the API's `supports_vision`:
+# true | false | null, where null (and a model the list does not name)
+# means the gateway did not say, which is not a refusal.
+
+
+def model_accepts_images(models: list[dict[str, Any]], model_id: str | None) -> bool:
+    """Whether an image may be attached while `model_id` is the model. Only
+    an explicit `supports_vision: false` refuses; the server's 422 stays
+    the backstop for everything the list does not settle."""
+    return vision_of(models, model_id) != "no"
+
+
+def vision_capable_model_ids(models: list[dict[str, Any]], limit: int = 3) -> list[str]:
+    """Up to `limit` model ids the list marks as vision-capable, in the
+    order the API gave them."""
+    return [
+        str(model["id"])
+        for model in models
+        if model.get("supports_vision") is True and model.get("id")
+    ][:limit]
+
+
+IMAGE_SUFFIXES = frozenset(
+    {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic", ".heif", ".avif", ".tif", ".tiff"}
+)
+
+
+def is_image_filename(filename: str) -> bool:
+    """Whether an upload of this name would be an image, which is what the
+    vision gate asks before it refuses one."""
+    dot = filename.rfind(".")
+    return dot >= 0 and filename[dot:].lower() in IMAGE_SUFFIXES

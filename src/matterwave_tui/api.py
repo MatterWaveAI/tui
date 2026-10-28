@@ -5,14 +5,15 @@ The wire is the SDK's: `AsyncMatterWave.conversations` for the routes, its
 by `Last-Event-ID`), its errors with the request id on them. What stays here
 is the TUI's own policy: a 401 is answered once with a fresh credential
 before it stands, a write is never retried, and the routes the SDK has no
-method for yet (`/api/models` and the conversation delete, pin and archive
-routes) go through the same client.
+usable method for yet (`/api/models`, the conversation delete, pin and
+archive routes, the per-conversation feedback list and the library's
+folders and tags) go through the same client.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import quote
@@ -29,6 +30,8 @@ from matterwave_sdk.models import (
     ConversationContext,
     ConversationMessage,
     Me,
+    MessageFeedback,
+    RemovedFeedback,
     UsageBalance,
 )
 
@@ -72,7 +75,7 @@ class ChatAPI(Protocol):
     async def search_conversations(self, query: str) -> list[Conversation]: ...
 
     async def create_conversation(
-        self, title: str | None = None, model: str | None = None
+        self, title: str | None = None, model: str | None = None, temporary: bool = False
     ) -> Conversation: ...
 
     async def tree(self, conversation_id: str) -> Conversation: ...
@@ -94,6 +97,24 @@ class ChatAPI(Protocol):
     ) -> Conversation: ...
 
     async def share_conversation(self, conversation_id: str) -> str: ...
+
+    async def conversation_instructions(self, conversation_id: str) -> dict[str, Any]: ...
+
+    async def set_conversation_instructions(
+        self, conversation_id: str, text: str | None
+    ) -> dict[str, Any]: ...
+
+    async def set_feedback(
+        self,
+        message_id: str,
+        rating: int,
+        reasons: Sequence[str] = (),
+        comment: str | None = None,
+    ) -> MessageFeedback: ...
+
+    async def delete_feedback(self, message_id: str) -> RemovedFeedback: ...
+
+    async def conversation_feedback(self, conversation_id: str) -> list[dict[str, Any]]: ...
 
     async def usage(self) -> UsageBalance: ...
 
@@ -244,9 +265,22 @@ class HttpChatAPI:
         return [hit.conversation for hit in hits.data]
 
     async def create_conversation(
-        self, title: str | None = None, model: str | None = None
+        self, title: str | None = None, model: str | None = None, temporary: bool = False
     ) -> Conversation:
-        return await self._writes.conversations.create(title=title, model=model)
+        """`POST /api/conversations`. `temporary` is fixed at creation and
+        the key is sent only when it is on; the SDK's `create` has no
+        `temporary` yet, so that one goes through the raw client."""
+        if not temporary:
+            return await self._writes.conversations.create(title=title, model=model)
+        body: dict[str, Any] = {}
+        if title is not None:
+            body["title"] = title
+        if model is not None:
+            body["model"] = model
+        body["temporary"] = True
+        return Conversation.from_dict(
+            await self._app_json(self._writes, "POST", _path("conversations"), body)
+        )
 
     async def tree(self, conversation_id: str) -> Conversation:
         return await self._reads.conversations.tree(conversation_id)
@@ -302,6 +336,50 @@ class HttpChatAPI:
         created = await self._writes.shares.create(conversation_id)
         return str(self._reads.base_url).rstrip("/") + created.path
 
+    async def conversation_instructions(self, conversation_id: str) -> dict[str, Any]:
+        """The instruction levels in force for the thread, from
+        `GET /api/conversations/{id}`: `org`, `user`, `conversation`,
+        `user_overridden` and `effective` (the text the model is sent)."""
+        conversation = await self._reads.conversations.get(conversation_id)
+        return conversation.instructions or {}
+
+    async def set_conversation_instructions(
+        self, conversation_id: str, text: str | None
+    ) -> dict[str, Any]:
+        """`PUT /api/conversations/{id}/instructions`: the thread's own
+        prompt, 2000 characters at most. None or "" clears it, so the
+        user's instructions apply again; the answer carries the levels
+        now in force. A write: no retries."""
+        updated = await self._writes.conversations.update_instructions(conversation_id, text)
+        return updated.instructions or {}
+
+    async def set_feedback(
+        self,
+        message_id: str,
+        rating: int,
+        reasons: Sequence[str] = (),
+        comment: str | None = None,
+    ) -> MessageFeedback:
+        """`PUT /api/messages/{id}/feedback`: rate a reply 1 or -1. A
+        second rating for the same message replaces the first."""
+        return await self._writes.messages.set_feedback(
+            message_id, rating, reasons=reasons, comment=comment
+        )
+
+    async def delete_feedback(self, message_id: str) -> RemovedFeedback:
+        """`DELETE /api/messages/{id}/feedback`: withdraw a rating."""
+        return await self._writes.messages.delete_feedback(message_id)
+
+    async def conversation_feedback(self, conversation_id: str) -> list[dict[str, Any]]:
+        """`GET /api/conversations/{id}/feedback`: the caller's own ratings
+        in the thread, to mark the transcript with when it opens. The SDK
+        has no method for the route yet."""
+        body = await self._app_json(
+            self._reads, "GET", _path("conversations", conversation_id, "feedback")
+        )
+        rows = body.get("data")
+        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
     async def usage(self) -> UsageBalance:
         """`GET /api/me/usage` by way of the SDK: the org's balance this
         period, for the status line."""
@@ -320,6 +398,45 @@ class HttpChatAPI:
 
     async def compact(self, conversation_id: str) -> ConversationMessage:
         return await self._writes.conversations.compact(conversation_id)
+
+    # --- the library (folders and tags): adapters only, no UI yet -------------
+
+    async def library(self) -> dict[str, Any]:
+        """`GET /api/library`: the caller's folders, tags and which
+        conversation carries which tag. The SDK's `Tag` model does not
+        survive its own `from_dict` yet, so the raw answer is kept."""
+        return await self._app_json(self._reads, "GET", _path("library"))
+
+    async def create_folder(self, name: str) -> dict[str, Any]:
+        """`POST /api/library/folders`. A write: no retries."""
+        return await self._app_json(
+            self._writes, "POST", _path("library", "folders"), {"name": name}
+        )
+
+    async def move_to_folder(self, conversation_id: str, folder_id: str | None) -> None:
+        """`PUT /api/library/conversations/{id}/folder`; None files the
+        conversation back in the main list. The key is always sent."""
+        await self._app_none(
+            self._writes,
+            "PUT",
+            _path("library", "conversations", conversation_id, "folder"),
+            {"folder_id": folder_id},
+        )
+
+    async def create_tag(self, name: str) -> dict[str, Any]:
+        """`POST /api/library/tags`: the tag of that name, made now or
+        already there. A write: no retries."""
+        return await self._app_json(self._writes, "POST", _path("library", "tags"), {"name": name})
+
+    async def set_tags(self, conversation_id: str, tag_ids: Sequence[str]) -> dict[str, Any]:
+        """`PUT /api/library/conversations/{id}/tags`: the conversation's
+        tags become exactly these."""
+        return await self._app_json(
+            self._writes,
+            "PUT",
+            _path("library", "conversations", conversation_id, "tags"),
+            {"tag_ids": list(tag_ids)},
+        )
 
     def send(
         self,

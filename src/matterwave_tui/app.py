@@ -22,10 +22,18 @@ from textual.widgets import Footer, Input, Label, ListItem, ListView, Static, Te
 from .api import ChatAPI, Cut, Opened, StreamItem
 from .export import conversation_markdown, export_filename
 from .failures import Failure, classify, retry_in
-from .models import model_window
-from .screens import Confirm, DeviceLogin, DeviceLoginFn, ModelPicker, Prompt
+from .models import is_image_filename, model_accepts_images, model_window, vision_capable_model_ids
+from .screens import (
+    Confirm,
+    DeviceLogin,
+    DeviceLoginFn,
+    FeedbackDialog,
+    InstructionsEditor,
+    ModelPicker,
+    Prompt,
+)
 from .thread import Divider, Message, Thread
-from .widgets import DividerView, MessageView
+from .widgets import DividerView, MessageView, ThumbClicked
 
 # How often a stream redraws the answer in progress. A redraw per delta is
 # hundreds a second on a fast model and buys nothing a person can see.
@@ -38,6 +46,11 @@ LIVE_ID = "_live"
 # archived ones are only reachable here, which is what makes unarchiving
 # possible at all.
 LIST_FILTERS = ("default", "pinned", "archived", "all")
+# What a temporary chat is, in one line, shown while one is open.
+TEMPORARY_NOTICE = (
+    "Temporary chat. It won't appear in your history or search, can't be shared, "
+    "and is deleted 24 hours after the last message."
+)
 
 
 def estimate_tokens(text: str) -> int:
@@ -124,6 +137,8 @@ class MatterWaveApp(App[None]):
     #transcript { height: 1fr; padding: 0 1; }
     #failure { display: none; background: $error 20%; color: $text; padding: 0 1; }
     #failure.shown { display: block; }
+    #temporary { display: none; background: $warning 20%; color: $text; padding: 0 1; }
+    #temporary.shown { display: block; }
     #composer { height: 6; border: round $panel; }
     #composer:focus { border: round $accent; }
     #status { height: 1; background: $panel; color: $text-muted; padding: 0 1; }
@@ -139,6 +154,8 @@ class MatterWaveApp(App[None]):
         Binding("right_square_bracket", "branch(1)", "Next branch"),
         Binding("x", "toggle_originals", "Originals"),
         Binding("c", "compact", "Compact"),
+        Binding("t", "instructions", "Instructions"),
+        Binding("b", "feedback", "Feedback"),
         Binding("f2", "rename", "Rename"),
         Binding("p", "toggle_pin", "Pin"),
         Binding("a", "toggle_archive", "Archive"),
@@ -180,6 +197,11 @@ class MatterWaveApp(App[None]):
         self.usage_balance: UsageBalance | None = None
         # Files uploaded but not sent yet; their ids go with the next turn.
         self.pending_attachments: list[Attachment] = []
+        # The open conversation is temporary: created so in this session, so
+        # no share or fork, and a notice standing in for the usual history.
+        self.temporary_chat = False
+        # The caller's own ratings in the open conversation, by message id.
+        self.feedback: dict[str, dict[str, Any]] = {}
         # Which slice of the conversations the sidebar shows.
         self.list_filter = "default"
         # When the server's `Retry-After` runs out, on the monotonic clock.
@@ -196,6 +218,7 @@ class MatterWaveApp(App[None]):
             with Vertical(id="main"):
                 yield Transcript(id="transcript")
                 yield Static("", id="failure", markup=False)
+                yield Static("", id="temporary", markup=False)
                 yield TextArea(id="composer", placeholder="Message… (Ctrl+Enter sends)")
                 yield Static("", id="status", markup=False)
         yield Footer()
@@ -287,6 +310,27 @@ class MatterWaveApp(App[None]):
             self.show_failure(Failure(kind, exc.request_id, retry_after=exc.retry_after))
         else:
             self.show_failure(Failure("unknown", None))
+
+    # --- temporary chat ---------------------------------------------------------
+
+    def set_temporary_chat(self, temporary: bool) -> None:
+        """Marks the open conversation temporary (or not) and re-derives
+        everything that depends on it: the notice and the share/fork keys."""
+        self.temporary_chat = temporary
+        banner = self.query_one("#temporary", Static)
+        if temporary:
+            banner.update(TEMPORARY_NOTICE)
+            banner.add_class("shown")
+        else:
+            banner.remove_class("shown")
+            banner.update("")
+        # The key panel hides a command whose action just stopped existing.
+        self.refresh_bindings()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Share and fork do not exist for a temporary conversation: while
+        one is open the keys are dead and the commands off the footer."""
+        return not (self.temporary_chat and action in ("share", "fork"))
 
     def go_offline(self) -> None:
         if self.connection != "offline":
@@ -391,11 +435,17 @@ class MatterWaveApp(App[None]):
         self.thread = Thread.from_tree(tree.messages, tree.current_leaf_message_id)
         self.model = tree.default_model or self.model
         self.editing = None
+        self.feedback = {}
+        # A conversation read from the list is never the temporary one that
+        # was just created: the server keeps those out of every list and
+        # every search, so only the creation itself can open one.
+        self.set_temporary_chat(False)
         self.show_failure(None)
         composer.text = self.drafts.get(conversation_id, "")
         self.context_used, self.context_window = None, None
         await self.render_thread()
         self.load_context(conversation_id)
+        self.load_feedback(conversation_id)
         self.render_status()
 
     @work(group="context", exclusive=True)
@@ -419,7 +469,10 @@ class MatterWaveApp(App[None]):
             if isinstance(item, Divider):
                 widgets.append(DividerView(item))
             else:
-                widgets.append(MessageView(item, position=self.thread.position(item)))
+                widgets.append(
+                    MessageView(item, position=self.thread.position(item),
+                                feedback=self.feedback.get(item.id))
+                )
         if self.live is not None:
             widgets.append(MessageView(self.live, streaming=True))
         await transcript.mount_all(widgets)
@@ -456,16 +509,38 @@ class MatterWaveApp(App[None]):
     def action_search(self) -> None:
         self.query_one("#search", Input).focus()
 
+    def action_new(self) -> None:
+        """A new chat. Temporary is decided here or not at all: the flag is
+        fixed at creation and no route flips it afterwards."""
+
+        def chosen(temporary: bool | None) -> None:
+            self._new_conversation(bool(temporary))
+
+        self.push_screen(
+            Confirm(
+                "Start a temporary chat? It won't appear in your history or search, can't be "
+                "shared, and is deleted 24 hours after the last message.",
+                danger=False,
+                hint="Enter = temporary, Esc = a regular chat.",
+            ),
+            chosen,
+        )
+
     @work(group="action")
-    async def action_new(self) -> None:
+    async def _new_conversation(self, temporary: bool) -> None:
         try:
-            conv = await self.api.create_conversation(model=self.model)
+            conv = await self.api.create_conversation(temporary=temporary)
         except Exception as exc:
             self.fail_from_exception(exc)
             return
-        await self.refresh_conversations()
+        # The sidebar is the server's list, and the server keeps a temporary
+        # conversation out of every one of them, so the creation itself adds
+        # nothing there (web/src/shell/useShellState.ts never inserts it
+        # either). The next refresh reads whatever the server now lists.
+        # Focus stays where it was: an empty thread has nothing to read, and
+        # the conversation keys stay live for the chat just opened.
         await self.open_conversation(conv.id)
-        self.query_one("#composer", TextArea).focus()
+        self.set_temporary_chat(temporary)
 
     @work(group="action")
     async def action_pick_model(self) -> None:
@@ -653,6 +728,11 @@ class MatterWaveApp(App[None]):
         pinned = self.conversation.pinned_at is None
         try:
             updated = await self.api.set_pinned(self.conversation.id, pinned)
+        except ConflictError as exc:
+            # A temporary conversation cannot be kept, the server says why;
+            # the detail is the message, not a failure banner.
+            self.notify(exc.message or "This conversation cannot be pinned.")
+            return
         except Exception as exc:
             self.fail_from_exception(exc)
             return
@@ -718,6 +798,9 @@ class MatterWaveApp(App[None]):
             return
         try:
             forked = await self.api.fork_conversation(self.conversation.id, message.id)
+        except ConflictError as exc:
+            self.notify(exc.message or "This conversation cannot be forked.")
+            return
         except Exception as exc:
             self.fail_from_exception(exc)
             return
@@ -731,6 +814,9 @@ class MatterWaveApp(App[None]):
             return
         try:
             url = await self.api.share_conversation(self.conversation.id)
+        except ConflictError as exc:
+            self.notify(exc.message or "This conversation cannot be shared.")
+            return
         except Exception as exc:
             self.fail_from_exception(exc)
             return
@@ -768,6 +854,18 @@ class MatterWaveApp(App[None]):
         except OSError as exc:
             self.notify(f"Could not read {path_text}: {exc}", severity="error")
             return
+        # The vision gate, before the upload: a model the list says cannot
+        # see is told by name, with the ones that can. An unknown model is
+        # allowed through; the server's 422 remains the backstop.
+        model_id = self.model or self.default_model
+        if is_image_filename(filename) and not model_accepts_images(self.models_list, model_id):
+            capable = vision_capable_model_ids(self.models_list)
+            names = ", ".join(capable) if capable else "none of your models"
+            self.notify(
+                f"{model_id or 'This model'} cannot read images. Vision-capable models: {names}.",
+                severity="warning",
+            )
+            return
         conversation_id = self.conversation.id if self.conversation else None
         try:
             attachment = await self.api.upload_attachment(
@@ -786,6 +884,156 @@ class MatterWaveApp(App[None]):
         self.list_filter = LIST_FILTERS[(index + 1) % len(LIST_FILTERS)]
         await self.refresh_conversations()
         self.notify(f"Showing {self.list_filter} conversations.")
+
+    # --- custom instructions -----------------------------------------------------
+
+    @work(group="action")
+    async def action_instructions(self) -> None:
+        """The thread's own instructions: read the levels in force, then edit
+        the conversation's own text against the effective one as reference."""
+        if self.conversation is None:
+            return
+        try:
+            instructions = await self.api.conversation_instructions(self.conversation.id)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return
+        text = instructions.get("conversation")
+        effective = instructions.get("effective")
+
+        def chosen(edited: str | None) -> None:
+            if edited is not None:
+                self.apply_instructions(edited)
+
+        self.push_screen(
+            InstructionsEditor(
+                text if isinstance(text, str) else "",
+                effective=effective if isinstance(effective, str) else None,
+            ),
+            chosen,
+        )
+
+    @work(group="action")
+    async def apply_instructions(self, text: str) -> None:
+        if self.conversation is None:
+            return
+        # "" clears: the thread's prompt is lifted and the user's saved
+        # instructions apply again. Over 2000 characters the server
+        # refuses, and that refusal is what shows.
+        try:
+            await self.api.set_conversation_instructions(self.conversation.id, text or None)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return
+        self.notify("Instructions saved.")
+
+    # --- reply feedback ------------------------------------------------------------
+
+    @work(group="feedback", exclusive=True)
+    async def load_feedback(self, conversation_id: str) -> None:
+        """The caller's own ratings in this conversation, to mark the
+        transcript's thumbs with as it opens."""
+        try:
+            rows = await self.api.conversation_feedback(conversation_id)
+        except Exception:
+            # An API without the route: the transcript opens unmarked.
+            return
+        self.feedback = {
+            str(row.get("message_id") or ""): row for row in rows if row.get("message_id")
+        }
+        await self.render_thread(keep_selection=True)
+
+    @on(ThumbClicked)
+    def _thumb_clicked(self, event: ThumbClicked) -> None:
+        self.toggle_feedback(event.message_id, event.rating)
+
+    def _view_of(self, message_id: str) -> MessageView | None:
+        """The transcript's view of one message, when that message is on the
+        active path."""
+        for widget in self.query_one("#transcript", Transcript).items():
+            if isinstance(widget, MessageView) and widget.message.id == message_id:
+                return widget
+        return None
+
+    async def _show_feedback(self, message_id: str) -> None:
+        """Mark one message's thumbs with the caller's rating: in place when
+        the message is on screen, a transcript rebuild when it is not."""
+        view = self._view_of(message_id)
+        if view is not None and view.message.role == "assistant" and not view.streaming:
+            view.apply_feedback(self.feedback.get(message_id))
+            return
+        await self.render_thread(keep_selection=True)
+
+    @work(group="action")
+    async def toggle_feedback(self, message_id: str, rating: int) -> None:
+        """A thumb click is one vote: the same thumb again takes it back.
+        The PUT carries no reasons — the dialog is where those go."""
+        current = self.feedback.get(message_id)
+        try:
+            if current is not None and current.get("rating") == rating:
+                await self.api.delete_feedback(message_id)
+                self.feedback.pop(message_id, None)
+                self.notify("Feedback withdrawn.")
+            else:
+                await self.api.set_feedback(message_id, rating)
+                self.feedback[message_id] = {
+                    "message_id": message_id,
+                    "rating": rating,
+                    "reasons": [],
+                    "comment": None,
+                }
+                self.notify("Feedback sent.")
+        except ConflictError as exc:
+            self.notify(exc.message or "The rating was not kept.")
+            return
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return
+        await self._show_feedback(message_id)
+
+    def action_feedback(self) -> None:
+        """Reasons and an optional comment for the selected (or last)
+        reply's rating."""
+        message = self.selected_message()
+        if message is None or message.role != "assistant":
+            message = self.thread.last("assistant")
+        if message is None:
+            return
+        row = self.feedback.get(message.id) or {}
+        rating = row.get("rating")
+        reasons = row.get("reasons")
+        comment = row.get("comment")
+
+        def chosen(result: tuple[int, list[str], str | None] | None) -> None:
+            if result is not None:
+                self.apply_feedback(message.id, *result)
+
+        self.push_screen(
+            FeedbackDialog(
+                rating if rating in (-1, 1) else -1,
+                list(reasons) if isinstance(reasons, list) else [],
+                comment if isinstance(comment, str) else "",
+            ),
+            chosen,
+        )
+
+    @work(group="action")
+    async def apply_feedback(
+        self, message_id: str, rating: int, reasons: list[str], comment: str | None
+    ) -> None:
+        try:
+            await self.api.set_feedback(message_id, rating, reasons=reasons, comment=comment)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return
+        self.feedback[message_id] = {
+            "message_id": message_id,
+            "rating": rating,
+            "reasons": list(reasons),
+            "comment": comment,
+        }
+        await self._show_feedback(message_id)
+        self.notify("Feedback sent.")
 
     # --- the stream --------------------------------------------------------------
 

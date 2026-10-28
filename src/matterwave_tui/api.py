@@ -306,17 +306,17 @@ class HttpChatAPI:
         await self._app_none(self._writes, "DELETE", _path("conversations", conversation_id))
 
     async def set_pinned(self, conversation_id: str, pinned: bool) -> Conversation:
-        """`POST` / `DELETE /api/conversations/{id}/pin`, answered with the
+        """`PUT` / `DELETE /api/conversations/{id}/pin`, answered with the
         updated conversation."""
-        method = "POST" if pinned else "DELETE"
+        method = "PUT" if pinned else "DELETE"
         return Conversation.from_dict(
             await self._app_json(self._reads, method, _path("conversations", conversation_id, "pin"))
         )
 
     async def set_archived(self, conversation_id: str, archived: bool) -> Conversation:
-        """`POST` / `DELETE /api/conversations/{id}/archive`, answered with
+        """`PUT` / `DELETE /api/conversations/{id}/archive`, answered with
         the updated conversation."""
-        method = "POST" if archived else "DELETE"
+        method = "PUT" if archived else "DELETE"
         return Conversation.from_dict(
             await self._app_json(
                 self._reads, method, _path("conversations", conversation_id, "archive")

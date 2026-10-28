@@ -235,9 +235,10 @@ async def test_rename_pin_and_archive_take_their_routes():
         if method == "PATCH":
             return httpx.Response(200, json={**CONV, "title": json.loads(request.content)["title"]})
         if path == "/api/conversations/c1/pin":
-            return httpx.Response(200, json=PINNED if method == "POST" else CONV)
+            # The platform registers PUT only: a POST would get a 405.
+            return httpx.Response(200, json=PINNED if method == "PUT" else CONV)
         if path == "/api/conversations/c1/archive":
-            return httpx.Response(200, json=ARCHIVED if method == "POST" else CONV)
+            return httpx.Response(200, json=ARCHIVED if method == "PUT" else CONV)
         return httpx.Response(404, json={"detail": path})
 
     api = make(handler)
@@ -253,9 +254,9 @@ async def test_rename_pin_and_archive_take_their_routes():
     assert unarchived.archived_at is None
     assert [(r.method, r.url.path) for r in seen] == [
         ("PATCH", "/api/conversations/c1"),
-        ("POST", "/api/conversations/c1/pin"),
+        ("PUT", "/api/conversations/c1/pin"),
         ("DELETE", "/api/conversations/c1/pin"),
-        ("POST", "/api/conversations/c1/archive"),
+        ("PUT", "/api/conversations/c1/archive"),
         ("DELETE", "/api/conversations/c1/archive"),
     ]
     assert json.loads(seen[0].content) == {"title": "New name"}

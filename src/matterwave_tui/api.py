@@ -6,8 +6,9 @@ by `Last-Event-ID`), its errors with the request id on them. What stays here
 is the TUI's own policy: a 401 is answered once with a fresh credential
 before it stands, a write is never retried, and the routes the SDK has no
 usable method for yet (`/api/models`, the conversation delete, pin and
-archive routes, the per-conversation feedback list and the library's
-folders and tags) go through the same client.
+archive routes, the per-conversation feedback list, the library's folders
+and tags, and the notifications, announcements, report, share-management
+and budget routes) go through the same client.
 """
 
 from __future__ import annotations
@@ -115,6 +116,26 @@ class ChatAPI(Protocol):
     async def delete_feedback(self, message_id: str) -> RemovedFeedback: ...
 
     async def conversation_feedback(self, conversation_id: str) -> list[dict[str, Any]]: ...
+
+    async def notifications(self) -> dict[str, Any]: ...
+
+    async def read_notification(self, notification_id: str) -> dict[str, Any]: ...
+
+    async def read_all_notifications(self) -> dict[str, Any]: ...
+
+    async def announcements(self) -> dict[str, Any]: ...
+
+    async def report_conversation(
+        self, conversation_id: str, kind: str, note: str | None = None
+    ) -> dict[str, Any]: ...
+
+    async def conversation_shares(self, conversation_id: str) -> list[dict[str, Any]]: ...
+
+    async def my_shares(self) -> list[dict[str, Any]]: ...
+
+    async def revoke_share(self, share_id: str) -> dict[str, Any]: ...
+
+    async def budget(self) -> dict[str, Any]: ...
 
     async def usage(self) -> UsageBalance: ...
 
@@ -379,6 +400,73 @@ class HttpChatAPI:
         )
         rows = body.get("data")
         return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+    async def notifications(self) -> dict[str, Any]:
+        """`GET /api/me/notifications`: the caller's rows, newest first,
+        with the unread count the badge shows."""
+        return await self._app_json(self._reads, "GET", _path("me", "notifications"))
+
+    async def read_notification(self, notification_id: str) -> dict[str, Any]:
+        """`POST /api/me/notifications/{id}/read`: the row with its (first)
+        `read_at`, and the unread count now. A write: no retries."""
+        return await self._app_json(
+            self._writes, "POST", _path("me", "notifications", notification_id, "read")
+        )
+
+    async def read_all_notifications(self) -> dict[str, Any]:
+        """`POST /api/me/notifications/read-all`: how many rows it marked
+        and an unread count of 0. A write: no retries."""
+        return await self._app_json(
+            self._writes, "POST", _path("me", "notifications", "read-all")
+        )
+
+    async def announcements(self) -> dict[str, Any]:
+        """`GET /api/announcements`: the ones inside their window, most
+        severe first; `dismissible` is the operator's, and a critical one
+        is never dismissible."""
+        return await self._app_json(self._reads, "GET", _path("announcements"))
+
+    async def report_conversation(
+        self, conversation_id: str, kind: str, note: str | None = None
+    ) -> dict[str, Any]:
+        """`POST /api/conversations/{id}/report`: `kind` is `unsafe`
+        (routed to review) or `unhelpful` (the product backlog), the note
+        is the reporter's own words, and the answer's id is the one a user
+        quotes to support. A report filed twice would be two queue entries:
+        a write, no retries."""
+        body: dict[str, Any] = {"kind": kind}
+        if note:
+            body["note"] = note
+        return await self._app_json(
+            self._writes, "POST", _path("conversations", conversation_id, "report"), body
+        )
+
+    async def conversation_shares(self, conversation_id: str) -> list[dict[str, Any]]:
+        """`GET /api/conversations/{id}/shares`: the links made for the
+        conversation, newest first."""
+        body = await self._app_json(
+            self._reads, "GET", _path("conversations", conversation_id, "shares")
+        )
+        rows = body.get("data")
+        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+    async def my_shares(self) -> list[dict[str, Any]]:
+        """`GET /api/me/shares`: every link the caller made, the one place
+        to see what is out there and take it back."""
+        body = await self._app_json(self._reads, "GET", _path("me", "shares"))
+        rows = body.get("data")
+        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+    async def revoke_share(self, share_id: str) -> dict[str, Any]:
+        """`DELETE /api/shares/{id}`: the link stops answering. A revoke
+        that lands twice revokes the same nothing, but it is a write: no
+        retries."""
+        return await self._app_json(self._writes, "DELETE", _path("shares", share_id))
+
+    async def budget(self) -> dict[str, Any]:
+        """`GET /api/budget`: the org's allowance and usage with the
+        overage cap in force, for the status line."""
+        return await self._app_json(self._reads, "GET", _path("budget"))
 
     async def usage(self) -> UsageBalance:
         """`GET /api/me/usage` by way of the SDK: the org's balance this

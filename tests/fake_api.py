@@ -80,6 +80,48 @@ def usage_balance(**fields: Any) -> UsageBalance:
     )
 
 
+def notification(nid: str = "n1", **fields: Any) -> dict[str, Any]:
+    return {
+        "id": nid,
+        "kind": "budget.warn",
+        "title": "80% of this period's included tokens used",
+        "body": "The organisation is approaching the tokens its plan includes.",
+        "link": "/settings/usage",
+        "created_at": "2026-10-29T00:00:00Z",
+        "read_at": None,
+        **fields,
+    }
+
+
+def announcement(aid: str = "an1", **fields: Any) -> dict[str, Any]:
+    return {
+        "id": aid,
+        "message": "Maintenance tonight at 22:00 UTC.",
+        "severity": "info",
+        "link": None,
+        "starts_at": "2026-10-29T00:00:00Z",
+        "ends_at": None,
+        "dismissible": True,
+        **fields,
+    }
+
+
+def share_row(sid: str = "s1", **fields: Any) -> dict[str, Any]:
+    return {
+        "id": sid,
+        "conversation_id": "c1",
+        "title": "New chat",
+        "message_count": 2,
+        "include_attachments": False,
+        "created_at": "2026-10-29T00:00:00Z",
+        "expires_at": None,
+        "revoked_at": None,
+        "view_count": 0,
+        "status": "active",
+        **fields,
+    }
+
+
 class FakeAPI:
     def __init__(
         self,
@@ -126,6 +168,27 @@ class FakeAPI:
         self.folder_moves: list[tuple[str, str | None]] = []
         self.tags_created: list[str] = []
         self.tag_sets: list[tuple[str, list[str]]] = []
+        # Notifications, announcements, reports, share management, budget.
+        self.notification_rows: list[dict[str, Any]] = []
+        self.notifications_read: list[str] = []
+        self.notifications_read_all = 0
+        self.announcement_rows: list[dict[str, Any]] = []
+        self.reports: list[tuple[str, str, str | None, str | None]] = []
+        self.share_rows: list[dict[str, Any]] = []
+        self.shares_revoked: list[str] = []
+        self.budget_payload: dict[str, Any] = {
+            "period_start": "2026-10-01",
+            "included_tokens": 100000,
+            "tokens_used": 1234,
+            "remaining_tokens": 98766,
+            "overage_enabled": False,
+            "overage_cap_micros": 0,
+            "overage_micros": 0,
+            "member_default_cap_micros": None,
+            "member_cap": None,
+            "member_spent": 0,
+            "member_exhausted": False,
+        }
         self.tree_reads = 0
         self.streams_closed = 0
 
@@ -225,6 +288,14 @@ class FakeAPI:
     async def share_conversation(self, conversation_id: str) -> str:
         self._refuse_temporary(conversation_id, "shared")
         self.shares.append(conversation_id)
+        self.share_rows.insert(
+            0,
+            share_row(
+                f"s{len(self.share_rows) + 1}",
+                conversation_id=conversation_id,
+                title=self._find(conversation_id).title,
+            ),
+        )
         return f"https://matterwave.test/share/tok-{conversation_id}"
 
     async def conversation_instructions(self, conversation_id: str) -> dict[str, Any]:
@@ -293,6 +364,62 @@ class FakeAPI:
     async def set_tags(self, conversation_id: str, tag_ids: Sequence[str]) -> dict[str, Any]:
         self.tag_sets.append((conversation_id, list(tag_ids)))
         return {"conversation_id": conversation_id, "tag_ids": list(tag_ids)}
+
+    # --- notifications, announcements, reports, shares, budget ----------------
+
+    def _unread_count(self) -> int:
+        return sum(1 for row in self.notification_rows if not row.get("read_at"))
+
+    async def notifications(self) -> dict[str, Any]:
+        return {
+            "data": [dict(row) for row in self.notification_rows],
+            "unread_count": self._unread_count(),
+        }
+
+    async def read_notification(self, notification_id: str) -> dict[str, Any]:
+        self.notifications_read.append(notification_id)
+        for row in self.notification_rows:
+            if row.get("id") == notification_id:
+                row["read_at"] = row.get("read_at") or "2026-10-30T00:00:00Z"
+                return {**row, "unread_count": self._unread_count()}
+        raise LookupError(notification_id)
+
+    async def read_all_notifications(self) -> dict[str, Any]:
+        count = self._unread_count()
+        self.notifications_read_all += 1
+        for row in self.notification_rows:
+            row["read_at"] = row.get("read_at") or "2026-10-30T00:00:00Z"
+        return {"read": count, "unread_count": 0}
+
+    async def announcements(self) -> dict[str, Any]:
+        return {"data": [dict(row) for row in self.announcement_rows]}
+
+    async def report_conversation(
+        self, conversation_id: str, kind: str, note: str | None = None
+    ) -> dict[str, Any]:
+        self.reports.append((conversation_id, kind, None, note))
+        return {"id": f"rep{len(self.reports)}", "kind": kind}
+
+    async def conversation_shares(self, conversation_id: str) -> list[dict[str, Any]]:
+        return [
+            dict(row)
+            for row in self.share_rows
+            if row.get("conversation_id") == conversation_id
+        ]
+
+    async def my_shares(self) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.share_rows]
+
+    async def revoke_share(self, share_id: str) -> dict[str, Any]:
+        self.shares_revoked.append(share_id)
+        for row in self.share_rows:
+            if row.get("id") == share_id:
+                row["status"] = "revoked"
+                row["revoked_at"] = "2026-10-30T00:00:00Z"
+        return {"status": "revoked"}
+
+    async def budget(self) -> dict[str, Any]:
+        return dict(self.budget_payload)
 
     def _replace(self, conversation_id: str, **fields: Any) -> Conversation:
         conv = replace(self._find(conversation_id), **fields)

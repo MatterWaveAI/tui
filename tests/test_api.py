@@ -309,6 +309,116 @@ async def test_fork_share_and_usage_go_through_the_sdk():
     assert (balance.used, balance.included, balance.percent) == (1234, 100000, 1.234)
 
 
+NOTIFICATION = {
+    "id": "n1", "kind": "budget.warn", "title": "80% of this period's tokens used",
+    "body": "Usage past them is refused or billed at list price.",
+    "link": "/settings/usage", "created_at": "2026-10-29T00:00:00Z", "read_at": None,
+}
+SHARE = {
+    "id": "s1", "conversation_id": "c1", "title": "t", "message_count": 2,
+    "include_attachments": False, "created_at": "2026-10-29T00:00:00Z",
+    "expires_at": None, "revoked_at": None, "view_count": 3, "status": "active",
+}
+BUDGET = {
+    "period_start": "2026-10-01", "included_tokens": 100000, "tokens_used": 1234,
+    "remaining_tokens": 98766, "overage_enabled": True, "overage_cap_micros": 1000000,
+    "overage_micros": 250000, "member_default_cap_micros": None,
+    "member_cap": None, "member_spent": 0, "member_exhausted": False,
+}
+
+
+@pytest.mark.asyncio
+async def test_notifications_announcements_and_budget_take_their_routes():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        path, method = request.url.path, request.method
+        if path == "/api/me/notifications" and method == "GET":
+            return httpx.Response(200, json={"data": [NOTIFICATION], "unread_count": 1})
+        if path == "/api/me/notifications/n1/read":
+            return httpx.Response(
+                200, json={**NOTIFICATION, "read_at": "2026-10-30T00:00:00Z", "unread_count": 0}
+            )
+        if path == "/api/me/notifications/read-all":
+            return httpx.Response(200, json={"read": 1, "unread_count": 0})
+        if path == "/api/announcements":
+            return httpx.Response(200, json={"data": [{"id": "an1", "message": "hi"}]})
+        if path == "/api/budget":
+            return httpx.Response(200, json=BUDGET)
+        return httpx.Response(404, json={"detail": path})
+
+    api = make(handler)
+    inbox = await api.notifications()
+    assert inbox["unread_count"] == 1
+    read = await api.read_notification("n1")
+    assert read["read_at"] == "2026-10-30T00:00:00Z"
+    assert await api.read_all_notifications() == {"read": 1, "unread_count": 0}
+    assert (await api.announcements())["data"][0]["id"] == "an1"
+    budget = await api.budget()
+    assert (budget["overage_micros"], budget["overage_cap_micros"]) == (250000, 1000000)
+    assert [(r.method, r.url.path) for r in seen] == [
+        ("GET", "/api/me/notifications"),
+        ("POST", "/api/me/notifications/n1/read"),
+        ("POST", "/api/me/notifications/read-all"),
+        ("GET", "/api/announcements"),
+        ("GET", "/api/budget"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_report_posts_kind_and_note_and_is_never_retried():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        assert (request.method, request.url.path) == ("POST", "/api/conversations/c1/report")
+        return httpx.Response(201, json={"id": "rep1", "kind": "unhelpful"})
+
+    filed = await make(handler).report_conversation("c1", "unhelpful", note="repeats itself")
+    assert filed == {"id": "rep1", "kind": "unhelpful"}
+    assert json.loads(seen[0].content) == {"kind": "unhelpful", "note": "repeats itself"}
+
+    calls = 0
+
+    def busy(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(503, json={"detail": "busy"})
+
+    with pytest.raises(ServerError):
+        await make(busy).report_conversation("c1", "unsafe")
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_share_management_lists_and_revokes():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        path = request.url.path
+        if path == "/api/me/shares":
+            return httpx.Response(200, json={"data": [SHARE]})
+        if path == "/api/conversations/c1/shares":
+            return httpx.Response(200, json={"data": [SHARE]})
+        if path == "/api/shares/s1":
+            return httpx.Response(200, json={"status": "revoked"})
+        return httpx.Response(404, json={"detail": path})
+
+    api = make(handler)
+    mine = await api.my_shares()
+    assert [s["id"] for s in mine] == ["s1"]
+    theirs = await api.conversation_shares("c1")
+    assert [s["id"] for s in theirs] == ["s1"]
+    assert await api.revoke_share("s1") == {"status": "revoked"}
+    assert [(r.method, r.url.path) for r in seen] == [
+        ("GET", "/api/me/shares"),
+        ("GET", "/api/conversations/c1/shares"),
+        ("DELETE", "/api/shares/s1"),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_an_attachment_is_uploaded_as_multipart():
     def handler(request: httpx.Request) -> httpx.Response:

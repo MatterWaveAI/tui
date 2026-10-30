@@ -14,11 +14,12 @@ from matterwave_sdk.models import (
     Conversation,
     ConversationContext,
     ConversationMessage,
+    FiledReport,
     Me,
     UsageBalance,
 )
 
-from matterwave_tui.api import Opened, StreamItem
+from matterwave_tui.api import NOTIFICATIONS_PAGE, Opened, StreamItem
 
 MODELS: list[dict[str, Any]] = [
     {"id": "grt-nano", "label": "GRT Nano", "partner": False, "research_preview": False,
@@ -163,11 +164,16 @@ class FakeAPI:
         self.feedback_puts: list[tuple[str, int, list[str], str | None]] = []
         self.feedback_deletes: list[str] = []
         self.feedback_rows: list[dict[str, Any]] = []
-        # Folders and tags (adapters only, no UI yet).
+        # Folders and tags, held the way the server holds them: the
+        # routes write here and `library` reads back, so the UI's
+        # captions can be tested against a state, not a recorder.
         self.folders_created: list[str] = []
+        self.library_folders: list[dict[str, Any]] = []
         self.folder_moves: list[tuple[str, str | None]] = []
         self.tags_created: list[str] = []
+        self.library_tags: list[dict[str, Any]] = []
         self.tag_sets: list[tuple[str, list[str]]] = []
+        self.library_assignments: dict[str, list[str]] = {}
         # Notifications, announcements, reports, share management, budget.
         self.notification_rows: list[dict[str, Any]] = []
         self.notifications_read: list[str] = []
@@ -176,6 +182,19 @@ class FakeAPI:
         self.reports: list[tuple[str, str, str | None, str | None]] = []
         self.share_rows: list[dict[str, Any]] = []
         self.shares_revoked: list[str] = []
+        # Signed-in accounts (slot 0 acting), the switch, the attachments
+        # the transcript asks to download, and imports with their polling.
+        self.account_rows: list[dict[str, Any]] = []
+        self.switches: list[int] = []
+        self.switched_to: dict[str, Any] = {}
+        self.attachments_store: dict[str, bytes] = {}
+        self.downloaded: list[str] = []
+        self.import_rows: list[dict[str, Any]] = []
+        self.imports_started: list[tuple[str, bytes]] = []
+        self.import_status_calls: list[str] = []
+        self.import_done_after: int | None = None
+        self.transcribes: list[tuple[str, str, str | None, bytes]] = []
+        self.transcript_text = "hello there"
         self.budget_payload: dict[str, Any] = {
             "period_start": "2026-10-01",
             "included_tokens": 100000,
@@ -347,22 +366,43 @@ class FakeAPI:
         )
 
     async def library(self) -> dict[str, Any]:
-        return {"folders": [], "tags": [], "assignments": {}}
+        return {
+            "folders": [dict(folder) for folder in self.library_folders],
+            "tags": [dict(tag) for tag in self.library_tags],
+            "assignments": {cid: list(ids) for cid, ids in self.library_assignments.items()},
+        }
 
     async def create_folder(self, name: str) -> dict[str, Any]:
+        if any(folder["name"] == name for folder in self.library_folders):
+            raise ConflictError(
+                "You already have one with that name.",
+                status_code=409,
+                request_id="req-name-taken",
+            )
         self.folders_created.append(name)
-        return {"id": f"f{len(self.folders_created)}", "name": name, "position": 0,
-                "created_at": "1", "updated_at": "1"}
+        folder = {
+            "id": f"f{len(self.library_folders) + 1}", "name": name, "position": 0,
+            "created_at": "1", "updated_at": "1",
+        }
+        self.library_folders.append(folder)
+        return dict(folder)
 
     async def move_to_folder(self, conversation_id: str, folder_id: str | None) -> None:
         self.folder_moves.append((conversation_id, folder_id))
+        self._replace(conversation_id, folder_id=folder_id)
 
     async def create_tag(self, name: str) -> dict[str, Any]:
         self.tags_created.append(name)
-        return {"id": f"t{len(self.tags_created)}", "name": name, "created_at": "1"}
+        for tag in self.library_tags:
+            if tag["name"] == name:
+                return dict(tag)
+        tag = {"id": f"t{len(self.library_tags) + 1}", "name": name, "created_at": "1"}
+        self.library_tags.append(tag)
+        return dict(tag)
 
     async def set_tags(self, conversation_id: str, tag_ids: Sequence[str]) -> dict[str, Any]:
         self.tag_sets.append((conversation_id, list(tag_ids)))
+        self.library_assignments[conversation_id] = list(tag_ids)
         return {"conversation_id": conversation_id, "tag_ids": list(tag_ids)}
 
     # --- notifications, announcements, reports, shares, budget ----------------
@@ -370,11 +410,13 @@ class FakeAPI:
     def _unread_count(self) -> int:
         return sum(1 for row in self.notification_rows if not row.get("read_at"))
 
-    async def notifications(self) -> dict[str, Any]:
-        return {
-            "data": [dict(row) for row in self.notification_rows],
-            "unread_count": self._unread_count(),
-        }
+    async def notifications(
+        self, *, unread: bool = False, limit: int = NOTIFICATIONS_PAGE
+    ) -> dict[str, Any]:
+        rows = [
+            dict(row) for row in self.notification_rows if not unread or not row.get("read_at")
+        ]
+        return {"data": rows[:limit], "unread_count": self._unread_count()}
 
     async def read_notification(self, notification_id: str) -> dict[str, Any]:
         self.notifications_read.append(notification_id)
@@ -395,10 +437,14 @@ class FakeAPI:
         return {"data": [dict(row) for row in self.announcement_rows]}
 
     async def report_conversation(
-        self, conversation_id: str, kind: str, note: str | None = None
-    ) -> dict[str, Any]:
-        self.reports.append((conversation_id, kind, None, note))
-        return {"id": f"rep{len(self.reports)}", "kind": kind}
+        self,
+        conversation_id: str,
+        kind: str,
+        note: str | None = None,
+        message_id: str | None = None,
+    ) -> FiledReport:
+        self.reports.append((conversation_id, kind, message_id, note))
+        return FiledReport.from_dict({"id": f"rep{len(self.reports)}", "kind": kind})
 
     async def conversation_shares(self, conversation_id: str) -> list[dict[str, Any]]:
         return [
@@ -417,6 +463,83 @@ class FakeAPI:
                 row["status"] = "revoked"
                 row["revoked_at"] = "2026-10-30T00:00:00Z"
         return {"status": "revoked"}
+
+    async def accounts(self) -> dict[str, Any]:
+        return {
+            "accounts": [dict(row) for row in self.account_rows],
+            "max": 4,
+            "room": True,
+        }
+
+    async def switch_account(self, slot: int) -> dict[str, Any]:
+        self.switches.append(slot)
+        for row in self.account_rows:
+            acting = row.get("slot") == 0
+            if row.get("slot") == slot:
+                row["slot"] = 0
+                row["current"] = True
+                self.switched_to = dict(row)
+            elif acting:
+                row["slot"] = slot
+                row["current"] = False
+        return {
+            "status": "ok",
+            "subject": str(self.switched_to.get("subject") or ""),
+            "email": self.switched_to.get("email"),
+        }
+
+    async def download_attachment(self, attachment_id: str) -> bytes:
+        self.downloaded.append(attachment_id)
+        return self.attachments_store[attachment_id]
+
+    async def start_import(self, data: bytes, filename: str) -> dict[str, Any]:
+        self.imports_started.append((filename, data))
+        row = {
+            "id": f"imp{len(self.import_rows) + 1}",
+            "status": "pending",
+            "source": "chatgpt",
+            "filename": filename,
+            "size_bytes": len(data),
+            "conversations_total": 2,
+            "conversations_done": 0,
+            "conversations_created": 0,
+            "conversations_existing": 0,
+            "conversations_skipped": 0,
+            "messages_created": 0,
+            "attachments_skipped": 0,
+            "branches_dropped": 0,
+            "error": None,
+            "created_at": "2026-10-30T00:00:00Z",
+            "started_at": None,
+            "completed_at": None,
+        }
+        self.import_rows.append(row)
+        return dict(row)
+
+    async def list_imports(self) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.import_rows]
+
+    async def import_status(self, import_id: str) -> dict[str, Any]:
+        self.import_status_calls.append(import_id)
+        for row in self.import_rows:
+            if row.get("id") == import_id:
+                # A poll budget that runs the job to `done` when the test
+                # asks for it; the row keeps its counts.
+                if self.import_done_after is not None and (
+                    len(self.import_status_calls) >= self.import_done_after
+                ):
+                    row["status"] = "done"
+                    row["conversations_created"] = 2
+                    row["conversations_done"] = 2
+                    row["messages_created"] = 9
+                return dict(row)
+        raise LookupError(import_id)
+
+    async def transcribe(
+        self, data: bytes, filename: str, content_type: str, language: str | None = None
+    ) -> str:
+        self.transcribes.append((filename, content_type, language, data))
+        return self.transcript_text
 
     async def budget(self) -> dict[str, Any]:
         return dict(self.budget_payload)

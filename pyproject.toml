@@ -1,6 +1,6 @@
 [project]
 name = "matterwave-tui"
-version = "0.3.0"
+version = "0.3.1"
 description = "A terminal client for MatterWave chat: the same conversations as the web app"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,6 +21,11 @@ classifiers = [
 matterwave-tui = "matterwave_tui.cli:main"
 
 [project.optional-dependencies]
+# The microphone behind dictation; without it, dictation asks for a file.
+dictation = ["sounddevice>=0.4"]
+# Non-PNG images for the kitty protocol, and sixel encoding; without it,
+# PNGs still render on kitty and everything else falls back to text.
+images = ["pillow>=10"]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
@@ -63,4 +68,9 @@ files = ["src/matterwave_tui"]
 [[tool.mypy.overrides]]
 # keyring ships no type information.
 module = "keyring.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Nor do the optional extras (the dictation microphone, sixel's codec).
+module = ["sounddevice.*", "PIL.*"]
 ignore_missing_imports = true

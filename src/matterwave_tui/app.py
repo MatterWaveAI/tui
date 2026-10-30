@@ -16,35 +16,45 @@ from matterwave_sdk import frames as fr
 from matterwave_sdk.errors import APIConnectionError, APIError, ConflictError
 from matterwave_sdk.models import Attachment, Conversation, ConversationMessage, UsageBalance
 from textual import on, work
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, get_system_commands_provider
 from textual.binding import Binding
+from textual.command import DiscoveryHit, Hit, Hits, Provider
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widget import Widget
 from textual.widgets import Footer, Input, Label, ListItem, ListView, Static, TextArea
 
-from .api import ChatAPI, Cut, Opened, StreamItem
+from . import images
+from .api import NOTIFICATIONS_PAGE, ChatAPI, Cut, Opened, StreamItem
+from .dictation import MEDIA_TYPES, MicRecorder, media_type_for, mic_available
 from .export import conversation_markdown, export_filename
 from .failures import Failure, classify, retry_in
 from .models import is_image_filename, model_accepts_images, model_window, vision_capable_model_ids
 from .screens import (
+    Accounts,
     Confirm,
     DeviceLogin,
     DeviceLoginFn,
+    Dictation,
     FeedbackDialog,
     InstructionsEditor,
+    Library,
+    LibraryState,
     ModelPicker,
     Notifications,
     Prompt,
     Shares,
 )
 from .thread import Divider, Message, Thread
-from .widgets import DividerView, MessageView, ThumbClicked
+from .widgets import DividerView, ImageView, MessageView, ThumbClicked
 
 # How often a stream redraws the answer in progress. A redraw per delta is
 # hundreds a second on a fast model and buys nothing a person can see.
 LIVE_REDRAW_S = 1 / 15
 OFFLINE_PROBE_S = 5.0
 SEARCH_DEBOUNCE_S = 0.3
+# How often the image layer re-checks where the pictures it has drawn
+# should sit (the transcript scrolls under them).
+IMAGE_REFRESH_S = 0.25
 # The id of the answer being streamed, before the server has named it.
 LIVE_ID = "_live"
 # The sidebar list's slices, in the order the `List` key cycles them. The
@@ -56,6 +66,15 @@ TEMPORARY_NOTICE = (
     "Temporary chat. It won't appear in your history or search, can't be shared, "
     "and is deleted 24 hours after the last message."
 )
+# Importing a ChatGPT or Claude export: the API's cap and the poll, as the
+# web app's Data pane mirrors them (web/src/apps/settings/importApi.ts).
+IMPORT_MAX_BYTES = 100 * 1024 * 1024
+IMPORT_POLL_S = 1.5
+# Ten minutes of polls before the watch gives up saying so (the worker
+# keeps the row on the server, so nothing is lost, only unwatched).
+IMPORT_POLLS_MAX = 400
+# The sources an export names, as they are said to the person.
+IMPORT_SOURCE_NAMES = {"chatgpt": "ChatGPT", "claude": "Claude"}
 
 
 # --- per-device state (dismissed announcement ids) ----------------------------
@@ -102,14 +121,17 @@ def _read_attachment(path_text: str) -> tuple[bytes, str]:
 
 
 class ConversationItem(ListItem):
-    def __init__(self, conversation: Conversation) -> None:
+    def __init__(self, conversation: Conversation, *, library: str = "") -> None:
         self.conversation = conversation
+        # The caption's tail naming the folder and tags, as the library
+        # holds them; "" until the library answers.
+        self.library = library
         super().__init__(Label(self.caption(), markup=False))
 
     def caption(self) -> str:
         c = self.conversation
         marks = ("📌 " if c.pinned_at else "") + ("🗄 " if c.archived_at else "")
-        return marks + (c.title or "New chat")
+        return marks + (c.title or "New chat") + self.library
 
     def retitle(self, title: str) -> None:
         self.conversation = replace(self.conversation, title=title)
@@ -118,6 +140,11 @@ class ConversationItem(ListItem):
     def replace_conversation(self, conversation: Conversation) -> None:
         """The conversation changed on the server (pin, archive): redraw the row."""
         self.conversation = conversation
+        self.query_one(Label).update(self.caption())
+
+    def set_library(self, library: str) -> None:
+        """The conversation's folder or tags changed: redraw the row."""
+        self.library = library
         self.query_one(Label).update(self.caption())
 
 
@@ -164,8 +191,36 @@ class Transcript(VerticalScroll):
         return items[self.selected]
 
 
+class TuiCommands(Provider):
+    """The command palette's TUI-specific entries, beside Textual's system
+    commands: the actions that have no key of their own."""
+
+    ENTRIES: tuple[tuple[str, str, str], ...] = (
+        ("Switch account…", "who is signed in here, and make another one acting",
+         "action_switch_account"),
+        ("Import a ChatGPT or Claude export…", "bring an exported history into this account",
+         "action_import"),
+        ("Dictate audio…", "transcribe the microphone or an audio file into the composer",
+         "action_dictate"),
+    )
+
+    async def discover(self) -> Hits:
+        for name, help_text, action in self.ENTRIES:
+            yield DiscoveryHit(name, getattr(self.app, action), help=help_text)
+
+    async def search(self, query: str) -> Hits:
+        matcher = self.matcher(query)
+        for name, help_text, action in self.ENTRIES:
+            if (match := matcher.match(name)) > 0:
+                yield Hit(match, matcher.highlight(name), getattr(self.app, action),
+                          help=help_text)
+
+
 class MatterWaveApp(App[None]):
     TITLE = "MatterWave"
+    # Textual's system commands, plus the TUI's own (accounts, import,
+    # dictation): the palette's entries.
+    COMMANDS = {get_system_commands_provider, TuiCommands}
     CSS = """
     #sidebar { width: 32; border-right: solid $panel; }
     #search { margin: 0 0 1 0; }
@@ -201,11 +256,13 @@ class MatterWaveApp(App[None]):
         Binding("f", "fork", "Fork"),
         Binding("s", "share", "Share"),
         Binding("S", "my_shares", "Shares"),
+        Binding("l", "library", "Library"),
         Binding("R", "report", "Report"),
         Binding("N", "notifications", "Inbox"),
         Binding("A", "dismiss_announcements", "Dismiss"),
         Binding("w", "export_markdown", "Export"),
         Binding("i", "attach", "Attach"),
+        Binding("v", "dictate", "Dictate"),
         Binding("o", "cycle_filter", "List"),
         Binding("escape", "leave_composer", "Transcript", show=False),
         Binding("ctrl+q", "quit", "Quit", priority=True),
@@ -248,9 +305,21 @@ class MatterWaveApp(App[None]):
         self.list_filter = "default"
         # The caller's notifications (the page GET /api/me/notifications
         # answers) and the unread count the badge shows; None until the
-        # route has answered (or forever, when it is not there).
+        # route has answered (or forever, when it is not there). What the
+        # inbox last asked for -- the unread filter and the page's length
+        # -- is kept, so reopening it shows the same view.
         self.notification_rows: list[dict[str, Any]] = []
         self.unread_notifications: int | None = None
+        self.notifications_unread_only = False
+        self.notifications_limit = NOTIFICATIONS_PAGE
+        # The library's folders, tags and per-conversation tag
+        # assignments, for the `l` screen and the sidebar captions; empty
+        # until GET /api/library answers (or forever, when it is not
+        # there). Which conversation is in which folder rides the
+        # conversations themselves (`folder_id`).
+        self.library_folders: list[dict[str, Any]] = []
+        self.library_tags: list[dict[str, Any]] = []
+        self.library_assignments: dict[str, list[str]] = {}
         # The announcements in their window that this device has not
         # dismissed; a critical one is never dismissible.
         self.announcements: list[dict[str, Any]] = []
@@ -261,6 +330,16 @@ class MatterWaveApp(App[None]):
         self.share_rows: list[dict[str, Any]] = []
         # When the server's `Retry-After` runs out, on the monotonic clock.
         self.rate_limited_until: float | None = None
+        # Terminal graphics: which protocol this terminal speaks (None is
+        # the plain placeholder), what the layer has drawn, and the writes
+        # waiting for the next refresh to carry them out.
+        self.image_backend: str | None = images.detect_backend(os.environ)
+        self._image_placements: dict[str, images.Placement] = {}
+        self._image_ops: list[str] = []
+        self._image_seq = 0
+        # Attachment bytes already fetched for the transcript's image parts,
+        # so a redraw hands a rebuilt view its picture without a re-fetch.
+        self._image_data: dict[str, bytes] = {}
         self._search_seq = 0
 
     # --- layout ----------------------------------------------------------------
@@ -282,12 +361,27 @@ class MatterWaveApp(App[None]):
     async def on_mount(self) -> None:
         self.set_interval(LIVE_REDRAW_S, self._flush_live)
         self.set_interval(1.0, self._tick_rate_limit)
+        if self.image_backend is not None:
+            self.set_interval(IMAGE_REFRESH_S, self._refresh_images)
         self.render_status()
         self.query_one("#composer", TextArea).focus()
         self.load_initial()
 
     async def on_unmount(self) -> None:
         await self.api.aclose()
+
+    def post_display_hook(self) -> None:
+        """Carry the image layer's pending writes out, right after a
+        refresh: this is the one moment the terminal is not mid-redraw. A
+        headless test writes nowhere."""
+        if not self._image_ops:
+            return
+        driver = self._driver
+        if driver is not None and not self.is_headless:
+            for sequence in self._image_ops:
+                driver.write(sequence)
+            driver.flush()
+        self._image_ops.clear()
 
     # --- status line -----------------------------------------------------------
 
@@ -429,6 +523,7 @@ class MatterWaveApp(App[None]):
         self.load_budget()
         self.load_notifications()
         self.load_announcements()
+        self.load_library()
         if self.conversations:
             await self.open_conversation(self.conversations[0].id)
         self.render_status()
@@ -458,7 +553,9 @@ class MatterWaveApp(App[None]):
             self.conversations = found
         view = self.query_one("#conversations", ListView)
         await view.clear()
-        await view.extend([ConversationItem(c) for c in found])
+        await view.extend(
+            [ConversationItem(c, library=self._library_suffix(c)) for c in found]
+        )
 
     @work(group="usage", exclusive=True)
     async def load_usage(self) -> None:
@@ -485,12 +582,18 @@ class MatterWaveApp(App[None]):
 
     @work(group="notifications", exclusive=True)
     async def load_notifications(self) -> None:
-        """The bell's rows and the unread count the status line badges."""
+        """The bell's page of rows and the unread count the status line
+        badges, as the inbox last asked for them."""
         try:
-            body = await self.api.notifications()
+            await self.fetch_notifications()
         except Exception:
             # No notifications route on this deployment: no badge, no rows.
             return
+
+    async def fetch_notifications(self) -> None:
+        body = await self.api.notifications(
+            unread=self.notifications_unread_only, limit=self.notifications_limit
+        )
         rows = body.get("data")
         self.notification_rows = (
             [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
@@ -590,13 +693,99 @@ class MatterWaveApp(App[None]):
             else:
                 widgets.append(
                     MessageView(item, position=self.thread.position(item),
-                                feedback=self.feedback.get(item.id))
+                                feedback=self.feedback.get(item.id),
+                                image_backend=self.image_backend)
                 )
         if self.live is not None:
             widgets.append(MessageView(self.live, streaming=True))
         await transcript.mount_all(widgets)
         transcript.select(selected)
         transcript.scroll_end(animate=False)
+        self.load_images()
+
+    # --- terminal images ---------------------------------------------------------
+
+    def _image_views(self) -> list[ImageView]:
+        views: list[ImageView] = []
+        for widget in self.query_one("#transcript", Transcript).children:
+            if isinstance(widget, MessageView):
+                views.extend(view for view in widget.children if isinstance(view, ImageView))
+        return views
+
+    @work(group="images", exclusive=True)
+    async def load_images(self) -> None:
+        """Fetch the bytes for every image part the transcript is showing
+        and the terminal can draw. One download at a time, each failure
+        noted on its view and never retried here; bytes already fetched for
+        an attachment are handed over without a second fetch."""
+        if self.image_backend is None:
+            return
+        for view in self._image_views():
+            if not view.wants_bytes():
+                continue
+            cached = self._image_data.get(view.attachment_id)
+            if cached is not None:
+                view.set_data(cached)
+                continue
+            try:
+                data = await self.api.download_attachment(view.attachment_id)
+            except Exception:
+                view.set_failed()
+                continue
+            self._image_data[view.attachment_id] = data
+            view.set_data(data)
+
+    def _refresh_images(self) -> None:
+        """Where the loaded images should sit now. The transcript scrolls
+        under them, so a picture whose line has moved is deleted and drawn
+        again at the new spot; one off screen comes down until it scrolls
+        back."""
+        if self.image_backend is None:
+            return
+        try:
+            transcript = self.query_one("#transcript", Transcript)
+        except Exception:
+            return
+        placements: dict[str, images.Placement] = {}
+        ops: list[str] = []
+        for view in self._image_views():
+            if view.data is None or not view.region.overlaps(transcript.region):
+                continue
+            at = view.region
+            key = f"image-{id(view)}"
+            old = self._image_placements.get(key)
+            if old is not None and (old.x, old.y) == (at.x, at.y):
+                placements[key] = old
+                continue
+            # The picture is where it was no longer: take that one down
+            # before the new one goes up.
+            if old is not None and old.remove:
+                ops.append(old.remove)
+            self._image_seq += 1
+            image_id = images.new_image_id(self._image_seq)
+            if self.image_backend == "kitty":
+                sequences = images.kitty_placement(
+                    image_id, at.x + 1, at.y + 1, max(at.width, 8), max(at.height, 2), view.data
+                )
+                if not sequences:
+                    view.set_failed()
+                    continue
+                ops.extend(sequences)
+                placements[key] = images.Placement(
+                    image_id, at.x, at.y, "", images.kitty_delete(image_id)
+                )
+            else:
+                placement = images.sixel_placement(image_id, at.x + 1, at.y + 1, view.data)
+                if placement is None:
+                    view.set_failed()
+                    continue
+                ops.append(placement.sequence)
+                placements[key] = placement
+        for key, placement in self._image_placements.items():
+            if key not in placements and placement.remove:
+                ops.append(placement.remove)
+        self._image_placements = placements
+        self._image_ops.extend(ops)
 
     def _flush_live(self) -> None:
         if self._live_dirty and self.live is not None:
@@ -903,7 +1092,9 @@ class MatterWaveApp(App[None]):
         self.conversations = [c for c in self.conversations if c.id != conversation_id]
         view = self.query_one("#conversations", ListView)
         await view.clear()
-        await view.extend([ConversationItem(c) for c in self.conversations])
+        await view.extend(
+            [ConversationItem(c, library=self._library_suffix(c)) for c in self.conversations]
+        )
         self.notify("Deleted.")
         self.render_status()
 
@@ -1012,8 +1203,22 @@ class MatterWaveApp(App[None]):
                 list(self.notification_rows),
                 mark_read=self.apply_notification_read,
                 mark_all=self.apply_notifications_read_all,
+                load_page=self.apply_notifications_page,
+                unread_only=self.notifications_unread_only,
             )
         )
+
+    async def apply_notifications_page(self, unread_only: bool, limit: int) -> list[dict[str, Any]]:
+        """The page the inbox asked for: `unread=1`, or a longer limit for
+        the pages past the loaded ones. What comes back is what the server
+        now lists, and the badge follows the count it reports."""
+        self.notifications_unread_only = unread_only
+        self.notifications_limit = limit
+        try:
+            await self.fetch_notifications()
+        except Exception as exc:
+            self.fail_from_exception(exc)
+        return self.notification_rows
 
     async def apply_notification_read(self, notification_id: str) -> list[dict[str, Any]]:
         """One row read: the panel redraws from the rows this hands back,
@@ -1079,13 +1284,27 @@ class MatterWaveApp(App[None]):
     # --- reporting ------------------------------------------------------------------
 
     def action_report(self) -> None:
-        """A report about the open conversation: what kind, an optional
-        note, then the confirm. The platform routes `unsafe` to review and
-        `unhelpful` to the product backlog; the filed id is the one support
-        can be quoted."""
+        """A report about the open conversation — or about one reply, when
+        a reply is what the transcript has selected, as the web app's
+        report-this-reply does. What kind, an optional note, then the
+        confirm. The platform routes `unsafe` to review and `unhelpful` to
+        the product backlog; the filed id is the one support can be
+        quoted."""
         if self.conversation is None:
             return
         target = self.conversation
+        # A reply the reader moved to is the report's subject, as the web
+        # app's report-this-reply is; whatever the transcript is resting on
+        # by default is not a selection, and reports the conversation.
+        transcript = self.query_one("#transcript", Transcript)
+        selected = (
+            transcript.selected_widget() if transcript.selected is not None else None
+        )
+        message_id = (
+            selected.message.id
+            if isinstance(selected, MessageView) and selected.message.role == "assistant"
+            else None
+        )
 
         def kind_chosen(kind: str | None) -> None:
             if kind is None:
@@ -1097,11 +1316,13 @@ class MatterWaveApp(App[None]):
             def note_chosen(note: str | None) -> None:
                 def confirmed(filing: bool | None) -> None:
                     if filing:
-                        self.apply_report(target.id, kind, note)
+                        self.apply_report(target.id, kind, note, message_id)
 
                 self.push_screen(
                     Confirm(
-                        f"File a {kind} report about “{target.title}”?",
+                        f"File a {kind} report about "
+                        + ("the selected reply" if message_id else f"“{target.title}”")
+                        + "?",
                         danger=False,
                         hint="Enter files it, Esc cancels.",
                     ),
@@ -1118,15 +1339,18 @@ class MatterWaveApp(App[None]):
         )
 
     @work(group="action")
-    async def apply_report(self, conversation_id: str, kind: str, note: str | None) -> None:
+    async def apply_report(
+        self, conversation_id: str, kind: str, note: str | None, message_id: str | None = None
+    ) -> None:
         try:
-            filed = await self.api.report_conversation(conversation_id, kind, note=note)
+            filed = await self.api.report_conversation(
+                conversation_id, kind, note=note, message_id=message_id
+            )
         except Exception as exc:
             self.fail_from_exception(exc)
             return
-        report_id = filed.get("id") if isinstance(filed, dict) else None
-        if report_id:
-            self.notify(f"Report {report_id} filed as {kind}.")
+        if filed.id:
+            self.notify(f"Report {filed.id} filed as {filed.kind}.")
         else:
             self.notify(f"Report filed as {kind}.")
 
@@ -1155,6 +1379,388 @@ class MatterWaveApp(App[None]):
         ]
         self.notify("Share revoked.")
         return self.share_rows
+
+    # --- accounts ---------------------------------------------------------------------
+
+    @work(group="action")
+    async def action_switch_account(self) -> None:
+        """The account switcher: read who is signed in, offer the parked
+        ones, and make the chosen slot acting. Everything the open
+        conversation showed belonged to the old account, so it is dropped
+        and loaded again from the new one."""
+        try:
+            body = await self.api.accounts()
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return
+        rows = body.get("accounts")
+        offered = (
+            [row for row in rows if isinstance(row, dict)]
+            if isinstance(rows, list)
+            else []
+        )
+        # The acting account is not offered (switching to it would be a
+        # no-op); with nothing parked there is nothing to choose.
+        if not offered or all(
+            row.get("current") is True or row.get("slot") == 0 for row in offered
+        ):
+            self.notify("No other account is signed in on this client.")
+            return
+
+        def chosen(row: dict[str, Any] | None) -> None:
+            if row is not None:
+                self.apply_switch_account(int(row.get("slot") or 0))
+
+        self.push_screen(Accounts(offered), chosen)
+
+    @work(group="action")
+    async def apply_switch_account(self, slot: int) -> None:
+        try:
+            switched = await self.api.switch_account(slot)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return
+        who = str(switched.get("email") or switched.get("subject") or "the other account")
+        self.notify(f"Switched to {who}.")
+        # The drafts, ratings, notifications and sidebar were the old
+        # account's; the new account's state is read back whole.
+        self.drafts.clear()
+        self.feedback = {}
+        self.notification_rows = []
+        self.unread_notifications = None
+        if self.streaming:
+            self._detach_turn()
+        self.conversation = None
+        self.thread = Thread()
+        self.editing = None
+        self.live = None
+        await self.render_thread()
+        await self.refresh_conversations()
+        self.load_usage()
+        self.load_budget()
+        self.load_notifications()
+        self.load_announcements()
+        if self.conversations:
+            await self.open_conversation(self.conversations[0].id)
+        self.render_status()
+
+    # --- importing --------------------------------------------------------------------
+
+    def action_import(self) -> None:
+        """An exported ChatGPT or Claude history, brought into this
+        account: the file's path, then the upload, then a watch on the job
+        while it runs."""
+
+        def chosen(path_text: str | None) -> None:
+            if path_text:
+                self.apply_import(path_text)
+
+        self.push_screen(Prompt("Import a ChatGPT or Claude export (its file path):"), chosen)
+
+    @work(group="action")
+    async def apply_import(self, path_text: str) -> None:
+        try:
+            data, filename = await asyncio.to_thread(_read_attachment, path_text)
+        except OSError as exc:
+            self.notify(f"Could not read {path_text}: {exc}", severity="error")
+            return
+        if len(data) > IMPORT_MAX_BYTES:
+            self.notify("That file is larger than the 100 MB limit.", severity="warning")
+            return
+        self.notify("Import starting…")
+        try:
+            row = await self.api.start_import(data, filename)
+        except APIError as exc:
+            # The route's own refusals say what was wrong (an unsupported
+            # export, an import already running): they are the message.
+            self.notify(exc.message or "The import could not be started.", severity="error")
+            return
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return
+        # A worker handing over to another: not awaited (a @work call is a
+        # Worker, not a coroutine), the watch polls on its own group.
+        self._watch_import(str(row.get("id") or ""))
+
+    @work(group="import", exclusive=True)
+    async def _watch_import(self, import_id: str) -> None:
+        """The import is a job on the server: poll its row until it is done
+        or failed, then say what it did. The row is the record either way,
+        so a watch that gives up has lost nothing."""
+        if not import_id:
+            return
+        row: dict[str, Any] = {}
+        for _ in range(IMPORT_POLLS_MAX):
+            try:
+                row = await self.api.import_status(import_id)
+            except Exception as exc:
+                self.fail_from_exception(exc)
+                return
+            status = str(row.get("status") or "")
+            if status == "done":
+                self.notify(self._import_summary(row))
+                await self.refresh_conversations()
+                return
+            if status == "failed":
+                error = str(row.get("error") or "The import failed.")
+                self.notify(f"Import failed: {error}", severity="error")
+                return
+            await asyncio.sleep(IMPORT_POLL_S)
+        self.notify("The import is still running; it will appear when it finishes.")
+
+    @staticmethod
+    def _import_summary(row: dict[str, Any]) -> str:
+        """What the import did, in one line, the web result card's numbers
+        (web/src/apps/settings/importApi.ts, summarize)."""
+        source = IMPORT_SOURCE_NAMES.get(str(row.get("source")), str(row.get("source") or "export"))
+        created = int(row.get("conversations_created") or 0)
+        messages = int(row.get("messages_created") or 0)
+        summary = f"Imported {created} conversations, {messages} messages from {source}"
+        skipped = int(row.get("conversations_skipped") or 0)
+        if skipped:
+            summary += f"; {skipped} skipped"
+        return summary + "."
+
+    # --- dictation --------------------------------------------------------------------
+
+    def action_dictate(self) -> None:
+        """Words into the composer without the keyboard: the microphone
+        where the `dictation` extra provides it, an audio file's path
+        otherwise. The transcript lands at the caret, as text to read,
+        correct and send."""
+        if mic_available():
+            self.push_screen(Dictation(MicRecorder()), self._dictated)
+        else:
+            self.notify(f"No microphone support installed (pip install matterwave-tui[dictation]); "
+                        f"naming an audio file instead ({', '.join(sorted(MEDIA_TYPES))}).")
+
+            def chosen(path_text: str | None) -> None:
+                if path_text:
+                    self.apply_transcribe_file(path_text)
+
+            self.push_screen(Prompt("Transcribe an audio file (its path):"), chosen)
+
+    def _dictated(self, clip: tuple[bytes, str] | None) -> None:
+        if clip is not None:
+            self.apply_dictation(clip[0], clip[1])
+
+    @work(group="action")
+    async def apply_transcribe_file(self, path_text: str) -> None:
+        try:
+            data, filename = await asyncio.to_thread(_read_attachment, path_text)
+        except OSError as exc:
+            self.notify(f"Could not read {path_text}: {exc}", severity="error")
+            return
+        content_type = media_type_for(filename)
+        if content_type is None:
+            self.notify(
+                f"Send an audio clip ({', '.join(sorted(MEDIA_TYPES))}).", severity="warning"
+            )
+            return
+        self._transcribe(data, filename, content_type)
+
+    @work(group="action")
+    async def apply_dictation(self, clip: bytes, content_type: str) -> None:
+        if not clip:
+            self.notify("Nothing was captured.", severity="warning")
+            return
+        self._transcribe(clip, "dictation.wav", content_type)
+
+    @work(group="action")
+    async def _transcribe(self, data: bytes, filename: str, content_type: str) -> None:
+        try:
+            text = await self.api.transcribe(data, filename, content_type)
+        except APIError as exc:
+            self.notify(exc.message or "The transcription failed.", severity="error")
+            return
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return
+        text = text.strip()
+        if not text:
+            self.notify("Nothing was heard.")
+            return
+        self._insert_into_composer(text)
+
+    def _insert_into_composer(self, text: str) -> None:
+        """The transcript at the caret, in place of the typing."""
+        composer = self.query_one("#composer", TextArea)
+        composer.focus()
+        composer.insert(text)
+        self.render_status()
+
+    # --- the library (folders and tags) ---------------------------------------------
+
+    def _library_suffix(self, conversation: Conversation) -> str:
+        """The caption's tail naming the conversation's folder and tags:
+        ` — 📁 Work · #draft`, from the library the server answered.
+        Nothing when the conversation is in no folder and carries no tag."""
+        folder_names = {
+            str(folder.get("id")): str(folder.get("name") or "")
+            for folder in self.library_folders
+            if folder.get("id")
+        }
+        tag_names = {
+            str(tag.get("id")): str(tag.get("name") or "") for tag in self.library_tags if tag.get("id")
+        }
+        bits: list[str] = []
+        folder = folder_names.get(conversation.folder_id or "")
+        if folder:
+            bits.append(f"📁 {folder}")
+        bits.extend(
+            f"#{tag_names.get(tag_id, tag_id)}"
+            for tag_id in self.library_assignments.get(conversation.id, [])
+        )
+        return (" — " + " · ".join(bits)) if bits else ""
+
+    def _refresh_library_captions(self) -> None:
+        """The sidebar captions carry the folder and tag names: after a
+        move or a tagging they are drawn again."""
+        for child in self.query_one("#conversations", ListView).children:
+            if isinstance(child, ConversationItem):
+                child.set_library(self._library_suffix(child.conversation))
+
+    def _adopt_library(self, body: dict[str, Any]) -> None:
+        """The library as the server now holds it: the folders, the tags,
+        and which conversation carries which tag. The captions are
+        redrawn, the names being theirs."""
+        folders = body.get("folders")
+        tags = body.get("tags")
+        assignments = body.get("assignments")
+        self.library_folders = (
+            [folder for folder in folders if isinstance(folder, dict)]
+            if isinstance(folders, list)
+            else []
+        )
+        self.library_tags = (
+            [tag for tag in tags if isinstance(tag, dict)] if isinstance(tags, list) else []
+        )
+        self.library_assignments = (
+            {
+                str(conversation_id): [str(tag_id) for tag_id in tag_ids]
+                for conversation_id, tag_ids in assignments.items()
+                if isinstance(tag_ids, list)
+            }
+            if isinstance(assignments, dict)
+            else {}
+        )
+        self._refresh_library_captions()
+
+    @work(group="library", exclusive=True)
+    async def load_library(self) -> None:
+        try:
+            body = await self.api.library()
+        except Exception:
+            # No library route on this deployment: captions without
+            # folders or tags.
+            return
+        self._adopt_library(body)
+
+    def _library_state(self, folder_id: str | None) -> LibraryState:
+        """What the library screen redraws from after a write: the
+        folders, the tags, the assignments, and the open conversation's
+        folder as the app now holds them."""
+        return (
+            list(self.library_folders),
+            list(self.library_tags),
+            {cid: list(tag_ids) for cid, tag_ids in self.library_assignments.items()},
+            folder_id,
+        )
+
+    def _open_folder_id(self) -> str | None:
+        return self.conversation.folder_id if self.conversation else None
+
+    @work(group="library", exclusive=True)
+    async def action_library(self) -> None:
+        """The folders and tags, and the open conversation's place among
+        them. The library is read first: a folder made in the web app
+        since the app started should be there to file into."""
+        if self.conversation is None:
+            return
+        try:
+            body = await self.api.library()
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return
+        self._adopt_library(body)
+        self.push_screen(
+            Library(
+                list(self.library_folders),
+                list(self.library_tags),
+                dict(self.library_assignments),
+                self.conversation.id,
+                self.conversation.folder_id,
+                new_folder=self.apply_folder_create,
+                new_tag=self.apply_tag_create,
+                move_to=self.apply_folder_move,
+                set_tags=self.apply_tags_set,
+            )
+        )
+
+    async def apply_folder_create(self, name: str) -> LibraryState | None:
+        """A folder of that name. A duplicate is the server's 409, and its
+        detail is the message, not a failure banner."""
+        try:
+            folder = await self.api.create_folder(name)
+        except ConflictError as exc:
+            self.notify(exc.message or "That folder name is taken.")
+            return None
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return None
+        self.library_folders = [*self.library_folders, folder]
+        return self._library_state(self._open_folder_id())
+
+    async def apply_tag_create(self, name: str) -> LibraryState | None:
+        """A tag of that name; the server answers the one already there
+        when the name is taken, so a write is never refused for that."""
+        try:
+            tag = await self.api.create_tag(name)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return None
+        self.library_tags = [*self.library_tags, tag]
+        return self._library_state(self._open_folder_id())
+
+    async def apply_folder_move(self, folder_id: str | None) -> LibraryState | None:
+        """The open conversation filed in a folder (None: back in the main
+        list). The sidebar row and the open conversation follow."""
+        if self.conversation is None:
+            return None
+        try:
+            await self.api.move_to_folder(self.conversation.id, folder_id)
+        except ConflictError as exc:
+            self.notify(exc.message or "This conversation cannot be filed.")
+            return None
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return None
+        self._sync_conversation(replace(self.conversation, folder_id=folder_id))
+        self._refresh_library_captions()
+        self.notify("Filed." if folder_id else "Back in the main list.")
+        return self._library_state(folder_id)
+
+    async def apply_tags_set(self, tag_ids: list[str]) -> LibraryState | None:
+        """The open conversation's tags become exactly these."""
+        if self.conversation is None:
+            return None
+        try:
+            answer = await self.api.set_tags(self.conversation.id, tag_ids)
+        except ConflictError as exc:
+            self.notify(exc.message or "This conversation cannot be tagged.")
+            return None
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return None
+        kept = answer.get("tag_ids")
+        self.library_assignments = {
+            **self.library_assignments,
+            self.conversation.id: (
+                [str(tag_id) for tag_id in kept] if isinstance(kept, list) else list(tag_ids)
+            ),
+        }
+        self._refresh_library_captions()
+        return self._library_state(self._open_folder_id())
 
     # --- custom instructions -----------------------------------------------------
 
@@ -1264,7 +1870,9 @@ class MatterWaveApp(App[None]):
 
     def action_feedback(self) -> None:
         """Reasons and an optional comment for the selected (or last)
-        reply's rating."""
+        reply's rating. The reply's id goes into the dialog and comes back
+        in its answer, so the PUT that follows names exactly the message
+        the dialog was opened on."""
         message = self.selected_message()
         if message is None or message.role != "assistant":
             message = self.thread.last("assistant")
@@ -1275,12 +1883,13 @@ class MatterWaveApp(App[None]):
         reasons = row.get("reasons")
         comment = row.get("comment")
 
-        def chosen(result: tuple[int, list[str], str | None] | None) -> None:
+        def chosen(result: tuple[str, int, list[str], str | None] | None) -> None:
             if result is not None:
-                self.apply_feedback(message.id, *result)
+                self.apply_feedback(*result)
 
         self.push_screen(
             FeedbackDialog(
+                message.id,
                 rating if rating in (-1, 1) else -1,
                 list(reasons) if isinstance(reasons, list) else [],
                 comment if isinstance(comment, str) else "",

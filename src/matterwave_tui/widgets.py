@@ -86,12 +86,14 @@ class MessageView(Vertical):
         position: tuple[int, int] | None = None,
         streaming: bool = False,
         feedback: dict[str, Any] | None = None,
+        image_backend: str | None = None,
     ) -> None:
         super().__init__(classes=message.role)
         self.message = message
         self.position = position
         self.streaming = streaming
         self.feedback = feedback
+        self.image_backend = image_backend
 
     def compose(self) -> ComposeResult:
         yield Static(role_label(self.message, self.position), classes="role", markup=False)
@@ -128,9 +130,12 @@ class MessageView(Vertical):
                 yield Static(tool_call_line(part), classes="tool", markup=False)
             elif kind == "tool_result":
                 yield Static(tool_result_line(part), classes="tool", markup=False)
-            elif kind in ("image", "document"):
+            elif kind == "image":
+                yield ImageView(part, backend=self.image_backend)
+            elif kind == "document":
                 yield Static(
-                    f"[{kind}: {part.get('filename') or 'attachment'}]", classes="tool", markup=False
+                    f"[document: {part.get('filename') or 'attachment'}]", classes="tool",
+                    markup=False,
                 )
             # Unknown kinds are skipped, as every reader of parts does.
         if self.streaming:
@@ -164,6 +169,46 @@ class MessageView(Vertical):
             self.post_message(ThumbClicked(self.message.id, 1))
         elif thumb == "thumb-down":
             self.post_message(ThumbClicked(self.message.id, -1))
+
+
+class ImageView(Static):
+    """An image part of a message. Without a terminal to draw on (no
+    backend, or an id-less part) it is the text placeholder and stays one;
+    with one, the app downloads the bytes and hands them here, and the
+    image layer draws the picture where this line sits."""
+
+    DEFAULT_CSS = """
+    ImageView { color: $text-muted; }
+    """
+
+    def __init__(self, part: dict[str, Any], *, backend: str | None = None) -> None:
+        self.part = part
+        self.attachment_id = str(part.get("attachment_id") or "")
+        self.filename = str(part.get("filename") or "attachment")
+        self.backend = backend
+        self.data: bytes | None = None
+        self.failed = False
+        super().__init__(self.placeholder(), classes="tool", markup=False)
+
+    def placeholder(self) -> str:
+        return f"[image: {self.filename}]"
+
+    def wants_bytes(self) -> bool:
+        """Whether the app still owes this view its bytes: there is a
+        terminal to draw on, an attachment to fetch, and neither a delivery
+        nor a failure yet."""
+        return bool(self.backend and self.attachment_id and self.data is None and not self.failed)
+
+    def set_data(self, data: bytes) -> None:
+        """The attachment arrived; the image layer takes it from here."""
+        self.data = data
+        self.update(self.placeholder())
+
+    def set_failed(self) -> None:
+        """The download did not land: the placeholder gains a word of why,
+        and nothing fetches again."""
+        self.failed = True
+        self.update(self.placeholder() + " — could not be loaded")
 
 
 class DividerView(Vertical):

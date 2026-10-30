@@ -357,13 +357,20 @@ async def test_notifications_announcements_and_budget_take_their_routes():
     assert (await api.announcements())["data"][0]["id"] == "an1"
     budget = await api.budget()
     assert (budget["overage_micros"], budget["overage_cap_micros"]) == (250000, 1000000)
+    # The unread filter and the page length ride the query string; the
+    # default page is the route's own 30 rows.
+    assert (await api.notifications(unread=True, limit=100))["unread_count"] == 1
     assert [(r.method, r.url.path) for r in seen] == [
         ("GET", "/api/me/notifications"),
         ("POST", "/api/me/notifications/n1/read"),
         ("POST", "/api/me/notifications/read-all"),
         ("GET", "/api/announcements"),
         ("GET", "/api/budget"),
+        ("GET", "/api/me/notifications"),
     ]
+    first, last = seen[0], seen[-1]
+    assert (first.url.params["unread"], first.url.params["limit"]) == ("0", "30")
+    assert (last.url.params["unread"], last.url.params["limit"]) == ("1", "100")
 
 
 @pytest.mark.asyncio
@@ -376,7 +383,7 @@ async def test_a_report_posts_kind_and_note_and_is_never_retried():
         return httpx.Response(201, json={"id": "rep1", "kind": "unhelpful"})
 
     filed = await make(handler).report_conversation("c1", "unhelpful", note="repeats itself")
-    assert filed == {"id": "rep1", "kind": "unhelpful"}
+    assert (filed.id, filed.kind) == ("rep1", "unhelpful")
     assert json.loads(seen[0].content) == {"kind": "unhelpful", "note": "repeats itself"}
 
     calls = 0
@@ -451,3 +458,317 @@ async def test_send_names_the_attachments_on_the_wire():
     items = [i async for i in make(handler).send("c1", "look", "grt-nano",
                                                  attachment_ids=["att1"])]
     assert isinstance(items[-1], fr.DoneFrame)
+
+
+LIBRARY = {
+    "folders": [
+        {"id": "f1", "name": "Work", "position": 0,
+         "created_at": "2026-10-29T00:00:00Z", "updated_at": "2026-10-29T00:00:00Z"}
+    ],
+    "tags": [{"id": "t1", "name": "draft", "created_at": "2026-10-29T00:00:00Z"}],
+    "assignments": {"c1": ["t1"]},
+}
+
+
+@pytest.mark.asyncio
+async def test_the_library_routes_carry_their_bodies_and_file_the_conversation():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        path, method = request.url.path, request.method
+        if path == "/api/library" and method == "GET":
+            return httpx.Response(200, json=LIBRARY)
+        if path == "/api/library/folders" and method == "POST":
+            return httpx.Response(
+                201, json={**LIBRARY["folders"][0], "name": json.loads(request.content)["name"]}
+            )
+        if path == "/api/library/tags" and method == "POST":
+            return httpx.Response(
+                201, json={**LIBRARY["tags"][0], "name": json.loads(request.content)["name"]}
+            )
+        if path == "/api/library/conversations/c1/folder" and method == "PUT":
+            body = json.loads(request.content)
+            assert set(body) == {"folder_id"}
+            return httpx.Response(200, json={**CONV, "folder_id": body["folder_id"]})
+        if path == "/api/library/conversations/c1/tags" and method == "PUT":
+            return httpx.Response(
+                200, json={"conversation_id": "c1", "tag_ids": json.loads(request.content)["tag_ids"]}
+            )
+        return httpx.Response(404, json={"detail": path})
+
+    api = make(handler)
+    assert await api.library() == LIBRARY
+    assert (await api.create_folder("Work"))["name"] == "Work"
+    assert (await api.create_tag("draft"))["name"] == "draft"
+    await api.move_to_folder("c1", "f1")
+    await api.move_to_folder("c1", None)  # null files it back in the main list
+    assert await api.set_tags("c1", ["t1"]) == {"conversation_id": "c1", "tag_ids": ["t1"]}
+    assert [(r.method, r.url.path) for r in seen] == [
+        ("GET", "/api/library"),
+        ("POST", "/api/library/folders"),
+        ("POST", "/api/library/tags"),
+        ("PUT", "/api/library/conversations/c1/folder"),
+        ("PUT", "/api/library/conversations/c1/folder"),
+        ("PUT", "/api/library/conversations/c1/tags"),
+    ]
+    assert json.loads(seen[1].content) == {"name": "Work"}
+    assert json.loads(seen[2].content) == {"name": "draft"}
+    assert json.loads(seen[3].content) == {"folder_id": "f1"}
+    assert json.loads(seen[4].content) == {"folder_id": None}
+    assert json.loads(seen[5].content) == {"tag_ids": ["t1"]}
+
+
+@pytest.mark.asyncio
+async def test_a_library_write_is_never_retried():
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        assert (request.method, request.url.path) == ("POST", "/api/library/folders")
+        return httpx.Response(503, json={"detail": "busy"})
+
+    with pytest.raises(ServerError):
+        await make(handler).create_folder("Work")
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_a_report_names_one_message_and_the_answer_is_typed():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        assert (request.method, request.url.path) == ("POST", "/api/conversations/c1/report")
+        return httpx.Response(201, json={"id": "rep1", "kind": "unsafe"})
+
+    filed = await make(handler).report_conversation(
+        "c1", "unsafe", note="beeping", message_id="m7"
+    )
+    assert (filed.id, filed.kind) == ("rep1", "unsafe")
+    assert json.loads(seen[0].content) == {
+        "kind": "unsafe", "message_id": "m7", "note": "beeping",
+    }
+
+    # A conversation-wide report leaves the message id out of the body,
+    # the way the web app sends null for the whole conversation.
+    seen.clear()
+
+    def whole(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(201, json={"id": "rep2", "kind": "unhelpful"})
+
+    await make(whole).report_conversation("c1", "unhelpful")
+    assert "message_id" not in json.loads(seen[0].content)
+
+
+@pytest.mark.asyncio
+async def test_notifications_go_through_the_sdk_typed_resource():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        path, method = request.url.path, request.method
+        if path == "/api/me/notifications" and method == "GET":
+            assert request.url.params["unread"] == "1"
+            assert request.url.params["limit"] == "50"
+            return httpx.Response(
+                200,
+                json={"data": [{**NOTIFICATION, "read_at": None}], "unread_count": 1},
+            )
+        if path == "/api/me/notifications/n1/read":
+            return httpx.Response(
+                200,
+                json={**NOTIFICATION, "read_at": "2026-10-30T00:00:00Z", "unread_count": 0},
+            )
+        if path == "/api/me/notifications/read-all":
+            return httpx.Response(200, json={"read": 1, "unread_count": 0})
+        return httpx.Response(404, json={"detail": path})
+
+    api = make(handler)
+    inbox = await api.notifications(unread=True, limit=50)
+    # The typed rows are flattened at the edge, without the SDK's own
+    # request-id bookkeeping: the app's rows are the server's fields.
+    assert inbox["unread_count"] == 1
+    assert inbox["data"][0]["id"] == "n1"
+    assert inbox["data"][0]["read_at"] is None
+    assert "request_id" not in inbox["data"][0]
+    read = await api.read_notification("n1")
+    assert read["read_at"] == "2026-10-30T00:00:00Z"
+    assert read["unread_count"] == 0
+    assert await api.read_all_notifications() == {"read": 1, "unread_count": 0}
+    assert [(r.method, r.url.path) for r in seen] == [
+        ("GET", "/api/me/notifications"),
+        ("POST", "/api/me/notifications/n1/read"),
+        ("POST", "/api/me/notifications/read-all"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_budget_goes_through_the_sdk_typed_resource():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert (request.method, request.url.path) == ("GET", "/api/budget")
+        return httpx.Response(200, json=BUDGET)
+
+    budget = await make(handler).budget()
+    assert budget["overage_enabled"] is True
+    assert budget["overage_micros"] == 250000
+    assert "request_id" not in budget
+
+
+@pytest.mark.asyncio
+async def test_accounts_list_and_switch():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        path, method = request.url.path, request.method
+        if path == "/api/accounts" and method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "accounts": [
+                        {"slot": 0, "current": True, "subject": "a", "email": "a@x.test",
+                         "name": "A", "org_name": "Work"},
+                        {"slot": 1, "current": False, "subject": "b", "email": "b@x.test",
+                         "name": "B", "org_name": "Home"},
+                    ],
+                    "max": 4,
+                    "room": True,
+                },
+            )
+        if path == "/api/accounts/switch" and method == "POST":
+            return httpx.Response(200, json={"status": "ok", "subject": "b", "email": "b@x.test"})
+        return httpx.Response(404, json={"detail": path})
+
+    api = make(handler)
+    body = await api.accounts()
+    assert [row["email"] for row in body["accounts"]] == ["a@x.test", "b@x.test"]
+    assert await api.switch_account(1) == {"status": "ok", "subject": "b", "email": "b@x.test"}
+    assert [(r.method, r.url.path) for r in seen] == [
+        ("GET", "/api/accounts"),
+        ("POST", "/api/accounts/switch"),
+    ]
+    assert json.loads(seen[1].content) == {"slot": 1}
+
+    calls = 0
+
+    def busy(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(503, json={"detail": "busy"})
+
+    with pytest.raises(ServerError):
+        await make(busy).switch_account(1)
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_an_attachment_download_mints_a_url_and_follows_it():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        path = request.url.path
+        if path == "/api/attachments/att1":
+            return httpx.Response(
+                200,
+                json={"id": "att1", "filename": "picture.png", "content_type": "image/png",
+                      "size_bytes": 4, "scan_status": "clean", "created_at": "1",
+                      "download_url": f"{BASE}/api/attachments/att1/content?token=t"},
+            )
+        if path == "/api/attachments/att1/content":
+            assert request.url.params["token"] == "t"
+            return httpx.Response(200, content=b"PNG!")
+        return httpx.Response(404, json={"detail": path})
+
+    assert await make(handler).download_attachment("att1") == b"PNG!"
+    assert [(r.method, r.url.path) for r in seen] == [
+        ("GET", "/api/attachments/att1"),
+        ("GET", "/api/attachments/att1/content"),
+    ]
+    assert all(r.headers["authorization"] == "Bearer mw_one" for r in seen)
+
+
+@pytest.mark.asyncio
+async def test_an_import_is_uploaded_multipart_and_polled():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        path, method = request.url.path, request.method
+        if path == "/api/me/imports" and method == "POST":
+            assert "multipart/form-data" in request.headers["content-type"]
+            body = request.content.decode("utf-8", "replace")
+            assert 'name="file"; filename="chats.json"' in body
+            assert "CONVERSATIONS" in body
+            return httpx.Response(
+                202,
+                json={"id": "imp1", "status": "pending", "source": "chatgpt",
+                      "conversations_total": 3, "conversations_created": 0,
+                      "conversations_done": 0, "messages_created": 0},
+            )
+        if path == "/api/me/imports" and method == "GET":
+            return httpx.Response(200, json={"data": [{"id": "imp1", "status": "running"}]})
+        if path == "/api/me/imports/imp1":
+            return httpx.Response(
+                200,
+                json={"id": "imp1", "status": "done", "source": "chatgpt",
+                      "conversations_total": 3, "conversations_created": 3,
+                      "conversations_done": 3, "messages_created": 42, "error": None},
+            )
+        return httpx.Response(404, json={"detail": path})
+
+    api = make(handler)
+    row = await api.start_import(b"CONVERSATIONS", "chats.json")
+    assert (row["id"], row["status"]) == ("imp1", "pending")
+    assert [r["id"] for r in await api.list_imports()] == ["imp1"]
+    done = await api.import_status("imp1")
+    assert (done["status"], done["messages_created"]) == ("done", 42)
+    assert [(r.method, r.url.path) for r in seen] == [
+        ("POST", "/api/me/imports"),
+        ("GET", "/api/me/imports"),
+        ("GET", "/api/me/imports/imp1"),
+    ]
+
+    calls = 0
+
+    def busy(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(503, json={"detail": "busy"})
+
+    with pytest.raises(ServerError):
+        await make(busy).start_import(b"x", "again.json")
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_a_transcribe_clip_is_multipart_with_the_language_beside_it():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        assert (request.method, request.url.path) == ("POST", "/api/speech/transcribe")
+        assert "multipart/form-data" in request.headers["content-type"]
+        return httpx.Response(200, json={"text": "  spoken words  "})
+
+    text = await make(handler).transcribe(b"CLIP", "clip.wav", "audio/wav", language="en")
+    # The transcript is the server's words, trimmed for the composer.
+    assert text == "spoken words"
+    body = seen[0].content.decode("utf-8", "replace")
+    assert 'name="file"; filename="clip.wav"' in body
+    assert "CLIP" in body
+    assert "audio/wav" in body
+    # The language hint rides as a bare form field, as FormData would send it.
+    assert 'name="language"' in body and "\r\nen\r\n" in body
+
+    seen.clear()
+
+    def bare(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"text": "x"})
+
+    await make(bare).transcribe(b"CLIP", "clip.wav", "audio/wav")
+    assert 'name="language"' not in seen[0].content.decode("utf-8", "replace")

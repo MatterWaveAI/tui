@@ -10,6 +10,8 @@ uvx matterwave-tui                 # run without installing
 pipx install matterwave-tui        # or install it once
 ```
 
+Both install from the [MatterWaveAI](https://pypi.org/org/MatterWaveAI/) org on PyPI.
+
 From a checkout of this repo: `uv sync && uv run matterwave-tui`.
 
 ## Sign in

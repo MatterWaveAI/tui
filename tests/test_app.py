@@ -10,22 +10,31 @@ import pytest
 from matterwave_sdk import frames as fr
 from matterwave_sdk.errors import APIError, RateLimitError
 from matterwave_sdk.models import Conversation
-from textual.widgets import Collapsible, Input, ListView, Markdown, Static, TextArea
+from textual.widgets import Collapsible, Input, ListView, Markdown, OptionList, Static, TextArea
 
 from matterwave_tui.api import Cut, HttpChatAPI, Opened, StreamItem
-from matterwave_tui.app import TEMPORARY_NOTICE, MatterWaveApp
+from matterwave_tui.app import (
+    IMPORT_MAX_BYTES,
+    TEMPORARY_NOTICE,
+    MatterWaveApp,
+    Transcript,
+    TuiCommands,
+)
 from matterwave_tui.auth import DeviceCode
 from matterwave_tui.screens import (
+    Accounts,
     Confirm,
     DeviceLogin,
+    Dictation,
     FeedbackDialog,
     InstructionsEditor,
+    Library,
     ModelPicker,
     Notifications,
     Prompt,
     Shares,
 )
-from matterwave_tui.widgets import DividerView, MessageView
+from matterwave_tui.widgets import DividerView, ImageView, MessageView
 
 from .fake_api import (
     FakeAPI,
@@ -98,6 +107,7 @@ def json_routes(request: httpx.Request) -> httpx.Response | None:
         "/api/me/notifications",
         "/api/announcements",
         "/api/budget",
+        "/api/library",
     ):
         return httpx.Response(404, json={"detail": "Not Found"})
     return None
@@ -801,6 +811,162 @@ async def test_the_notifications_panel_reads_one_or_all(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_the_notifications_panel_pages_and_filters_unread(tmp_path, monkeypatch):
+    monkeypatch.setenv("MATTERWAVE_STATE_DIR", str(tmp_path))
+    api = FakeAPI()
+    api.notification_rows = [notification(f"n{i:02d}") for i in range(1, 46)]
+    api.notification_rows[10]["read_at"] = "2026-10-29T01:00:00Z"
+    api.notification_rows[40]["read_at"] = "2026-10-29T01:00:00Z"
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        # The first page only: 30 of the 45 rows, and the badge counts
+        # every unread row the server holds, loaded or not.
+        assert "✉ 43 unread" in status(app)
+        assert len(app.notification_rows) == 30
+        await pilot.press("escape", "N")
+        await settle(app, pilot)
+        panel = app.screen
+        assert isinstance(panel, Notifications)
+        head = str(panel.query_one("#notifications-head", Static).render())
+        assert "29 unread of 30 loaded, page 1 of 1" in head
+        # `n` asks for a longer limit and turns to what arrived.
+        await pilot.press("n")
+        await settle(app, pilot)
+        assert len(panel.rows) == 45
+        head = str(panel.query_one("#notifications-head", Static).render())
+        assert "43 unread of 45 loaded, page 2 of 2" in head
+        # At the end of the history, `n` says so and stays.
+        await pilot.press("n")
+        await settle(app, pilot)
+        head = str(panel.query_one("#notifications-head", Static).render())
+        assert "page 2 of 2" in head
+        # `p` turns back.
+        await pilot.press("p")
+        await settle(app, pilot)
+        head = str(panel.query_one("#notifications-head", Static).render())
+        assert "page 1 of 2" in head
+        # `u` fetches only the unread ones, and `u` again lets the rest
+        # back in; the badge counts the same either way.
+        await pilot.press("u")
+        await settle(app, pilot)
+        assert panel.unread_only
+        assert len(panel.rows) == 30
+        assert all(not row.get("read_at") for row in panel.rows)
+        head = str(panel.query_one("#notifications-head", Static).render())
+        assert "30 unread of 30 loaded, page 1 of 1" in head
+        await pilot.press("n")
+        await settle(app, pilot)
+        assert len(panel.rows) == 43
+        head = str(panel.query_one("#notifications-head", Static).render())
+        assert "43 unread of 43 loaded, page 2 of 2" in head
+        await pilot.press("u")
+        await settle(app, pilot)
+        assert not panel.unread_only
+        assert len(panel.rows) == 30
+        assert "✉ 43 unread" in status(app)
+
+
+@pytest.mark.asyncio
+async def test_the_library_screen_files_and_tags_and_the_captions_follow():
+    api = FakeAPI()
+    api.library_folders = [
+        {"id": "f1", "name": "Work", "position": 0, "created_at": "1", "updated_at": "1"}
+    ]
+    api.library_tags = [{"id": "t1", "name": "draft", "created_at": "1"}]
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("escape", "l")
+        await settle(app, pilot)
+        screen = app.screen
+        assert isinstance(screen, Library)
+        rows = screen.query_one("#library-rows", OptionList)
+
+        def labels() -> list[str]:
+            return [str(rows.get_option_at_index(i).prompt) for i in range(rows.option_count)]
+
+        assert labels() == ["— Folders —", "  Work", "— Tags —", "  draft"]
+
+        # Onto the folder row and `m`: the chat is filed, the caption
+        # names the folder.
+        rows.highlighted = 1
+        await pilot.press("m")
+        await settle(app, pilot)
+        assert api.folder_moves == [("c1", "f1")]
+        assert app.conversation is not None and app.conversation.folder_id == "f1"
+        assert sidebar_captions(app) == ["New chat — 📁 Work"]
+        assert "Filed." in shown
+        assert labels()[1] == "● Work"
+
+        # Onto the tag row and Space: the tag is set, the caption carries it.
+        rows.highlighted = 3
+        await pilot.press("space")
+        await settle(app, pilot)
+        assert api.tag_sets == [("c1", ["t1"])]
+        assert sidebar_captions(app) == ["New chat — 📁 Work · #draft"]
+        assert labels()[3] == "● draft"
+        await pilot.press("space")
+        await settle(app, pilot)
+        assert api.tag_sets[-1] == ("c1", [])
+        assert sidebar_captions(app) == ["New chat — 📁 Work"]
+
+        # A new folder and a new tag land in the list as they are made.
+        await pilot.press("f")
+        await settle(app, pilot)
+        assert isinstance(app.screen, Prompt)
+        box = app.screen.query_one("#prompt-input")
+        box.value = "Archive"
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.folders_created == ["Archive"]
+        assert isinstance(app.screen, Library)
+        assert labels() == [
+            "— Folders —", "● Work", "  Archive", "— Tags —", "  draft",
+        ]
+
+        # A folder of a taken name is the server's 409, said, not a banner.
+        await pilot.press("f")
+        await settle(app, pilot)
+        box = app.screen.query_one("#prompt-input")
+        box.value = "Work"
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.folders_created == ["Archive"]
+        assert any("already have one" in s for s in shown)
+
+        await pilot.press("t")
+        await settle(app, pilot)
+        box = app.screen.query_one("#prompt-input")
+        box.value = "spam"
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.tags_created == ["spam"]
+        assert labels()[-1] == "  spam"
+
+        # `m` on the folder the chat is already in takes it back out.
+        rows.highlighted = 1
+        await pilot.press("m")
+        await settle(app, pilot)
+        assert api.folder_moves[-1] == ("c1", None)
+        assert app.conversation is not None and app.conversation.folder_id is None
+        assert sidebar_captions(app) == ["New chat"]
+        assert "Back in the main list." in shown
+
+        # `m` on a tag row files nothing; it says where to point instead.
+        rows.highlighted = 3
+        await pilot.press("m")
+        await settle(app, pilot)
+        assert len(api.folder_moves) == 2
+        assert any("Highlight a folder" in s for s in shown)
+
+        await pilot.press("escape")
+        await settle(app, pilot)
+        assert not isinstance(app.screen, Library)
+
+
+@pytest.mark.asyncio
 async def test_announcements_show_once_and_stay_dismissed(tmp_path, monkeypatch):
     monkeypatch.setenv("MATTERWAVE_STATE_DIR", str(tmp_path))
     api = FakeAPI()
@@ -1090,3 +1256,330 @@ async def test_an_image_is_refused_when_the_model_cannot_see_and_a_document_is_n
         attach("notes.txt")
         await settle(app, pilot)
         assert [name for name, _ in api.uploads] == ["notes.txt"]
+
+
+@pytest.mark.asyncio
+async def test_the_feedback_dialog_carries_the_selected_replys_id():
+    api = FakeAPI()
+    api.tree_messages = [
+        message("u1", "user", "q"),
+        message("a1", "assistant", "one", parent="u1", created_at="2"),
+        message("a2", "assistant", "two", parent="a1", created_at="3"),
+    ]
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        # Select the first reply, not the last: the dialog is opened on it
+        # and the rating it saves must be that reply's, by id.
+        await pilot.press("escape", "up", "up", "b")
+        await settle(app, pilot)
+        dialog = app.screen
+        assert isinstance(dialog, FeedbackDialog)
+        assert dialog.message_id == "a1"
+        await pilot.press("ctrl+t")
+        await settle(app, pilot)
+        assert api.feedback_puts == [("a1", -1, [], None)]
+        assert "Feedback sent." in shown
+
+
+@pytest.mark.asyncio
+async def test_a_report_targets_the_selected_reply_or_the_conversation():
+    api = FakeAPI()
+    api.tree_messages = [
+        message("u1", "user", "q"),
+        message("a1", "assistant", "one", parent="u1", created_at="2"),
+    ]
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        # With a reply selected, the report is about that reply.
+        await pilot.press("escape", "up", "R")
+        await settle(app, pilot)
+        await pilot.press(*"unsafe", "enter")
+        await settle(app, pilot)
+        assert isinstance(app.screen, Prompt)  # the note, then the confirm
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert isinstance(app.screen, Confirm)
+        texts = [str(node.render()) for node in app.screen.query(Static)]
+        assert any("the selected reply" in text for text in texts)
+        await pilot.press("y")
+        await settle(app, pilot)
+        assert api.reports == [("c1", "unsafe", "a1", None)]
+        assert any("Report rep1 filed" in s for s in shown)
+
+        # With nothing selected, it is the conversation as a whole, and
+        # the body carries no message id at all.
+        app.query_one("#transcript", Transcript).select(None)
+        api.reports.clear()
+        await pilot.press("escape", "R")
+        await settle(app, pilot)
+        await pilot.press(*"unhelpful", "enter")
+        await settle(app, pilot)
+        await pilot.press("enter", "y")
+        await settle(app, pilot)
+        assert api.reports == [("c1", "unhelpful", None, None)]
+
+
+@pytest.mark.asyncio
+async def test_the_account_switcher_offers_the_parked_and_reloads():
+    api = FakeAPI()
+    api.account_rows = [
+        {"slot": 0, "current": True, "subject": "a", "email": "a@x.test",
+         "name": "A", "org_name": "Work"},
+        {"slot": 1, "current": False, "subject": "b", "email": "b@x.test",
+         "name": "B", "org_name": "Home"},
+    ]
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        app.action_switch_account()
+        await settle(app, pilot)
+        switcher = app.screen
+        assert isinstance(switcher, Accounts)
+        options = switcher.query_one("#account-rows", OptionList)
+        # The acting account is marked, not offered; the parked one is.
+        assert options.get_option_at_index(0).disabled
+        assert not options.get_option_at_index(1).disabled
+        reads_before = api.tree_reads
+        options.highlighted = 1
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.switches == [1]
+        assert any("Switched to b@x.test." in s for s in shown)
+        # Everything the old account had open was dropped and read again
+        # from the account that is acting now.
+        assert not isinstance(app.screen, Accounts)
+        assert api.tree_reads > reads_before
+
+    # The rows the fake holds swapped slots, as the server's swap would.
+    assert [row["slot"] for row in api.account_rows] == [1, 0]
+    assert api.account_rows[0]["current"] is False
+
+
+@pytest.mark.asyncio
+async def test_the_switcher_says_when_nothing_is_parked():
+    api = FakeAPI()
+    api.account_rows = [
+        {"slot": 0, "current": True, "subject": "a", "email": "a@x.test",
+         "name": "A", "org_name": "Work"},
+    ]
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        app.action_switch_account()
+        await settle(app, pilot)
+        assert any("No other account is signed in" in s for s in shown)
+        assert not isinstance(app.screen, Accounts)
+
+
+@pytest.mark.asyncio
+async def test_an_import_is_uploaded_watched_and_summarised(tmp_path, monkeypatch):
+    monkeypatch.setattr("matterwave_tui.app.IMPORT_POLL_S", 0.01)
+    api = FakeAPI()
+    api.import_done_after = 1  # the first poll finds the job done
+    export = tmp_path / "chats.json"
+    export.write_bytes(b"EXPORT")
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        app.apply_import(str(export))
+        await settle(app, pilot)
+        assert api.imports_started == [("chats.json", b"EXPORT")]
+        assert api.import_status_calls == ["imp1"]
+        assert any("Import starting" in s for s in shown)
+        assert any("Imported 2 conversations, 9 messages from ChatGPT" in s for s in shown)
+
+        # An oversized export is refused before the upload would go.
+        api.imports_started.clear()
+        big = tmp_path / "big.json"
+        big.write_bytes(b"x" * (IMPORT_MAX_BYTES + 1))
+        app.apply_import(str(big))
+        await settle(app, pilot)
+        assert api.imports_started == []
+        assert any("100 MB limit" in s for s in shown)
+
+        # A job that fails names the error it reported.
+        api.import_done_after = None
+        api.import_rows = [{"id": "imp2", "status": "failed",
+                            "error": "This export holds no conversations."}]
+        app._watch_import("imp2")
+        await settle(app, pilot)
+        assert any("Import failed: This export holds no conversations." in s for s in shown)
+
+
+@pytest.mark.asyncio
+async def test_dictation_without_the_microphone_extra_transcribes_a_file(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("matterwave_tui.app.mic_available", lambda: False)
+    api = FakeAPI()
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("escape", "v")
+        await settle(app, pilot)
+        # The extra is missing: the fallback says so and asks for a file.
+        assert any("matterwave-tui[dictation]" in s for s in shown)
+        assert isinstance(app.screen, Prompt)
+        (tmp_path / "clip.wav").write_bytes(b"CLIPBYTES")
+        await pilot.press(*"clip.wav", "enter")
+        await settle(app, pilot)
+        assert api.transcribes == [("clip.wav", "audio/wav", None, b"CLIPBYTES")]
+        # The transcript is text in the composer, nothing sent.
+        assert "hello there" in app.query_one("#composer", TextArea).text
+        assert api.sent == []
+
+        # A suffix the server refuses is caught before an upload.
+        await pilot.press("escape", "v")
+        await settle(app, pilot)
+        (tmp_path / "notes.txt").write_bytes(b"words")
+        await pilot.press(*"notes.txt", "enter")
+        await settle(app, pilot)
+        assert api.transcribes == [("clip.wav", "audio/wav", None, b"CLIPBYTES")]
+        assert any("Send an audio clip" in s for s in shown)
+
+
+@pytest.mark.asyncio
+async def test_dictation_with_the_microphone_posts_the_clip(monkeypatch):
+    monkeypatch.setattr("matterwave_tui.app.mic_available", lambda: True)
+    api = FakeAPI()
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("escape", "v")
+        await settle(app, pilot)
+        recorder_screen = app.screen
+        assert isinstance(recorder_screen, Dictation)
+
+        # The microphone itself is stubbed: enter "stops" it with a clip,
+        # which goes to the route and lands as text in the composer.
+        class FakeRecorder:
+            def stop(self) -> bytes:
+                return b"RIFF"
+
+            def discard(self) -> None:
+                return None
+
+        recorder_screen.recorder = FakeRecorder()
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.transcribes[-1][:3] == ("dictation.wav", "audio/wav", None)
+        assert "hello there" in app.query_one("#composer", TextArea).text
+        assert not isinstance(app.screen, Dictation)
+
+        # An empty clip is said in passing, not uploaded.
+        await pilot.press("escape", "v")
+        await settle(app, pilot)
+        empty_screen = app.screen
+        assert isinstance(empty_screen, Dictation)
+        empty_screen.recorder = FakeRecorder()
+        empty_screen.recorder.stop = lambda: b""  # type: ignore[method-assign]
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert any("Nothing was captured" in s for s in shown)
+        assert len(api.transcribes) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_image_part_is_loaded_when_the_terminal_can_draw_it(monkeypatch):
+    monkeypatch.setenv("MATTERWAVE_IMAGES", "kitty")
+    api = FakeAPI()
+    png = b"\x89PNG\r\n\x1a\n" + b"pixels"
+    api.attachments_store["att1"] = png
+    api.tree_messages = [
+        message("u1", "user", "q"),
+        message(
+            "a1", "assistant", "look", parent="u1", created_at="2",
+            parts=[{"type": "image", "attachment_id": "att1", "filename": "pic.png",
+                    "content_type": "image/png"}],
+        ),
+    ]
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert app.image_backend == "kitty"
+        view = app.query(ImageView).first()
+        assert view.data == png
+        assert api.downloaded == ["att1"]
+        # The bytes in hand, the layer queues the draw (transmit, place),
+        # and the placement it keeps knows how to take the picture down.
+        # A periodic refresh may already have placed it and flushed the
+        # queue with the display, so start the layer over to see the
+        # sequences a placement queues.
+        app._image_placements.clear()
+        app._refresh_images()
+        placement = next(iter(app._image_placements.values()))
+        assert any("a=T,f=100" in op for op in app._image_ops)
+        assert "a=d,d=i" in placement.remove
+
+        # A transcript that redraws keeps the loaded bytes; the part does
+        # not download twice.
+        await app.render_thread()
+        await settle(app, pilot)
+        assert api.downloaded == ["att1"]
+
+
+@pytest.mark.asyncio
+async def test_an_image_part_stays_a_placeholder_without_a_backend(monkeypatch):
+    monkeypatch.setenv("MATTERWAVE_IMAGES", "off")
+    api = FakeAPI()
+    api.attachments_store["att1"] = b"\x89PNG\r\n\x1a\npixels"
+    api.tree_messages = [
+        message(
+            "u1", "user", "q",
+            parts=[{"type": "image", "attachment_id": "att1", "filename": "pic.png",
+                    "content_type": "image/png"}],
+        ),
+    ]
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert app.image_backend is None
+        view = app.query(ImageView).first()
+        assert str(view.render()) == "[image: pic.png]"
+        # Nothing is fetched when there is nothing to draw it on.
+        assert api.downloaded == []
+
+        # The download failing is a word on the placeholder, once. The view
+        # learned its backend from the app at compose time; pointing the
+        # app at kitty after the fact points the view too.
+        app.image_backend = "kitty"
+        view.backend = "kitty"
+        api.attachments_store.clear()
+        app.load_images()
+        await settle(app, pilot)
+        assert view.failed
+        assert "could not be loaded" in str(view.render())
+
+
+@pytest.mark.asyncio
+async def test_the_command_palette_offers_the_tui_commands():
+    api = FakeAPI()
+    api.account_rows = [
+        {"slot": 0, "current": True, "subject": "a", "email": "a@x.test", "name": "A"},
+    ]
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        provider = TuiCommands(app.screen)
+        names = [hit.display async for hit in provider.discover()]
+        assert any("Switch account" in str(name) for name in names)
+        assert any("Import" in str(name) for name in names)
+        assert any("Dictate" in str(name) for name in names)
+        hits = [hit async for hit in provider.search("switch")]
+        assert hits and callable(hits[0].command)
+        hits[0].command()
+        await settle(app, pilot)
+        # With nothing parked, the switcher says so rather than showing an
+        # empty screen.
+        assert any("No other account is signed in" in s for s in shown)

@@ -2,20 +2,22 @@
 
 The wire is the SDK's: `AsyncMatterWave.conversations` for the routes, its
 `AsyncConversationStream` for a turn (named events, typed frames, one resume
-by `Last-Event-ID`), its errors with the request id on them. What stays here
-is the TUI's own policy: a 401 is answered once with a fresh credential
-before it stands, a write is never retried, and the routes the SDK has no
-usable method for yet (`/api/models`, the conversation delete, pin and
-archive routes, the per-conversation feedback list, the library's folders
-and tags, and the notifications, announcements, report, share-management
-and budget routes) go through the same client.
+by `Last-Event-ID`), its errors with the request id on them, and the typed
+`notifications`, `budget`, `attachments.download` and `messages` resources.
+What stays here is the TUI's own policy: a 401 is answered once with a fresh
+credential before it stands, a write is never retried, and the routes the SDK
+has no usable method for yet (`/api/models`, the conversation delete, pin and
+archive routes, the per-conversation feedback list, the library's folders and
+tags, and the announcements, report, share-management, accounts, import and
+speech routes) go through the same client. The typed rows the app reads as
+plain dicts (notifications, budget) are flattened here, at the edge.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 from urllib.parse import quote
 
@@ -30,6 +32,7 @@ from matterwave_sdk.models import (
     Conversation,
     ConversationContext,
     ConversationMessage,
+    FiledReport,
     Me,
     MessageFeedback,
     RemovedFeedback,
@@ -41,6 +44,11 @@ from . import __version__
 # A local API; anything else comes from --base-url or MATTERWAVE_BASE_URL.
 DEFAULT_BASE_URL = "http://localhost:8000"
 USER_AGENT = f"matterwave-tui/{__version__} {SDK_USER_AGENT}"
+# The notifications route's page bounds (api/matterwave/notifications.py:
+# LIST_LIMIT_DEFAULT 30, LIST_LIMIT_MAX 100). There is no cursor or offset:
+# a longer history is a longer limit, capped at the route's own maximum.
+NOTIFICATIONS_PAGE = 30
+NOTIFICATIONS_LIMIT_MAX = 100
 
 
 # --- what the adapter adds to the server's frames ----------------------------
@@ -117,23 +125,55 @@ class ChatAPI(Protocol):
 
     async def conversation_feedback(self, conversation_id: str) -> list[dict[str, Any]]: ...
 
-    async def notifications(self) -> dict[str, Any]: ...
+    async def notifications(
+        self, *, unread: bool = False, limit: int = NOTIFICATIONS_PAGE
+    ) -> dict[str, Any]: ...
 
     async def read_notification(self, notification_id: str) -> dict[str, Any]: ...
 
     async def read_all_notifications(self) -> dict[str, Any]: ...
 
+    async def library(self) -> dict[str, Any]: ...
+
+    async def create_folder(self, name: str) -> dict[str, Any]: ...
+
+    async def move_to_folder(self, conversation_id: str, folder_id: str | None) -> None: ...
+
+    async def create_tag(self, name: str) -> dict[str, Any]: ...
+
+    async def set_tags(self, conversation_id: str, tag_ids: Sequence[str]) -> dict[str, Any]: ...
+
     async def announcements(self) -> dict[str, Any]: ...
 
     async def report_conversation(
-        self, conversation_id: str, kind: str, note: str | None = None
-    ) -> dict[str, Any]: ...
+        self,
+        conversation_id: str,
+        kind: str,
+        note: str | None = None,
+        message_id: str | None = None,
+    ) -> FiledReport: ...
 
     async def conversation_shares(self, conversation_id: str) -> list[dict[str, Any]]: ...
 
     async def my_shares(self) -> list[dict[str, Any]]: ...
 
     async def revoke_share(self, share_id: str) -> dict[str, Any]: ...
+
+    async def accounts(self) -> dict[str, Any]: ...
+
+    async def switch_account(self, slot: int) -> dict[str, Any]: ...
+
+    async def download_attachment(self, attachment_id: str) -> bytes: ...
+
+    async def start_import(self, data: bytes, filename: str) -> dict[str, Any]: ...
+
+    async def list_imports(self) -> list[dict[str, Any]]: ...
+
+    async def import_status(self, import_id: str) -> dict[str, Any]: ...
+
+    async def transcribe(
+        self, data: bytes, filename: str, content_type: str, language: str | None = None
+    ) -> str: ...
 
     async def budget(self) -> dict[str, Any]: ...
 
@@ -220,6 +260,17 @@ def _path(*segments: str) -> str:
     return "/api/" + "/".join(quote(s, safe="") for s in segments)
 
 
+def _plain(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """`asdict`'s factory that leaves the SDK models' `request_id` out: the
+    app's rows are the server's fields, and the transport's bookkeeping is
+    not one of them."""
+    return {key: value for key, value in pairs if key != "request_id"}
+
+
+def _row_dict(model: Any) -> dict[str, Any]:
+    return asdict(model, dict_factory=_plain)
+
+
 class HttpChatAPI:
     """`ChatAPI` over the SDK."""
 
@@ -254,10 +305,20 @@ class HttpChatAPI:
             await self._http.aclose()
 
     async def _app_json(
-        self, client: _Client, method: str, path: str, body: dict[str, Any] | None = None
+        self,
+        client: _Client,
+        method: str,
+        path: str,
+        body: dict[str, Any] | None = None,
+        files: dict[str, tuple[str, bytes, str]] | None = None,
     ) -> dict[str, Any]:
-        """A route the SDK has no method for yet, sent the way its own are."""
-        response = await client._send(sdk_base.Request(method, path, body, True, False))
+        """A route the SDK has no method for yet, sent the way its own are.
+        `files` turns it multipart; the extra fields a route wants beside
+        the file ride as empty-named file parts (the way the SPA's FormData
+        would send them), since httpx drops a json body when files are set."""
+        response = await client._send(
+            sdk_base.Request(method, path, body, True, False, files=files)
+        )
         return sdk_base.parse_json_object(response)
 
     async def _app_none(
@@ -401,24 +462,30 @@ class HttpChatAPI:
         rows = body.get("data")
         return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
 
-    async def notifications(self) -> dict[str, Any]:
-        """`GET /api/me/notifications`: the caller's rows, newest first,
-        with the unread count the badge shows."""
-        return await self._app_json(self._reads, "GET", _path("me", "notifications"))
+    async def notifications(
+        self, *, unread: bool = False, limit: int = NOTIFICATIONS_PAGE
+    ) -> dict[str, Any]:
+        """`GET /api/me/notifications` by way of the SDK's typed resource:
+        the caller's rows, newest first, with the unread count the badge
+        shows. `unread=1` lists only the unread ones (the count is the same
+        either way) and `limit` caps the page; the route has no cursor, so
+        a longer history is a longer limit. The typed rows are flattened to
+        the dicts the app reads."""
+        page = await self._reads.notifications.list(unread=unread, limit=limit)
+        return {"data": [_row_dict(row) for row in page.data], "unread_count": page.unread_count}
 
     async def read_notification(self, notification_id: str) -> dict[str, Any]:
-        """`POST /api/me/notifications/{id}/read`: the row with its (first)
-        `read_at`, and the unread count now. A write: no retries."""
-        return await self._app_json(
-            self._writes, "POST", _path("me", "notifications", notification_id, "read")
-        )
+        """`POST /api/me/notifications/{id}/read` by way of the SDK: the row
+        with its (first) `read_at`, and the unread count now. A write: no
+        retries."""
+        row = await self._writes.notifications.read(notification_id)
+        return _row_dict(row)
 
     async def read_all_notifications(self) -> dict[str, Any]:
-        """`POST /api/me/notifications/read-all`: how many rows it marked
-        and an unread count of 0. A write: no retries."""
-        return await self._app_json(
-            self._writes, "POST", _path("me", "notifications", "read-all")
-        )
+        """`POST /api/me/notifications/read-all` by way of the SDK: how many
+        rows it marked and an unread count of 0. A write: no retries."""
+        marked = await self._writes.notifications.read_all()
+        return {"read": marked.read, "unread_count": marked.unread_count}
 
     async def announcements(self) -> dict[str, Any]:
         """`GET /api/announcements`: the ones inside their window, most
@@ -427,18 +494,21 @@ class HttpChatAPI:
         return await self._app_json(self._reads, "GET", _path("announcements"))
 
     async def report_conversation(
-        self, conversation_id: str, kind: str, note: str | None = None
-    ) -> dict[str, Any]:
-        """`POST /api/conversations/{id}/report`: `kind` is `unsafe`
-        (routed to review) or `unhelpful` (the product backlog), the note
-        is the reporter's own words, and the answer's id is the one a user
-        quotes to support. A report filed twice would be two queue entries:
-        a write, no retries."""
-        body: dict[str, Any] = {"kind": kind}
-        if note:
-            body["note"] = note
-        return await self._app_json(
-            self._writes, "POST", _path("conversations", conversation_id, "report"), body
+        self,
+        conversation_id: str,
+        kind: str,
+        note: str | None = None,
+        message_id: str | None = None,
+    ) -> FiledReport:
+        """`POST /api/conversations/{id}/report` by way of the SDK: `kind`
+        is `unsafe` (routed to review) or `unhelpful` (the product backlog),
+        the note is the reporter's own words, and `message_id` targets one
+        reply where the report is about a single answer rather than the
+        whole conversation. The answer's id is the one a user quotes to
+        support. A report filed twice would be two queue entries: a write,
+        no retries."""
+        return await self._writes.conversations.report(
+            conversation_id, kind, message_id=message_id, note=note
         )
 
     async def conversation_shares(self, conversation_id: str) -> list[dict[str, Any]]:
@@ -463,10 +533,76 @@ class HttpChatAPI:
         retries."""
         return await self._app_json(self._writes, "DELETE", _path("shares", share_id))
 
+    async def accounts(self) -> dict[str, Any]:
+        """`GET /api/accounts`: who is signed in, the acting account first,
+        each with its `slot` (0 acting, 1.. parked), an `email`, a `name`
+        and an `org_name`; plus the browser's `max` and whether there is
+        `room` for another. The route is cookie-shaped, so the answer shows
+        what the server holds for this client's credential."""
+        return await self._app_json(self._reads, "GET", _path("accounts"))
+
+    async def switch_account(self, slot: int) -> dict[str, Any]:
+        """`POST /api/accounts/switch`: make the account parked in `slot`
+        the acting one. The answer names the subject and email now acting.
+        A switch that lands twice swaps the same pair again: it is a write,
+        no retries."""
+        return await self._app_json(
+            self._writes, "POST", _path("accounts", "switch"), {"slot": slot}
+        )
+
+    async def download_attachment(self, attachment_id: str) -> bytes:
+        """An attachment's bytes by way of the SDK's typed resource: `get`
+        mints the short-lived signed URL, `download` follows it. Both are
+        reads, so they may take the SDK's retries."""
+        attachment = await self._reads.attachments.get(attachment_id)
+        return await self._reads.attachments.download(attachment)
+
+    async def start_import(self, data: bytes, filename: str) -> dict[str, Any]:
+        """`POST /api/me/imports` (multipart) by way of the raw client: the
+        export is parsed and counted, the job queued, and the row comes
+        back `pending` with what was found. An upload that lands twice
+        would import everything twice, so it is a write: no retries."""
+        return await self._app_json(
+            self._writes,
+            "POST",
+            _path("me", "imports"),
+            files={"file": (filename, data, "application/octet-stream")},
+        )
+
+    async def list_imports(self) -> list[dict[str, Any]]:
+        """`GET /api/me/imports`: the caller's recent imports, newest
+        first."""
+        body = await self._app_json(self._reads, "GET", _path("me", "imports"))
+        rows = body.get("data")
+        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+    async def import_status(self, import_id: str) -> dict[str, Any]:
+        """`GET /api/me/imports/{id}`: where one import stands — `pending`,
+        `running`, `done` or `failed`, with the counts of what it did."""
+        return await self._app_json(self._reads, "GET", _path("me", "imports", import_id))
+
+    async def transcribe(
+        self, data: bytes, filename: str, content_type: str, language: str | None = None
+    ) -> str:
+        """`POST /api/speech/transcribe`: one clip in, its words out. The
+        request is the SPA's multipart `file`; the optional BCP 47
+        `language` hint rides beside it as a bare form field (httpx drops a
+        json body when files are set, so it goes as an empty-named part,
+        which is the same thing a FormData append produces). Nothing is
+        kept server-side, so the reads' retries do no harm."""
+        files: dict[str, tuple[str, bytes, str]] = {
+            "file": (filename, data, content_type),
+        }
+        if language:
+            files["language"] = ("", language.encode("utf-8"), "text/plain")
+        body = await self._app_json(self._reads, "POST", _path("speech", "transcribe"), files=files)
+        return str(body.get("text") or "").strip()
+
     async def budget(self) -> dict[str, Any]:
-        """`GET /api/budget`: the org's allowance and usage with the
-        overage cap in force, for the status line."""
-        return await self._app_json(self._reads, "GET", _path("budget"))
+        """`GET /api/budget` by way of the SDK's typed resource: the org's
+        allowance and usage with the overage cap in force, for the status
+        line, flattened to the dict the app reads."""
+        return _row_dict(await self._reads.budget.get())
 
     async def usage(self) -> UsageBalance:
         """`GET /api/me/usage` by way of the SDK: the org's balance this
@@ -487,7 +623,7 @@ class HttpChatAPI:
     async def compact(self, conversation_id: str) -> ConversationMessage:
         return await self._writes.conversations.compact(conversation_id)
 
-    # --- the library (folders and tags): adapters only, no UI yet -------------
+    # --- the library (folders and tags) ---------------------------------------
 
     async def library(self) -> dict[str, Any]:
         """`GET /api/library`: the caller's folders, tags and which

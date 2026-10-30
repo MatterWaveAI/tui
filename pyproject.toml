@@ -1,6 +1,6 @@
 [project]
 name = "matterwave-tui"
-version = "0.2.1"
+version = "0.3.0"
 description = "A terminal client for MatterWave chat: the same conversations as the web app"
 readme = "README.md"
 requires-python = ">=3.11"

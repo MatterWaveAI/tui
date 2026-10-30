@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +33,9 @@ from .screens import (
     FeedbackDialog,
     InstructionsEditor,
     ModelPicker,
+    Notifications,
     Prompt,
+    Shares,
 )
 from .thread import Divider, Message, Thread
 from .widgets import DividerView, MessageView, ThumbClicked
@@ -51,6 +56,37 @@ TEMPORARY_NOTICE = (
     "Temporary chat. It won't appear in your history or search, can't be shared, "
     "and is deleted 24 hours after the last message."
 )
+
+
+# --- per-device state (dismissed announcement ids) ----------------------------
+
+
+def _state_path() -> Path:
+    """Where the app keeps its per-device state. MATTERWAVE_STATE_DIR moves
+    it, which is also how the tests point it at a scratch directory."""
+    root = os.environ.get("MATTERWAVE_STATE_DIR")
+    if not root:
+        xdg = os.environ.get("XDG_STATE_HOME")
+        root = xdg if xdg else str(Path.home() / ".local" / "state")
+    return Path(root) / "matterwave-tui" / "dismissed-announcements.json"
+
+
+def _read_dismissed(path: Path) -> set[str]:
+    """The announcement ids dismissed on this device. Anything unreadable
+    reads as none dismissed, which only re-shows a notice."""
+    try:
+        rows = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    return {str(row) for row in rows if row} if isinstance(rows, list) else set()
+
+
+def _write_dismissed(path: Path, ids: set[str]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(sorted(ids)), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def estimate_tokens(text: str) -> int:
@@ -137,6 +173,8 @@ class MatterWaveApp(App[None]):
     #transcript { height: 1fr; padding: 0 1; }
     #failure { display: none; background: $error 20%; color: $text; padding: 0 1; }
     #failure.shown { display: block; }
+    #announcements { display: none; background: $accent 20%; color: $text; padding: 0 1; }
+    #announcements.shown { display: block; }
     #temporary { display: none; background: $warning 20%; color: $text; padding: 0 1; }
     #temporary.shown { display: block; }
     #composer { height: 6; border: round $panel; }
@@ -162,6 +200,10 @@ class MatterWaveApp(App[None]):
         Binding("d", "delete_conversation", "Delete"),
         Binding("f", "fork", "Fork"),
         Binding("s", "share", "Share"),
+        Binding("S", "my_shares", "Shares"),
+        Binding("R", "report", "Report"),
+        Binding("N", "notifications", "Inbox"),
+        Binding("A", "dismiss_announcements", "Dismiss"),
         Binding("w", "export_markdown", "Export"),
         Binding("i", "attach", "Attach"),
         Binding("o", "cycle_filter", "List"),
@@ -204,6 +246,19 @@ class MatterWaveApp(App[None]):
         self.feedback: dict[str, dict[str, Any]] = {}
         # Which slice of the conversations the sidebar shows.
         self.list_filter = "default"
+        # The caller's notifications (the page GET /api/me/notifications
+        # answers) and the unread count the badge shows; None until the
+        # route has answered (or forever, when it is not there).
+        self.notification_rows: list[dict[str, Any]] = []
+        self.unread_notifications: int | None = None
+        # The announcements in their window that this device has not
+        # dismissed; a critical one is never dismissible.
+        self.announcements: list[dict[str, Any]] = []
+        # The org's budget (GET /api/budget), for the overage line; None
+        # until the route has answered.
+        self.budget: dict[str, Any] | None = None
+        # The caller's share links, as the shares screen last saw them.
+        self.share_rows: list[dict[str, Any]] = []
         # When the server's `Retry-After` runs out, on the monotonic clock.
         self.rate_limited_until: float | None = None
         self._search_seq = 0
@@ -216,6 +271,7 @@ class MatterWaveApp(App[None]):
                 yield Input(placeholder="Search (/)", id="search")
                 yield ListView(id="conversations")
             with Vertical(id="main"):
+                yield Static("", id="announcements", markup=False)
                 yield Transcript(id="transcript")
                 yield Static("", id="failure", markup=False)
                 yield Static("", id="temporary", markup=False)
@@ -251,6 +307,15 @@ class MatterWaveApp(App[None]):
                 warn = "⚠ " if balance.warn else ""
                 bits.append(f"{warn}usage {balance.used:,}/{balance.included:,} "
                             f"({round(balance.percent)}%)")
+        budget = self.budget
+        if budget is not None and budget.get("overage_enabled"):
+            overage = int(budget.get("overage_micros") or 0)
+            cap = int(budget.get("overage_cap_micros") or 0)
+            if cap:
+                warn = "⚠ " if overage >= cap else ""
+                bits.append(f"{warn}overage ${overage / 1e6:,.2f} of ${cap / 1e6:,.2f}")
+        if self.unread_notifications:
+            bits.append(f"✉ {self.unread_notifications} unread")
         if self.pending_attachments:
             names = ", ".join(a.filename for a in self.pending_attachments)
             bits.append(f"attached: {names}")
@@ -329,7 +394,10 @@ class MatterWaveApp(App[None]):
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Share and fork do not exist for a temporary conversation: while
-        one is open the keys are dead and the commands off the footer."""
+        one is open the keys are dead and the commands off the footer. The
+        announcements banner offers its dismiss key only while it stands."""
+        if action == "dismiss_announcements":
+            return bool(self.announcements)
         return not (self.temporary_chat and action in ("share", "fork"))
 
     def go_offline(self) -> None:
@@ -358,6 +426,9 @@ class MatterWaveApp(App[None]):
         await self.load_models()
         await self.refresh_conversations()
         self.load_usage()
+        self.load_budget()
+        self.load_notifications()
+        self.load_announcements()
         if self.conversations:
             await self.open_conversation(self.conversations[0].id)
         self.render_status()
@@ -399,6 +470,54 @@ class MatterWaveApp(App[None]):
             return
         self.usage_balance = balance
         self.render_status()
+
+    @work(group="budget", exclusive=True)
+    async def load_budget(self) -> None:
+        """The org's budget with the overage cap in force, for the status
+        line's overage bit."""
+        try:
+            body = await self.api.budget()
+        except Exception:
+            # No budget route on this deployment: the usage line stands alone.
+            return
+        self.budget = body if isinstance(body, dict) else None
+        self.render_status()
+
+    @work(group="notifications", exclusive=True)
+    async def load_notifications(self) -> None:
+        """The bell's rows and the unread count the status line badges."""
+        try:
+            body = await self.api.notifications()
+        except Exception:
+            # No notifications route on this deployment: no badge, no rows.
+            return
+        rows = body.get("data")
+        self.notification_rows = (
+            [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+        )
+        count = body.get("unread_count")
+        self.unread_notifications = count if isinstance(count, int) else None
+        self.render_status()
+
+    @work(group="announcements", exclusive=True)
+    async def load_announcements(self) -> None:
+        """The announcements in their window, minus the ids this device has
+        dismissed. A critical one is never dismissible, the platform's own
+        rule, so it shows however often it is dismissed here."""
+        try:
+            body = await self.api.announcements()
+        except Exception:
+            # No announcements route on this deployment: no banner.
+            return
+        rows = body.get("data")
+        active = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+        dismissed = _read_dismissed(_state_path())
+        self.announcements = [
+            row
+            for row in active
+            if not row.get("dismissible", True) or str(row.get("id")) not in dismissed
+        ]
+        self.render_announcements()
 
     @on(Input.Changed, "#search")
     def _search_changed(self, event: Input.Changed) -> None:
@@ -884,6 +1003,158 @@ class MatterWaveApp(App[None]):
         self.list_filter = LIST_FILTERS[(index + 1) % len(LIST_FILTERS)]
         await self.refresh_conversations()
         self.notify(f"Showing {self.list_filter} conversations.")
+
+    # --- notifications and announcements -----------------------------------------
+
+    def action_notifications(self) -> None:
+        self.push_screen(
+            Notifications(
+                list(self.notification_rows),
+                mark_read=self.apply_notification_read,
+                mark_all=self.apply_notifications_read_all,
+            )
+        )
+
+    async def apply_notification_read(self, notification_id: str) -> list[dict[str, Any]]:
+        """One row read: the panel redraws from the rows this hands back,
+        and the status line's badge follows the unread count."""
+        try:
+            row = await self.api.read_notification(notification_id)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return self.notification_rows
+        self.notification_rows = [
+            row if r.get("id") == notification_id else r for r in self.notification_rows
+        ]
+        count = row.get("unread_count")
+        self.unread_notifications = count if isinstance(count, int) else self.unread_notifications
+        self.render_status()
+        return self.notification_rows
+
+    async def apply_notifications_read_all(self) -> list[dict[str, Any]]:
+        try:
+            await self.api.read_all_notifications()
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return self.notification_rows
+        read_at = datetime.now(UTC).isoformat()
+        self.notification_rows = [
+            {**row, "read_at": row.get("read_at") or read_at} for row in self.notification_rows
+        ]
+        self.unread_notifications = 0
+        self.render_status()
+        return self.notification_rows
+
+    def render_announcements(self) -> None:
+        banner = self.query_one("#announcements", Static)
+        if not self.announcements:
+            banner.remove_class("shown")
+            banner.update("")
+            return
+        lines = []
+        for row in self.announcements:
+            prefix = {"critical": "⛔ ", "warning": "⚠ "}.get(str(row.get("severity")), "ℹ ")
+            lines.append(prefix + str(row.get("message") or ""))
+        lines.append("A dismisses these; a critical notice stays until the operator ends it.")
+        banner.update("\n".join(lines))
+        banner.add_class("shown")
+
+    def action_dismiss_announcements(self) -> None:
+        """Hide the banner and remember which ids this device dismissed, so
+        they do not show again; the critical ones stay."""
+        dismissible = {
+            str(row.get("id"))
+            for row in self.announcements
+            if row.get("dismissible", True) and row.get("id")
+        }
+        path = _state_path()
+        _write_dismissed(path, _read_dismissed(path) | dismissible)
+        self.announcements = [
+            row for row in self.announcements if not row.get("dismissible", True)
+        ]
+        self.render_announcements()
+        # The footer's Dismiss goes away with the banner.
+        self.refresh_bindings()
+
+    # --- reporting ------------------------------------------------------------------
+
+    def action_report(self) -> None:
+        """A report about the open conversation: what kind, an optional
+        note, then the confirm. The platform routes `unsafe` to review and
+        `unhelpful` to the product backlog; the filed id is the one support
+        can be quoted."""
+        if self.conversation is None:
+            return
+        target = self.conversation
+
+        def kind_chosen(kind: str | None) -> None:
+            if kind is None:
+                return
+            if kind not in ("unsafe", "unhelpful"):
+                self.notify("A report is filed as unsafe or unhelpful.", severity="warning")
+                return
+
+            def note_chosen(note: str | None) -> None:
+                def confirmed(filing: bool | None) -> None:
+                    if filing:
+                        self.apply_report(target.id, kind, note)
+
+                self.push_screen(
+                    Confirm(
+                        f"File a {kind} report about “{target.title}”?",
+                        danger=False,
+                        hint="Enter files it, Esc cancels.",
+                    ),
+                    confirmed,
+                )
+
+            self.push_screen(
+                Prompt("Add a note for the reviewers (optional; Esc files without one):"),
+                note_chosen,
+            )
+
+        self.push_screen(
+            Prompt("Report this conversation — kind? (unsafe or unhelpful):"), kind_chosen
+        )
+
+    @work(group="action")
+    async def apply_report(self, conversation_id: str, kind: str, note: str | None) -> None:
+        try:
+            filed = await self.api.report_conversation(conversation_id, kind, note=note)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return
+        report_id = filed.get("id") if isinstance(filed, dict) else None
+        if report_id:
+            self.notify(f"Report {report_id} filed as {kind}.")
+        else:
+            self.notify(f"Report filed as {kind}.")
+
+    # --- share management -------------------------------------------------------------
+
+    @work(group="shares", exclusive=True)
+    async def action_my_shares(self) -> None:
+        try:
+            rows = await self.api.my_shares()
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return
+        self.share_rows = rows
+        self.push_screen(Shares(list(rows), revoke=self.apply_share_revoke))
+
+    async def apply_share_revoke(self, share_id: str) -> list[dict[str, Any]]:
+        try:
+            await self.api.revoke_share(share_id)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return self.share_rows
+        # The server keeps the row and marks it revoked, and so does the list.
+        self.share_rows = [
+            {**row, "status": "revoked"} if row.get("id") == share_id else row
+            for row in self.share_rows
+        ]
+        self.notify("Share revoked.")
+        return self.share_rows
 
     # --- custom instructions -----------------------------------------------------
 

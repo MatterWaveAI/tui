@@ -21,11 +21,21 @@ from matterwave_tui.screens import (
     FeedbackDialog,
     InstructionsEditor,
     ModelPicker,
+    Notifications,
     Prompt,
+    Shares,
 )
 from matterwave_tui.widgets import DividerView, MessageView
 
-from .fake_api import FakeAPI, conversation, happy_script, message
+from .fake_api import (
+    FakeAPI,
+    announcement,
+    conversation,
+    happy_script,
+    message,
+    notification,
+    share_row,
+)
 
 BASE = "https://matterwave.test"
 CONV = {"id": "c1", "title": "New chat", "default_model": "grt-nano",
@@ -83,6 +93,12 @@ def json_routes(request: httpx.Request) -> httpx.Response | None:
     if path == "/api/conversations/c1/feedback":
         return httpx.Response(200, json={"data": []})
     if path == "/api/me/usage":
+        return httpx.Response(404, json={"detail": "Not Found"})
+    if path in (
+        "/api/me/notifications",
+        "/api/announcements",
+        "/api/budget",
+    ):
         return httpx.Response(404, json={"detail": "Not Found"})
     return None
 
@@ -730,6 +746,160 @@ async def test_the_status_line_shows_the_usage_balance():
         app.usage_balance = replace(app.usage_balance, exhausted=True)
         app.render_status()
         assert "budget used up" in status(app)
+
+
+@pytest.mark.asyncio
+async def test_the_status_line_shows_the_overage_cap():
+    plain = MatterWaveApp(FakeAPI())
+    async with plain.run_test() as pilot:
+        await settle(plain, pilot)
+        assert "overage" not in status(plain)
+
+    api = FakeAPI()
+    api.budget_payload = {
+        "period_start": "2026-10-01", "included_tokens": 100000, "tokens_used": 1234,
+        "remaining_tokens": 98766, "overage_enabled": True, "overage_cap_micros": 1000000,
+        "overage_micros": 250000,
+    }
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert "overage $0.25 of $1.00" in status(app)
+        api.budget_payload["overage_micros"] = 1000000
+        app.load_budget()
+        await settle(app, pilot)
+        assert "⚠ overage $1.00 of $1.00" in status(app)
+
+
+@pytest.mark.asyncio
+async def test_the_notifications_panel_reads_one_or_all(tmp_path, monkeypatch):
+    monkeypatch.setenv("MATTERWAVE_STATE_DIR", str(tmp_path))
+    api = FakeAPI()
+    api.notification_rows = [
+        notification("n1"), notification("n2", read_at="2026-10-29T01:00:00Z")
+    ]
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert "✉ 1 unread" in status(app)
+        await pilot.press("escape", "N")
+        await settle(app, pilot)
+        assert isinstance(app.screen, Notifications)
+        head = str(app.screen.query_one("#notifications-head", Static).render())
+        assert "1 unread" in head
+        await pilot.press("r")
+        await settle(app, pilot)
+        assert api.notifications_read == ["n1"]
+        # Both rows are read now, so the badge is gone from the status line.
+        assert "unread" not in status(app)
+        await pilot.press("a")
+        await settle(app, pilot)
+        assert api.notifications_read_all == 1
+        await pilot.press("escape")
+        await settle(app, pilot)
+        assert not isinstance(app.screen, Notifications)
+
+
+@pytest.mark.asyncio
+async def test_announcements_show_once_and_stay_dismissed(tmp_path, monkeypatch):
+    monkeypatch.setenv("MATTERWAVE_STATE_DIR", str(tmp_path))
+    api = FakeAPI()
+    api.announcement_rows = [
+        announcement("an1", message="Maintenance tonight.", severity="warning"),
+        announcement(
+            "an2", message="Breach — rotate your keys.", severity="critical", dismissible=False
+        ),
+    ]
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        banner = str(app.query_one("#announcements", Static).render())
+        assert "Maintenance tonight." in banner
+        assert "Breach — rotate your keys." in banner
+        await pilot.press("escape", "A")
+        await settle(app, pilot)
+        banner = str(app.query_one("#announcements", Static).render())
+        assert "Maintenance" not in banner
+        # The critical one is the operator's to end, not this device's.
+        assert "Breach" in banner
+        assert app.check_action("dismiss_announcements", ()) is True
+
+    # The dismissed id survives the restart; the critical notice does not.
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        banner = str(app.query_one("#announcements", Static).render())
+        assert "Maintenance" not in banner
+        assert "Breach" in banner
+
+
+@pytest.mark.asyncio
+async def test_a_report_asks_the_kind_a_note_and_a_confirm():
+    api = FakeAPI()
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        # An unknown kind is refused; nothing is filed.
+        await pilot.press("escape", "R")
+        await settle(app, pilot)
+        assert isinstance(app.screen, Prompt)
+        await pilot.press(*"maybe", "enter")
+        await settle(app, pilot)
+        assert api.reports == []
+        assert any("unsafe or unhelpful" in s for s in shown)
+
+        # A kind and a note, then a confirm that is declined.
+        await pilot.press("escape", "R")
+        await settle(app, pilot)
+        await pilot.press(*"unhelpful", "enter")
+        await settle(app, pilot)
+        assert isinstance(app.screen, Prompt)
+        await pilot.press(*"spam", "enter")
+        await settle(app, pilot)
+        assert isinstance(app.screen, Confirm)
+        await pilot.press("n")
+        await settle(app, pilot)
+        assert api.reports == []
+
+        # The same again, confirmed; the note is optional.
+        await pilot.press("escape", "R")
+        await settle(app, pilot)
+        await pilot.press(*"unhelpful", "enter")
+        await settle(app, pilot)
+        await pilot.press("enter")
+        await settle(app, pilot)
+        await pilot.press("y")
+        await settle(app, pilot)
+        assert api.reports == [("c1", "unhelpful", None, None)]
+        assert any("filed" in s for s in shown)
+
+
+@pytest.mark.asyncio
+async def test_my_shares_lists_and_revokes():
+    api = FakeAPI()
+    api.share_rows = [share_row("s1", title="New chat", view_count=3)]
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("escape", "S")
+        await settle(app, pilot)
+        assert isinstance(app.screen, Shares)
+        head = str(app.screen.query_one("#shares-head", Static).render())
+        assert "1 live" in head
+        await pilot.press("x")
+        await settle(app, pilot)
+        assert isinstance(app.screen, Confirm)
+        await pilot.press("y")
+        await settle(app, pilot)
+        assert api.shares_revoked == ["s1"]
+        assert "Share revoked." in shown
+        # The row stays, marked revoked, and x on it does nothing further.
+        await pilot.press("x")
+        await settle(app, pilot)
+        assert api.shares_revoked == ["s1"]
+        assert any("not live" in s for s in shown)
 
 
 @pytest.mark.asyncio

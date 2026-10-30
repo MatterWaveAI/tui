@@ -1,6 +1,7 @@
 """Modal screens: the model picker, the in-app device sign-in, the one-line
 prompt and yes/no the conversation actions share, the per-thread custom
-instructions editor, and the reply-feedback dialog."""
+instructions editor, the reply-feedback dialog, the notifications inbox and
+the share-links list."""
 
 from __future__ import annotations
 
@@ -313,6 +314,179 @@ class FeedbackDialog(ModalScreen[tuple[int, list[str], str | None]]):
             return
         comment = self.query_one("#feedback-comment", TextArea).text
         self.dismiss((self.rating, reasons, comment or None))
+
+    def action_dismiss_none(self) -> None:
+        self.dismiss(None)
+
+
+class Notifications(ModalScreen[None]):
+    """The bell's rows, newest first: `r` marks the highlighted one read,
+    `a` reads them all, Esc closes. What stays unread rides the status
+    line. The app hands in the rows and the two writes; they answer the
+    rows as the server now holds them, so the list redraws from that."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss_none", "Close"),
+        Binding("r", "read", "Read"),
+        Binding("a", "read_all", "Read all"),
+    ]
+    DEFAULT_CSS = """
+    Notifications { align: center middle; }
+    Notifications > Vertical { width: 80; height: auto; max-height: 85%;
+        border: round $accent; background: $surface; padding: 0 1; }
+    """
+
+    def __init__(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        mark_read: Callable[[str], Awaitable[list[dict[str, Any]]]],
+        mark_all: Callable[[], Awaitable[list[dict[str, Any]]]],
+    ) -> None:
+        super().__init__()
+        self.rows = rows
+        self._mark_read = mark_read
+        self._mark_all = mark_all
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(self._headline(), id="notifications-head", markup=False)
+            yield OptionList(*self._options(), id="notification-rows")
+
+    def on_mount(self) -> None:
+        self.query_one("#notification-rows", OptionList).focus()
+
+    @staticmethod
+    def _one_line(text: str, limit: int = 100) -> str:
+        flat = " ".join(text.split())
+        return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+    def _headline(self) -> str:
+        if not self.rows:
+            return "No notifications."
+        unread = sum(1 for row in self.rows if not row.get("read_at"))
+        return (f"Notifications — {unread} unread "
+                "(r reads the highlighted one, a reads all, Esc closes)")
+
+    def _options(self) -> list[Option]:
+        options: list[Option] = []
+        for i, row in enumerate(self.rows):
+            mark = "● " if not row.get("read_at") else "  "
+            label = mark + str(row.get("title") or "(no title)")
+            body = str(row.get("body") or "")
+            if body:
+                label += f" — {self._one_line(body)}"
+            options.append(Option(label, id=f"notification-{i}"))
+        return options
+
+    def _redraw(self, keep: int | None) -> None:
+        self.query_one("#notifications-head", Static).update(self._headline())
+        option_list = self.query_one("#notification-rows", OptionList)
+        option_list.set_options(self._options())
+        if keep is not None:
+            option_list.highlighted = keep
+
+    @work(exclusive=True)
+    async def action_read(self) -> None:
+        option_list = self.query_one("#notification-rows", OptionList)
+        index = option_list.highlighted
+        if index is None or index >= len(self.rows):
+            return
+        notification_id = str(self.rows[index].get("id") or "")
+        if not notification_id:
+            return
+        self.rows = await self._mark_read(notification_id)
+        self._redraw(index)
+
+    @work(exclusive=True)
+    async def action_read_all(self) -> None:
+        self.rows = await self._mark_all()
+        self._redraw(self.query_one("#notification-rows", OptionList).highlighted)
+
+    def action_dismiss_none(self) -> None:
+        self.dismiss(None)
+
+
+class Shares(ModalScreen[None]):
+    """Every link the caller has made, the one place to see what is out
+    there and take it back: `x` revokes the highlighted live link, after a
+    confirm; Esc closes. A revoked link stops answering at once."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss_none", "Close"),
+        Binding("x", "revoke", "Revoke"),
+    ]
+    DEFAULT_CSS = """
+    Shares { align: center middle; }
+    Shares > Vertical { width: 80; height: auto; max-height: 85%;
+        border: round $accent; background: $surface; padding: 0 1; }
+    """
+
+    def __init__(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        revoke: Callable[[str], Awaitable[list[dict[str, Any]]]],
+    ) -> None:
+        super().__init__()
+        self.rows = rows
+        self._revoke = revoke
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(self._headline(), id="shares-head", markup=False)
+            yield OptionList(*self._options(), id="share-rows")
+
+    def on_mount(self) -> None:
+        self.query_one("#share-rows", OptionList).focus()
+
+    def _headline(self) -> str:
+        if not self.rows:
+            return "You have made no share links."
+        live = sum(1 for row in self.rows if row.get("status") == "active")
+        return f"Your share links — {live} live (x revokes the highlighted one, Esc closes)"
+
+    def _options(self) -> list[Option]:
+        options: list[Option] = []
+        for i, row in enumerate(self.rows):
+            status = str(row.get("status") or "active")
+            mark = {"active": "● ", "expired": "… ", "revoked": "✗ "}.get(status, "  ")
+            label = mark + str(row.get("title") or "(untitled)")
+            views = row.get("view_count")
+            if isinstance(views, int):
+                label += f" — {views} views"
+            options.append(Option(f"{label} — {status}", id=f"share-{i}"))
+        return options
+
+    def _redraw(self, keep: int | None) -> None:
+        self.query_one("#shares-head", Static).update(self._headline())
+        option_list = self.query_one("#share-rows", OptionList)
+        option_list.set_options(self._options())
+        if keep is not None:
+            option_list.highlighted = keep
+
+    @work(exclusive=True)
+    async def action_revoke(self) -> None:
+        option_list = self.query_one("#share-rows", OptionList)
+        index = option_list.highlighted
+        if index is None or index >= len(self.rows):
+            return
+        row = self.rows[index]
+        share_id = str(row.get("id") or "")
+        if not share_id or row.get("status") != "active":
+            self.notify("That link is not live.")
+            return
+        title = str(row.get("title") or "this link")
+
+        def chosen(confirmation: bool | None) -> None:
+            if confirmation:
+                self.run_worker(self._revoke_row(index, share_id), exclusive=True)
+
+        self.app.push_screen(Confirm(f"Revoke “{title}”? Its link stops working."), chosen)
+
+    async def _revoke_row(self, index: int, share_id: str) -> None:
+        self.rows = await self._revoke(share_id)
+        self._redraw(min(index, max(len(self.rows) - 1, 0)))
 
     def action_dismiss_none(self) -> None:
         self.dismiss(None)

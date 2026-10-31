@@ -86,8 +86,9 @@ def build_parser() -> argparse.ArgumentParser:
 def _oneshot_prompt(args: argparse.Namespace) -> str | None:
     """The one-shot prompt: `-p`, else stdin when it is a pipe rather than
     a terminal. None means interactive mode."""
-    if args.prompt is not None:
-        return args.prompt.strip()
+    flag = args.prompt
+    if flag is not None:
+        return str(flag).strip()
     if sys.stdin is not None and not sys.stdin.isatty():
         return sys.stdin.read().strip()
     return None

@@ -1,8 +1,9 @@
 """Modal screens: the model picker, the in-app device sign-in, the one-line
 prompt and yes/no the conversation actions share, the per-thread custom
 instructions editor, the reply-feedback dialog, the notifications inbox,
-the share-links list, the library of folders and tags, the account switcher
-and the microphone clip recorder."""
+the share-links list, the library of folders and tags, the prompt roles
+library and its editor, the account switcher and the microphone clip
+recorder."""
 
 from __future__ import annotations
 
@@ -330,6 +331,175 @@ class FeedbackDialog(ModalScreen[tuple[str, int, list[str], str | None]]):
             return
         comment = self.query_one("#feedback-comment", TextArea).text
         self.dismiss((self.message_id, self.rating, reasons, comment or None))
+
+    def action_dismiss_none(self) -> None:
+        self.dismiss(None)
+
+
+class RoleEditor(ModalScreen[str | None]):
+    """The system text of one prompt role. Ctrl+T hands the text back
+    ("" keeps the name with an empty prompt, which is rarely wanted, so
+    the screen refuses it), Esc hands back None."""
+
+    BINDINGS = [
+        Binding("ctrl+t", "save", "Save"),
+        Binding("escape", "dismiss_none", "Cancel"),
+    ]
+    DEFAULT_CSS = """
+    RoleEditor { align: center middle; }
+    RoleEditor > Vertical { width: 70; height: auto; max-height: 85%;
+        border: round $accent; background: $surface; padding: 1 2; }
+    RoleEditor TextArea { height: 8; }
+    """
+
+    def __init__(self, name: str, text: str = "") -> None:
+        super().__init__()
+        self.role_name = name
+        self.initial = text
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(
+                f"System text for the role “{self.role_name}” — applied to a conversation "
+                "as its instructions.",
+                markup=False,
+            )
+            yield TextArea(self.initial, id="role-text")
+            yield Static("Ctrl+T saves, Esc cancels.", classes="hint", markup=False)
+
+    def on_mount(self) -> None:
+        self.query_one("#role-text", TextArea).focus()
+
+    def action_save(self) -> None:
+        self.dismiss(self.query_one("#role-text", TextArea).text)
+
+    def action_dismiss_none(self) -> None:
+        self.dismiss(None)
+
+
+class Roles(ModalScreen[str | None]):
+    """The prompt library: the named system texts on this device. Enter
+    hands the highlighted role's name back to the app to apply it to the
+    open conversation, `a` makes one (a name, then its system text), `d`
+    deletes the highlighted one after a confirm, Esc closes. Every write
+    answers with the library as the app now holds it, so the list redraws
+    from that."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss_none", "Close"),
+        Binding("enter", "apply", "Apply"),
+        Binding("a", "add", "Add"),
+        Binding("d", "delete", "Delete"),
+    ]
+    DEFAULT_CSS = """
+    Roles { align: center middle; }
+    Roles > Vertical { width: 70; height: auto; max-height: 85%;
+        border: round $accent; background: $surface; padding: 0 1; }
+    """
+
+    def __init__(
+        self,
+        roles: dict[str, str],
+        *,
+        add: Callable[[str, str], Awaitable[dict[str, str]]],
+        delete: Callable[[str], Awaitable[dict[str, str]]],
+    ) -> None:
+        super().__init__()
+        self.roles = roles
+        self._add = add
+        self._delete = delete
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(self._headline(), id="roles-head", markup=False)
+            yield OptionList(*self._options(), id="role-rows")
+
+    def on_mount(self) -> None:
+        self.query_one("#role-rows", OptionList).focus()
+
+    def _headline(self) -> str:
+        return (f"Prompt roles — {len(self.roles)} saved "
+                "(Enter applies the highlighted one to this chat, a makes one, "
+                "d deletes it, Esc closes)")
+
+    def _options(self) -> list[Option]:
+        return [
+            Option(f"{name} — {self._one_line(text)}", id=f"role-{i}")
+            for i, (name, text) in enumerate(sorted(self.roles.items()))
+        ]
+
+    @staticmethod
+    def _one_line(text: str, limit: int = 60) -> str:
+        flat = " ".join(text.split())
+        return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+    def _redraw(self) -> None:
+        option_list = self.query_one("#role-rows", OptionList)
+        keep = option_list.highlighted
+        self.query_one("#roles-head", Static).update(self._headline())
+        option_list.set_options(self._options())
+        if keep is not None and option_list.option_count:
+            option_list.highlighted = min(keep, option_list.option_count - 1)
+
+    def _highlighted_name(self) -> str | None:
+        option_list = self.query_one("#role-rows", OptionList)
+        index = option_list.highlighted
+        if index is None:
+            return None
+        option_id = option_list.get_option_at_index(index).id or ""
+        if not option_id.startswith("role-"):
+            return None
+        i = int(option_id.removeprefix("role-"))
+        names = sorted(self.roles)
+        return names[i] if i < len(names) else None
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        """Enter on the list is the same as Enter anywhere else: the
+        highlighted role applies."""
+        self.action_apply()
+
+    def action_apply(self) -> None:
+        name = self._highlighted_name()
+        if name is None:
+            self.notify("Highlight a role to apply.")
+            return
+        self.dismiss(name)
+
+    def action_add(self) -> None:
+        def named(name: str | None) -> None:
+            if not name:
+                return
+            if name in self.roles:
+                self.notify(f"A role named {name} is already there; it is open for editing.")
+            editor = RoleEditor(name, self.roles.get(name, ""))
+
+            def written(text: str | None) -> None:
+                if text is None:
+                    return
+                self.run_worker(self._role_written(name, text), exclusive=True)
+
+            self.app.push_screen(editor, written)
+
+        self.app.push_screen(Prompt("Name the role:"), named)
+
+    async def _role_written(self, name: str, text: str) -> None:
+        self.roles = await self._add(name, text)
+        self._redraw()
+
+    def action_delete(self) -> None:
+        name = self._highlighted_name()
+        if name is None:
+            return
+
+        def chosen(confirmation: bool | None) -> None:
+            if confirmation:
+                self.run_worker(self._role_deleted(name), exclusive=True)
+
+        self.app.push_screen(Confirm(f"Delete the role “{name}”?", danger=False), chosen)
+
+    async def _role_deleted(self, name: str) -> None:
+        self.roles = await self._delete(name)
+        self._redraw()
 
     def action_dismiss_none(self) -> None:
         self.dismiss(None)

@@ -29,6 +29,7 @@ from .dictation import MEDIA_TYPES, MicRecorder, media_type_for, mic_available
 from .export import conversation_markdown, export_filename
 from .failures import Failure, classify, retry_in
 from .models import is_image_filename, model_accepts_images, model_window, vision_capable_model_ids
+from .roles import load_roles, roles_path, save_roles
 from .screens import (
     Accounts,
     Confirm,
@@ -42,6 +43,8 @@ from .screens import (
     ModelPicker,
     Notifications,
     Prompt,
+    RoleEditor,
+    Roles,
     Shares,
 )
 from .thread import Divider, Message, Thread
@@ -209,6 +212,8 @@ class TuiCommands(Provider):
          "as one JSON file", "action_export_account"),
         ("Dictate audio…", "transcribe the microphone or an audio file into the composer",
          "action_dictate"),
+        ("Prompt roles…", "named system prompts to apply to this conversation",
+         "action_roles"),
     )
 
     async def discover(self) -> Hits:
@@ -264,6 +269,7 @@ class MatterWaveApp(App[None]):
         Binding("s", "share", "Share"),
         Binding("S", "my_shares", "Shares"),
         Binding("l", "library", "Library"),
+        Binding("L", "roles", "Roles"),
         Binding("R", "report", "Report"),
         Binding("N", "notifications", "Inbox"),
         Binding("A", "dismiss_announcements", "Dismiss"),
@@ -347,6 +353,9 @@ class MatterWaveApp(App[None]):
         # Attachment bytes already fetched for the transcript's image parts,
         # so a redraw hands a rebuilt view its picture without a re-fetch.
         self._image_data: dict[str, bytes] = {}
+        # The prompt library: named system texts on this device, applied
+        # with /role or the `L` screen. Empty until roles.json is read.
+        self.roles = load_roles(roles_path())
         self._search_seq = 0
 
     # --- layout ----------------------------------------------------------------
@@ -898,6 +907,11 @@ class MatterWaveApp(App[None]):
         composer = self.query_one("#composer", TextArea)
         text = composer.text.strip()
         if not text or self.streaming:
+            return
+        if text.startswith("/"):
+            if self._composer_command(text):
+                composer.text = ""
+                self.drafts.pop(self.conversation.id if self.conversation else "", None)
             return
         attachment_ids = [a.id for a in self.pending_attachments] or None
         if self.conversation is None:
@@ -1881,6 +1895,81 @@ class MatterWaveApp(App[None]):
             self.fail_from_exception(exc)
             return
         self.notify("Instructions saved.")
+
+    # --- the prompt library (named roles) -------------------------------------------
+
+    def _composer_command(self, text: str) -> bool:
+        """A leading slash is a command, not a message. True when the text
+        was one (handled or not) and must not be sent as a turn."""
+        body = text[1:]
+        if body.split(" ", 1)[0] != "role":
+            self.notify(
+                f"Unknown command /{body.split(' ', 1)[0]} — /role is the one.",
+                severity="warning",
+            )
+            return True
+        rest = body[len("role"):].strip()
+        if rest in ("", "--list"):
+            self.action_roles()
+            return True
+        if rest.startswith("--add"):
+            name = rest[len("--add"):].strip()
+            if not name:
+                self.notify("Name the role: /role --add name.", severity="warning")
+                return True
+
+            def written(role_text: str | None) -> None:
+                if role_text is None:
+                    return
+                self.run_worker(self.save_role(name, role_text), group="roles", exclusive=True)
+                self.notify(f"Role {name} saved.")
+
+            self.push_screen(RoleEditor(name, self.roles.get(name, "")), written)
+            return True
+        self.apply_role(rest)
+        return True
+
+    def action_roles(self) -> None:
+        """The prompt library screen; the role picked there applies to the
+        conversation that is open."""
+        def chosen(name: str | None) -> None:
+            if name:
+                self.apply_role(name)
+
+        self.push_screen(
+            Roles(dict(self.roles), add=self.save_role, delete=self.delete_role), chosen
+        )
+
+    async def save_role(self, name: str, text: str) -> dict[str, str]:
+        """One role added or replaced, kept on this device."""
+        self.roles = {**self.roles, name: text}
+        if not save_roles(roles_path(), self.roles):
+            self.notify("The role could not be written to disk.", severity="warning")
+        return dict(self.roles)
+
+    async def delete_role(self, name: str) -> dict[str, str]:
+        self.roles = {k: v for k, v in self.roles.items() if k != name}
+        if not save_roles(roles_path(), self.roles):
+            self.notify("The change could not be written to disk.", severity="warning")
+        return dict(self.roles)
+
+    @work(group="action")
+    async def apply_role(self, name: str) -> None:
+        """A named prompt as this conversation's instructions: the same
+        PUT the instructions editor uses, so the web app reads it too."""
+        text = self.roles.get(name)
+        if text is None:
+            self.notify(f"No role named {name}.", severity="warning")
+            return
+        if self.conversation is None:
+            self.notify("Open a conversation to apply a role to.")
+            return
+        try:
+            await self.api.set_conversation_instructions(self.conversation.id, text)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return
+        self.notify(f"Role {name} applied.")
 
     # --- reply feedback ------------------------------------------------------------
 

@@ -76,6 +76,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="one-shot mode: send this prompt, print the answer to stdout, exit",
     )
     parser.add_argument("-m", "--model", help="the model for a one-shot prompt")
+    parser.add_argument(
+        "--shell",
+        action="store_true",
+        help="shell assistant: an answer is a proposed command, run only after you confirm",
+    )
     sub = parser.add_subparsers(dest="command")
     login = sub.add_parser("login", help="store a key, or sign in by device code")
     login.add_argument("--key", nargs="?", const=_PROMPT, dest="login_key")
@@ -162,11 +167,11 @@ def main(argv: list[str] | None = None) -> int:
             print("Nothing to send: give -p a prompt or pipe one in.", file=sys.stderr)
             return 2
         return asyncio.run(run_oneshot(base_url, credential, prompt, args.model))
-    run_app(base_url, credential)
+    run_app(base_url, credential, shell_mode=args.shell)
     return 0
 
 
-def run_app(base_url: str, credential: Credential) -> None:
+def run_app(base_url: str, credential: Credential, *, shell_mode: bool = False) -> None:
     from .app import MatterWaveApp
 
     holder: dict[str, MatterWaveApp] = {}
@@ -195,7 +200,7 @@ def run_app(base_url: str, credential: Credential) -> None:
         return (await device_login(base_url, on_code)).access_token
 
     api = HttpChatAPI(base_url=base_url, token=credential.token, refresh=refresh)
-    app = MatterWaveApp(api, relogin=device)
+    app = MatterWaveApp(api, relogin=device, shell_mode=shell_mode)
     holder["app"] = app
     app.run()
 

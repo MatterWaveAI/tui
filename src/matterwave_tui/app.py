@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -76,6 +77,9 @@ IMPORT_POLL_S = 1.5
 # Ten minutes of polls before the watch gives up saying so (the worker
 # keeps the row on the server, so nothing is lost, only unwatched).
 IMPORT_POLLS_MAX = 400
+# The shell assistant: how long a proposed command may run before it is
+# stopped, and the gate's wording.
+SHELL_TIMEOUT_S = 30.0
 # The sources an export names, as they are said to the person.
 IMPORT_SOURCE_NAMES = {"chatgpt": "ChatGPT", "claude": "Claude"}
 # The account export: a server job like an import, polled the same way;
@@ -120,6 +124,32 @@ def estimate_tokens(text: str) -> int:
     """The server's own rough count (characters / 4), so the meter and the
     server's compaction decision agree to within the estimate."""
     return (len(text) + 3) // 4
+
+
+def shell_command(text: str) -> str:
+    """The command an answer proposes: one fenced block's contents when the
+    answer is a single fenced block, the bare text otherwise."""
+    stripped = text.strip()
+    fence = re.fullmatch(r"```[^\n]*\n(.*)\n```\s*", stripped, re.DOTALL)
+    return (fence.group(1) if fence else stripped).strip()
+
+
+async def run_shell_command(command: str) -> str:
+    """A proposed command, run for real; its output (stderr folded in), or
+    the note that it outlived its half minute and was stopped."""
+    proc = await asyncio.create_subprocess_shell(
+        command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), SHELL_TIMEOUT_S)
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return "(stopped: the command ran past its thirty seconds)"
+    text = out.decode(errors="replace").strip()
+    return text or f"(no output; exit {proc.returncode})"
 
 
 def _read_attachment(path_text: str) -> tuple[bytes, str]:
@@ -281,7 +311,9 @@ class MatterWaveApp(App[None]):
         Binding("ctrl+q", "quit", "Quit", priority=True),
     ]
 
-    def __init__(self, api: ChatAPI, *, relogin: DeviceLoginFn | None = None) -> None:
+    def __init__(
+        self, api: ChatAPI, *, relogin: DeviceLoginFn | None = None, shell_mode: bool = False
+    ) -> None:
         super().__init__()
         self.api = api
         self.relogin_fn = relogin
@@ -356,6 +388,13 @@ class MatterWaveApp(App[None]):
         # The prompt library: named system texts on this device, applied
         # with /role or the `L` screen. Empty until roles.json is read.
         self.roles = load_roles(roles_path())
+        # Shell assistant mode: each finished answer is a proposed command,
+        # run only after the person confirms. `--shell` starts with it on;
+        # /shell toggles. The runner is an attribute so a test can stand in.
+        self.shell_mode = shell_mode
+        self._run_shell = run_shell_command
+        # The answer the turn that just ended produced, for the shell gate.
+        self._completed_answer: Message | None = None
         self._search_seq = 0
 
     # --- layout ----------------------------------------------------------------
@@ -439,6 +478,8 @@ class MatterWaveApp(App[None]):
             bits.append(f"last error ref {self.last_error_request_id}")
         if self.editing:
             bits.append("editing (Esc cancels)")
+        if self.shell_mode:
+            bits.append("shell: answers are commands to confirm")
         return " │ ".join(bits)
 
     def render_status(self) -> None:
@@ -1902,11 +1943,18 @@ class MatterWaveApp(App[None]):
         """A leading slash is a command, not a message. True when the text
         was one (handled or not) and must not be sent as a turn."""
         body = text[1:]
-        if body.split(" ", 1)[0] != "role":
+        first = body.split(" ", 1)[0]
+        if first not in ("role", "shell"):
             self.notify(
-                f"Unknown command /{body.split(' ', 1)[0]} — /role is the one.",
+                f"Unknown command /{first} — /role and /shell are the ones.",
                 severity="warning",
             )
+            return True
+        if first == "shell":
+            if body.strip() != "shell":
+                self.notify("/shell takes no arguments; it only toggles.", severity="warning")
+            else:
+                self.toggle_shell()
             return True
         rest = body[len("role"):].strip()
         if rest in ("", "--list"):
@@ -1970,6 +2018,19 @@ class MatterWaveApp(App[None]):
             self.fail_from_exception(exc)
             return
         self.notify(f"Role {name} applied.")
+
+    # --- shell assistant -------------------------------------------------------------
+
+    def toggle_shell(self) -> None:
+        self.shell_mode = not self.shell_mode
+        if self.shell_mode:
+            self.notify(
+                "Shell assistant on. An answer becomes a proposed command; "
+                "nothing runs until you confirm it."
+            )
+        else:
+            self.notify("Shell assistant off.")
+        self.render_status()
 
     # --- reply feedback ------------------------------------------------------------
 
@@ -2116,6 +2177,7 @@ class MatterWaveApp(App[None]):
         turn = object()
         self._turn = turn
         self.streaming = True
+        self._completed_answer = None
         self.show_failure(None)
         self.live = self._new_live()
         await self.render_thread()
@@ -2157,6 +2219,47 @@ class MatterWaveApp(App[None]):
             self.show_failure(Failure("truncated", request_id))
         await self.render_thread()
         self.render_status()
+        # The answer is whole and shell mode is on: it is a proposed
+        # command, shown and gated before anything runs.
+        answer, self._completed_answer = self._completed_answer, None
+        if self.shell_mode and not stopped and terminal and answer is not None:
+            command = shell_command(str(answer.content or ""))
+            if command:
+                self._propose_shell(command)
+
+    def _propose_shell(self, command: str) -> None:
+        """The gate: the command on show, run only on Enter. Nothing runs
+        without that confirmation, whoever asked for the answer."""
+
+        def approved(run: bool | None) -> None:
+            if run:
+                self.run_worker(self._execute_shell(command), group="shell", exclusive=True)
+
+        self.push_screen(
+            Confirm(
+                f"Run this command?\n\n{command}",
+                hint="Enter runs it in a shell; Esc leaves it alone.",
+            ),
+            approved,
+        )
+
+    async def _execute_shell(self, command: str) -> None:
+        try:
+            output = await self._run_shell(command)
+        except Exception as exc:
+            self.notify(f"The command could not run: {exc}", severity="warning")
+            return
+        note = ConversationMessage(
+            id=f"_shell-{time.monotonic_ns()}",
+            conversation_id=self.conversation.id if self.conversation else "",
+            role="system",
+            parts=[],
+            content=f"$ {command}\n\n{output}",
+            created_at="",
+        )
+        self.thread.add(note)
+        self.thread.leaf = note.id
+        await self.render_thread()
 
     async def _apply(self, item: StreamItem, request_id: str | None) -> str | None:
         live = self.live
@@ -2176,6 +2279,8 @@ class MatterWaveApp(App[None]):
         elif isinstance(item, fr.MessageFrame):
             self.thread.add(item.message)
             self.thread.leaf = item.message.id
+            if item.message.role == "assistant":
+                self._completed_answer = item.message
             await self.render_thread()
         elif isinstance(item, fr.PartStartFrame) and live is not None:
             parts = live.parts
@@ -2205,6 +2310,7 @@ class MatterWaveApp(App[None]):
             self.live = None
             self.thread.add(item.message)
             self.thread.leaf = item.message.id
+            self._completed_answer = item.message
             await self.render_thread()
             if item.message.truncated:
                 self.show_failure(Failure("truncated", request_id))

@@ -98,12 +98,29 @@ def test_an_empty_prompt_is_a_usage_error(capsys, monkeypatch):
 
 def test_a_tty_opens_the_app(capsys, monkeypatch):
     opened: list[str] = []
-    monkeypatch.setattr(cli, "run_app", lambda base_url, credential: opened.append(base_url))
+
+    def run_app(base_url: str, credential: object, *, shell_mode: bool = False) -> None:
+        opened.append(base_url)
+
+    monkeypatch.setattr(cli, "run_app", run_app)
     tty = argparse.Namespace(isatty=lambda: True)
     monkeypatch.setattr(cli.sys, "stdin", tty)
     rc = cli.main(["--base-url", BASE, "--key", "mw_k"])
     assert rc == 0
     assert opened == [BASE]
+
+
+def test_shell_flag_reaches_the_app(monkeypatch):
+    opened: list[bool] = []
+
+    def run_app(base_url: str, credential: object, *, shell_mode: bool = False) -> None:
+        opened.append(shell_mode)
+
+    monkeypatch.setattr(cli, "run_app", run_app)
+    tty = argparse.Namespace(isatty=lambda: True)
+    monkeypatch.setattr(cli.sys, "stdin", tty)
+    assert cli.main(["--base-url", BASE, "--key", "mw_k", "--shell"]) == 0
+    assert opened == [True]
 
 
 def test_a_cut_stream_warns_and_exits_one(capsys, monkeypatch):

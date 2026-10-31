@@ -254,15 +254,23 @@ class _Client(AsyncMatterWave):
         super().__init__(api_key=credential.token, **kwargs)
         self._credential = credential
 
-    async def _send(self, request: sdk_base.Request) -> httpx.Response:
+    async def _send(
+        self,
+        request: sdk_base.Request,
+        *,
+        # The supertype's parameters: an override mirrors them, however
+        # ruff feels about a `timeout` argument (ASYNC109).
+        timeout: float | httpx.Timeout | None = None,  # noqa: ASYNC109
+        max_retries: int | None = None,
+    ) -> httpx.Response:
         self._config.api_key = self._credential.token
         try:
-            return await super()._send(request)
+            return await super()._send(request, timeout=timeout, max_retries=max_retries)
         except AuthenticationError:
             if not await self._credential.renew(self._config.api_key or ""):
                 raise
             self._config.api_key = self._credential.token
-            return await super()._send(request)
+            return await super()._send(request, timeout=timeout, max_retries=max_retries)
 
 
 def _path(*segments: str) -> str:

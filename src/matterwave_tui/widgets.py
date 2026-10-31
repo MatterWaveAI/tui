@@ -7,6 +7,7 @@ Rich markup in a model's answer is text the model wrote, not styling to apply.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from textual import events
@@ -18,6 +19,14 @@ from textual.widgets import Collapsible, Markdown, Static
 from .thread import Divider, Message
 
 TOOL_LINE_MAX = 100
+# A fenced code block, closed or run to the end of the text.
+CODE_FENCE = re.compile(r"```[^\n]*\n(.*?)(?:```|\Z)", re.DOTALL)
+
+
+def code_blocks(text: str) -> list[str]:
+    """The fenced code blocks of a message, their contents only — what
+    "copy the code" means."""
+    return [block.strip("\n") for block in CODE_FENCE.findall(text)]
 
 
 def _one_line(text: str, limit: int = TOOL_LINE_MAX) -> str:

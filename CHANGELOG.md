@@ -5,9 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.0] - 2026-10-30
+## [0.4.0] - 2026-10-31
 
 ### Added
+
+- One-shot mode (T-210): `matterwave-tui -p "prompt" [-m model]` prints
+  the answer to stdout and exits — no interface, a conversation made like
+  the web app's, text deltas as they arrive, exit 0 on a whole answer and
+  1 on a refusal or a cut. A piped-in stdin is the prompt
+  (`cat notes | matterwave-tui`). The SDK's stream is used directly; no
+  Textual app boots.
+- Prompt roles (T-211): a local library of named system prompts in the
+  state directory (`roles.json`; `MATTERWAVE_STATE_DIR` moves it).
+  `/role name` applies one to the open conversation through the existing
+  instructions PUT, `/role --add name` writes one, `/role` (or the `L`
+  screen, or "Prompt roles…" on the command palette) opens the library to
+  apply, add and delete. Roles persist across runs.
+- Shell assistant (T-212): `--shell` at launch or `/shell` in the
+  composer turns it on. A finished answer is then a proposed command,
+  shown in a gate that runs it only on Enter — never without that
+  explicit confirmation — in a shell with a thirty-second cap, its output
+  shown in the transcript. Esc leaves the command unrun.
+- Clipboard copy (T-213): `y` copies the selected message, or the last
+  answer, onto the clipboard (`app.clipboard`, OSC 52 where the terminal
+  takes it); `Y` copies just the fenced code blocks of that message.
+- Prompt queueing (T-214): sending while an answer streams queues the
+  prompt and sends it when the turn completes. Esc stops the stream and
+  clears the queue, with the text back in the composer; switching
+  conversations keeps it as the old conversation's draft.
+- The library modal (T-215): `l` opens folders and tags — `f` makes a
+  folder, `t` a tag, `m` files the open conversation in the highlighted
+  folder, Space toggles a tag on it — and the sidebar's captions carry
+  the ` 📁 folder · #tag` suffixes as the server reports them.
+- Notifications pagination and the unread filter (T-216): `u` shows only
+  the unread ones, `n`/`p` page and widen the limit window (capped at the
+  route's 100), and the status line's unread badge follows each answer.
 
 - The account-wide export: "Export this account's data…" on the command
   palette queues `POST /api/me/export`, polls the job to `ready` the way
@@ -24,6 +56,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stand. `revoke_share` now answers `{}`: the typed resource discards
   the route's body, which nothing read. The SDK floor rises to
   `matterwave-sdk>=0.3.0` for those resources.
+- The SDK client's `_send` override mirrors the supertype's
+  `timeout`/`max_retries` parameters, so the 401-renewal path keeps
+  passing them through (typing only; no behaviour change).
 
 ## [0.3.1] - 2026-10-30
 

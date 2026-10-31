@@ -328,6 +328,9 @@ class MatterWaveApp(App[None]):
         self.model: str | None = None
         self.editing: str | None = None
         self.streaming = False
+        # Typed while an answer streams: it sends itself when the turn
+        # ends. Esc keeps it in the composer; it never sends unconfirmed.
+        self.queued_prompt: str | None = None
         # The turn now streaming into the open conversation; `_consume` drops
         # anything from a turn that is no longer this one.
         self._turn: object | None = None
@@ -472,6 +475,8 @@ class MatterWaveApp(App[None]):
             bits.append(f"attached: {names}")
         if self.streaming:
             bits.append("streaming… (Esc stops)")
+        if self.queued_prompt:
+            bits.append("queued: sends when this answer finishes")
         bits.append(self.connection)
         wait = self.rate_limit_remaining()
         if wait is not None:
@@ -981,12 +986,22 @@ class MatterWaveApp(App[None]):
     def action_send(self) -> None:
         composer = self.query_one("#composer", TextArea)
         text = composer.text.strip()
-        if not text or self.streaming:
+        if not text:
             return
         if text.startswith("/"):
             if self._composer_command(text):
                 composer.text = ""
                 self.drafts.pop(self.conversation.id if self.conversation else "", None)
+            return
+        if self.streaming:
+            # The turn is going: the prompt queues and sends itself when
+            # the answer is whole.
+            self.queued_prompt = text
+            composer.text = ""
+            if self.conversation is not None:
+                self.drafts.pop(self.conversation.id, None)
+            self.notify("Queued — it sends when this answer finishes.")
+            self.render_status()
             return
         attachment_ids = [a.id for a in self.pending_attachments] or None
         if self.conversation is None:
@@ -2190,7 +2205,14 @@ class MatterWaveApp(App[None]):
     def _detach_turn(self) -> None:
         """Leaving a conversation mid-answer: stop its stream (the server
         keeps what arrived as a cut answer) and let go of it, so none of its
-        frames reach the conversation opened next."""
+        frames reach the conversation opened next. A queued prompt goes
+        back in the composer, where open_conversation files it as the old
+        conversation's draft."""
+        queued, self.queued_prompt = self.queued_prompt, None
+        if queued:
+            composer = self.query_one("#composer", TextArea)
+            if not composer.text.strip():
+                composer.text = queued
         self._turn = None
         self.streaming = False
         self.live = None
@@ -2246,8 +2268,14 @@ class MatterWaveApp(App[None]):
         self.streaming = False
         partial = self.live
         self.live = None
+        queued, self.queued_prompt = self.queued_prompt, None
         if stopped:
             await self._resync()
+            # Esc cancels the stream and the queue with it; the queued
+            # text is not lost — it is back in the composer.
+            composer = self.query_one("#composer", TextArea)
+            if queued and not composer.text.strip():
+                composer.text = queued
             self.notify("Stopped.")
         elif not terminal and partial and partial.parts and self.failure is None:
             self.show_failure(Failure("truncated", request_id))
@@ -2260,6 +2288,15 @@ class MatterWaveApp(App[None]):
             command = shell_command(str(answer.content or ""))
             if command:
                 self._propose_shell(command)
+        # The queued prompt sends when the turn's worker is done, never
+        # from inside it: a stream of its own replaces this one.
+        if queued and not stopped and self.failure is None:
+            self.call_after_refresh(self._send_queued, queued)
+
+    def _send_queued(self, text: str) -> None:
+        composer = self.query_one("#composer", TextArea)
+        composer.text = text
+        self.action_send()
 
     def _propose_shell(self, command: str) -> None:
         """The gate: the command on show, run only on Enter. Nothing runs

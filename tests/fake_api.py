@@ -130,12 +130,15 @@ class FakeAPI:
         *,
         hold: bool = False,
         refusal: Exception | None = None,
+        gate: asyncio.Event | None = None,
     ) -> None:
         self.script = script or []
         # `hold`: the stream never ends on its own, for the Esc test;
-        # `refusal`: the request is refused before any frame.
+        # `refusal`: the request is refused before any frame; `gate`: the
+        # stream waits before its first item until the test sets the event.
         self.hold = hold
         self.refusal = refusal
+        self.gate = gate
         self.conversations: list[Conversation] = [conversation()]
         self.models_payload: list[dict[str, Any]] = MODELS
         self.tree_messages: list[ConversationMessage] = []
@@ -617,7 +620,9 @@ class FakeAPI:
         try:
             if self.refusal is not None:
                 raise self.refusal
-            for item in self.script:
+            for i, item in enumerate(self.script):
+                if self.gate is not None and i == 0:
+                    await self.gate.wait()
                 await asyncio.sleep(0)
                 yield item
             if self.hold:

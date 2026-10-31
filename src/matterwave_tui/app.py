@@ -49,7 +49,7 @@ from .screens import (
     Shares,
 )
 from .thread import Divider, Message, Thread
-from .widgets import DividerView, ImageView, MessageView, ThumbClicked
+from .widgets import DividerView, ImageView, MessageView, ThumbClicked, code_blocks
 
 # How often a stream redraws the answer in progress. A redraw per delta is
 # hundreds a second on a fast model and buys nothing a person can see.
@@ -307,6 +307,8 @@ class MatterWaveApp(App[None]):
         Binding("i", "attach", "Attach"),
         Binding("v", "dictate", "Dictate"),
         Binding("o", "cycle_filter", "List"),
+        Binding("y", "copy", "Copy"),
+        Binding("Y", "copy_code", "Copy code"),
         Binding("escape", "leave_composer", "Transcript", show=False),
         Binding("ctrl+q", "quit", "Quit", priority=True),
     ]
@@ -873,6 +875,38 @@ class MatterWaveApp(App[None]):
 
     def action_search(self) -> None:
         self.query_one("#search", Input).focus()
+
+    # --- clipboard -----------------------------------------------------------------
+
+    def _copy_target(self) -> Message | None:
+        """The message copy works on: the one selected in the transcript,
+        else the last answer."""
+        widget = self.query_one("#transcript", Transcript).selected_widget()
+        if isinstance(widget, MessageView):
+            return widget.message
+        return self.thread.last("assistant")
+
+    def action_copy(self) -> None:
+        """`y`: the selected message, or the last answer, onto the
+        clipboard (OSC 52, where the terminal takes it)."""
+        target = self._copy_target()
+        text = str(target.content or "") if target is not None else ""
+        if not text.strip():
+            self.notify("Nothing to copy.")
+            return
+        self.copy_to_clipboard(text)
+        self.notify("Copied.")
+
+    def action_copy_code(self) -> None:
+        """`Y`: just the fenced code of that message — the part a person
+        paste-able wants."""
+        target = self._copy_target()
+        blocks = code_blocks(str(target.content or "")) if target is not None else []
+        if not blocks:
+            self.notify("No code blocks in this message.")
+            return
+        self.copy_to_clipboard("\n\n".join(blocks))
+        self.notify("Code copied.")
 
     def action_new(self) -> None:
         """A new chat. Temporary is decided here or not at all: the flag is

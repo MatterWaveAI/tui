@@ -354,7 +354,11 @@ async def test_notifications_announcements_and_budget_take_their_routes():
     read = await api.read_notification("n1")
     assert read["read_at"] == "2026-10-30T00:00:00Z"
     assert await api.read_all_notifications() == {"read": 1, "unread_count": 0}
-    assert (await api.announcements())["data"][0]["id"] == "an1"
+    announcements = await api.announcements()
+    assert announcements["data"][0]["id"] == "an1"
+    # The typed rows are flattened at the edge, so a dismissible banner
+    # reads the server's fields alone.
+    assert "request_id" not in announcements["data"][0]
     budget = await api.budget()
     assert (budget["overage_micros"], budget["overage_cap_micros"]) == (250000, 1000000)
     # The unread filter and the page length ride the query string; the
@@ -416,9 +420,13 @@ async def test_share_management_lists_and_revokes():
     api = make(handler)
     mine = await api.my_shares()
     assert [s["id"] for s in mine] == ["s1"]
+    # The typed rows are flattened at the edge: the server's fields,
+    # without the SDK's request-id bookkeeping.
+    assert "request_id" not in mine[0]
     theirs = await api.conversation_shares("c1")
     assert [s["id"] for s in theirs] == ["s1"]
-    assert await api.revoke_share("s1") == {"status": "revoked"}
+    # The typed revoke discards the answer's body; success is the return.
+    assert await api.revoke_share("s1") == {}
     assert [(r.method, r.url.path) for r in seen] == [
         ("GET", "/api/me/shares"),
         ("GET", "/api/conversations/c1/shares"),
@@ -741,6 +749,62 @@ async def test_an_import_is_uploaded_multipart_and_polled():
 
     with pytest.raises(ServerError):
         await make(busy).start_import(b"x", "again.json")
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_an_account_export_is_started_polled_and_downloaded():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        path, method = request.url.path, request.method
+        if path == "/api/me/export" and method == "GET":
+            return httpx.Response(200, json={"exported_at": "2026-10-30T00:00:00Z"})
+        if path == "/api/me/export" and method == "POST":
+            return httpx.Response(202, json={"id": "exp1", "status": "pending"})
+        if path == "/api/me/export/exp1" and method == "GET":
+            return httpx.Response(
+                200,
+                json={"id": "exp1", "status": "ready", "size_bytes": 11,
+                      "created_at": "2026-10-30T00:00:00Z",
+                      "download_url": "/api/me/export/exp1/download"
+                                      "?expires=1793385600&sig=signed"},
+            )
+        if path == "/api/me/export/exp1/download" and method == "GET":
+            assert request.url.params["expires"] == "1793385600"
+            assert request.url.params["sig"] == "signed"
+            # The bytes answer only to the owner: the caller's own
+            # credential rides beside the link's signature.
+            assert request.headers["authorization"] == "Bearer mw_one"
+            return httpx.Response(200, content=b'{"conv": 1}')
+        return httpx.Response(404, json={"detail": path})
+
+    api = make(handler)
+    document = await api.export_inline()
+    assert document["exported_at"] == "2026-10-30T00:00:00Z"
+    row = await api.start_export()
+    assert (row["id"], row["status"]) == ("exp1", "pending")
+    ready = await api.export_status("exp1")
+    assert ready["status"] == "ready"
+    assert await api.export_download(str(ready["download_url"])) == b'{"conv": 1}'
+    assert [(r.method, r.url.path) for r in seen] == [
+        ("GET", "/api/me/export"),
+        ("POST", "/api/me/export"),
+        ("GET", "/api/me/export/exp1"),
+        ("GET", "/api/me/export/exp1/download"),
+    ]
+
+    # A start is a write: one request, never retried.
+    calls = 0
+
+    def busy(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(503, json={"detail": "busy"})
+
+    with pytest.raises(ServerError):
+        await make(busy).start_export()
     assert calls == 1
 
 

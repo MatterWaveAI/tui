@@ -3,14 +3,15 @@
 The wire is the SDK's: `AsyncMatterWave.conversations` for the routes, its
 `AsyncConversationStream` for a turn (named events, typed frames, one resume
 by `Last-Event-ID`), its errors with the request id on them, and the typed
-`notifications`, `budget`, `attachments.download` and `messages` resources.
+`notifications`, `announcements`, `shares`, `library`, `budget`,
+`attachments.download` and `messages` resources.
 What stays here is the TUI's own policy: a 401 is answered once with a fresh
 credential before it stands, a write is never retried, and the routes the SDK
 has no usable method for yet (`/api/models`, the conversation delete, pin and
-archive routes, the per-conversation feedback list, the library's folders and
-tags, and the announcements, report, share-management, accounts, import and
-speech routes) go through the same client. The typed rows the app reads as
-plain dicts (notifications, budget) are flattened here, at the edge.
+archive routes, the per-conversation feedback list, and the account, import,
+speech and export routes) go through the same client. The typed rows the app
+reads as plain dicts (notifications, announcements, shares, library, budget)
+are flattened here, at the edge.
 """
 
 from __future__ import annotations
@@ -488,10 +489,12 @@ class HttpChatAPI:
         return {"read": marked.read, "unread_count": marked.unread_count}
 
     async def announcements(self) -> dict[str, Any]:
-        """`GET /api/announcements`: the ones inside their window, most
-        severe first; `dismissible` is the operator's, and a critical one
-        is never dismissible."""
-        return await self._app_json(self._reads, "GET", _path("announcements"))
+        """`GET /api/announcements` by way of the SDK's typed resource: the
+        ones inside their window, most severe first; `dismissible` is the
+        operator's, and a critical one is never dismissible. The typed rows
+        are flattened to the dicts the app reads."""
+        page = await self._reads.announcements.list()
+        return {"data": [_row_dict(row) for row in page.data]}
 
     async def report_conversation(
         self,
@@ -512,26 +515,27 @@ class HttpChatAPI:
         )
 
     async def conversation_shares(self, conversation_id: str) -> list[dict[str, Any]]:
-        """`GET /api/conversations/{id}/shares`: the links made for the
-        conversation, newest first."""
-        body = await self._app_json(
-            self._reads, "GET", _path("conversations", conversation_id, "shares")
-        )
-        rows = body.get("data")
-        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+        """`GET /api/conversations/{id}/shares` by way of the SDK's typed
+        resource: the links made for the conversation, newest first,
+        flattened to the dicts the app reads."""
+        page = await self._reads.shares.list(conversation_id)
+        return [_row_dict(row) for row in page.data]
 
     async def my_shares(self) -> list[dict[str, Any]]:
-        """`GET /api/me/shares`: every link the caller made, the one place
-        to see what is out there and take it back."""
-        body = await self._app_json(self._reads, "GET", _path("me", "shares"))
-        rows = body.get("data")
-        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+        """`GET /api/me/shares` by way of the SDK's typed resource: every
+        link the caller made, the one place to see what is out there and
+        take it back."""
+        page = await self._reads.shares.list_mine()
+        return [_row_dict(row) for row in page.data]
 
     async def revoke_share(self, share_id: str) -> dict[str, Any]:
-        """`DELETE /api/shares/{id}`: the link stops answering. A revoke
-        that lands twice revokes the same nothing, but it is a write: no
+        """`DELETE /api/shares/{id}` by way of the SDK: the link stops
+        answering. The typed resource discards the answer's body (nothing
+        in the app read it), so the adapter's dict is empty. A revoke that
+        lands twice revokes the same nothing, but it is a write: no
         retries."""
-        return await self._app_json(self._writes, "DELETE", _path("shares", share_id))
+        await self._writes.shares.revoke(share_id)
+        return {}
 
     async def accounts(self) -> dict[str, Any]:
         """`GET /api/accounts`: who is signed in, the acting account first,
@@ -626,41 +630,35 @@ class HttpChatAPI:
     # --- the library (folders and tags) ---------------------------------------
 
     async def library(self) -> dict[str, Any]:
-        """`GET /api/library`: the caller's folders, tags and which
-        conversation carries which tag. The SDK's `Tag` model does not
-        survive its own `from_dict` yet, so the raw answer is kept."""
-        return await self._app_json(self._reads, "GET", _path("library"))
+        """`GET /api/library` by way of the SDK's typed resource: the
+        caller's folders, tags and which conversation carries which tag,
+        flattened to the dicts the app reads."""
+        lib = await self._reads.library.get()
+        return {
+            "folders": [_row_dict(folder) for folder in lib.folders],
+            "tags": [_row_dict(tag) for tag in lib.tags],
+            "assignments": {cid: list(ids) for cid, ids in lib.assignments.items()},
+        }
 
     async def create_folder(self, name: str) -> dict[str, Any]:
-        """`POST /api/library/folders`. A write: no retries."""
-        return await self._app_json(
-            self._writes, "POST", _path("library", "folders"), {"name": name}
-        )
+        """`POST /api/library/folders` by way of the SDK. A write: no
+        retries."""
+        return _row_dict(await self._writes.library.create_folder(name))
 
     async def move_to_folder(self, conversation_id: str, folder_id: str | None) -> None:
-        """`PUT /api/library/conversations/{id}/folder`; None files the
-        conversation back in the main list. The key is always sent."""
-        await self._app_none(
-            self._writes,
-            "PUT",
-            _path("library", "conversations", conversation_id, "folder"),
-            {"folder_id": folder_id},
-        )
+        """`PUT /api/library/conversations/{id}/folder` by way of the SDK;
+        None files the conversation back in the main list."""
+        await self._writes.library.move(conversation_id, folder_id)
 
     async def create_tag(self, name: str) -> dict[str, Any]:
-        """`POST /api/library/tags`: the tag of that name, made now or
-        already there. A write: no retries."""
-        return await self._app_json(self._writes, "POST", _path("library", "tags"), {"name": name})
+        """`POST /api/library/tags` by way of the SDK: the tag of that
+        name, made now or already there. A write: no retries."""
+        return _row_dict(await self._writes.library.create_tag(name))
 
     async def set_tags(self, conversation_id: str, tag_ids: Sequence[str]) -> dict[str, Any]:
-        """`PUT /api/library/conversations/{id}/tags`: the conversation's
-        tags become exactly these."""
-        return await self._app_json(
-            self._writes,
-            "PUT",
-            _path("library", "conversations", conversation_id, "tags"),
-            {"tag_ids": list(tag_ids)},
-        )
+        """`PUT /api/library/conversations/{id}/tags` by way of the SDK:
+        the conversation's tags become exactly these."""
+        return _row_dict(await self._writes.library.set_tags(conversation_id, tag_ids))
 
     def send(
         self,

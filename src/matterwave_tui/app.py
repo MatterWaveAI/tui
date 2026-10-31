@@ -75,6 +75,11 @@ IMPORT_POLL_S = 1.5
 IMPORT_POLLS_MAX = 400
 # The sources an export names, as they are said to the person.
 IMPORT_SOURCE_NAMES = {"chatgpt": "ChatGPT", "claude": "Claude"}
+# The account export: a server job like an import, polled the same way;
+# the bytes then land in a file beside the terminal, named as the API's
+# own content-disposition names them.
+EXPORT_POLL_S = 1.5
+EXPORT_POLLS_MAX = 400
 
 
 # --- per-device state (dismissed announcement ids) ----------------------------
@@ -200,6 +205,8 @@ class TuiCommands(Provider):
          "action_switch_account"),
         ("Import a ChatGPT or Claude export…", "bring an exported history into this account",
          "action_import"),
+        ("Export this account's data…", "every conversation and rating the account holds, "
+         "as one JSON file", "action_export_account"),
         ("Dictate audio…", "transcribe the microphone or an audio file into the composer",
          "action_dictate"),
     )
@@ -1520,6 +1527,77 @@ class MatterWaveApp(App[None]):
         if skipped:
             summary += f"; {skipped} skipped"
         return summary + "."
+
+    # --- account export -----------------------------------------------------------------
+
+    @work(group="action")
+    async def action_export_account(self) -> None:
+        """The whole account as one JSON document, built on the server:
+        the job is queued, watched the way an import is, and the bytes
+        land in a file beside the terminal."""
+        self.notify("Export starting…")
+        try:
+            row = await self.api.start_export()
+        except APIError as exc:
+            # The route's own refusals say what was wrong (one already
+            # building, the hourly limit): they are the message.
+            self.notify(exc.message or "The export could not be started.", severity="error")
+            return
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return
+        self._watch_export(str(row.get("id") or ""))
+
+    @work(group="export", exclusive=True)
+    async def _watch_export(self, export_id: str) -> None:
+        """The export is a job on the server: poll its row until it is
+        ready or failed, then fetch the bytes behind the fresh signed
+        link and write the file. A watch that gives up has lost nothing —
+        the row stands, and the server mails its link too."""
+        if not export_id:
+            return
+        row: dict[str, Any] = {}
+        for _ in range(EXPORT_POLLS_MAX):
+            try:
+                row = await self.api.export_status(export_id)
+            except Exception as exc:
+                self.fail_from_exception(exc)
+                return
+            status = str(row.get("status") or "")
+            if status == "ready":
+                await self._save_export(row)
+                return
+            if status in ("failed", "expired"):
+                self.notify(
+                    "The account export failed; ask for another when you like.",
+                    severity="error",
+                )
+                return
+            await asyncio.sleep(EXPORT_POLL_S)
+        self.notify("The export is still building; it will be saved when it finishes.")
+
+    async def _save_export(self, row: dict[str, Any]) -> None:
+        link = str(row.get("download_url") or "")
+        if not link:
+            self.notify("The export finished without a download link.", severity="error")
+            return
+        try:
+            data = await self.api.export_download(link)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return
+        created = str(row.get("created_at") or "")
+        path = Path.cwd() / f"matterwave-export-{created[:10] or 'account'}.json"
+
+        def write() -> None:
+            path.write_bytes(data)
+
+        try:
+            await asyncio.to_thread(write)
+        except OSError as exc:
+            self.notify(f"Could not write {path.name}: {exc}", severity="error")
+            return
+        self.notify(f"Account export saved to {path} ({len(data)} bytes).")
 
     # --- dictation --------------------------------------------------------------------
 

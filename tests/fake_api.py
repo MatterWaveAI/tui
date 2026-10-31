@@ -193,6 +193,13 @@ class FakeAPI:
         self.imports_started: list[tuple[str, bytes]] = []
         self.import_status_calls: list[str] = []
         self.import_done_after: int | None = None
+        # And the account export, a job polled the same way.
+        self.export_rows: list[dict[str, Any]] = []
+        self.exports_started: list[str] = []
+        self.export_status_calls: list[str] = []
+        self.export_done_after: int | None = None
+        self.export_downloads: list[str] = []
+        self.export_document = b'{"conversations": []}'
         self.transcribes: list[tuple[str, str, str | None, bytes]] = []
         self.transcript_text = "hello there"
         self.budget_payload: dict[str, Any] = {
@@ -534,6 +541,46 @@ class FakeAPI:
                     row["messages_created"] = 9
                 return dict(row)
         raise LookupError(import_id)
+
+    async def export_inline(self) -> dict[str, Any]:
+        return {"exported_at": "2026-10-30T00:00:00Z", "conversations": []}
+
+    async def start_export(self) -> dict[str, Any]:
+        self.exports_started.append("asked")
+        row = {
+            "id": f"exp{len(self.export_rows) + 1}",
+            "status": "pending",
+            "size_bytes": None,
+            "created_at": "2026-10-30T00:00:00Z",
+            "completed_at": None,
+            "expires_at": None,
+            "download_url": None,
+        }
+        self.export_rows.append(row)
+        return dict(row)
+
+    async def export_status(self, export_id: str) -> dict[str, Any]:
+        self.export_status_calls.append(export_id)
+        for row in self.export_rows:
+            if row.get("id") == export_id:
+                # A poll budget that runs the job to `ready` when the test
+                # asks for it, with the signed link the real row carries.
+                if self.export_done_after is not None and (
+                    len(self.export_status_calls) >= self.export_done_after
+                ):
+                    row["status"] = "ready"
+                    row["size_bytes"] = len(self.export_document)
+                    row["completed_at"] = "2026-10-30T00:00:05Z"
+                    row["expires_at"] = "2026-11-06T00:00:05Z"
+                    row["download_url"] = (
+                        f"/api/me/export/{export_id}/download?expires=1&sig=signed"
+                    )
+                return dict(row)
+        raise LookupError(export_id)
+
+    async def export_download(self, path: str) -> bytes:
+        self.export_downloads.append(path)
+        return self.export_document
 
     async def transcribe(
         self, data: bytes, filename: str, content_type: str, language: str | None = None

@@ -20,7 +20,7 @@ import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote, urlsplit
 
 import httpx
 from matterwave_sdk import AsyncConversationStream, AsyncMatterWave
@@ -171,6 +171,14 @@ class ChatAPI(Protocol):
     async def list_imports(self) -> list[dict[str, Any]]: ...
 
     async def import_status(self, import_id: str) -> dict[str, Any]: ...
+
+    async def export_inline(self) -> dict[str, Any]: ...
+
+    async def start_export(self) -> dict[str, Any]: ...
+
+    async def export_status(self, export_id: str) -> dict[str, Any]: ...
+
+    async def export_download(self, path: str) -> bytes: ...
 
     async def transcribe(
         self, data: bytes, filename: str, content_type: str, language: str | None = None
@@ -584,6 +592,45 @@ class HttpChatAPI:
         """`GET /api/me/imports/{id}`: where one import stands — `pending`,
         `running`, `done` or `failed`, with the counts of what it did."""
         return await self._app_json(self._reads, "GET", _path("me", "imports", import_id))
+
+    # --- the account's data export ---------------------------------------------
+
+    async def export_inline(self) -> dict[str, Any]:
+        """`GET /api/me/export`: everything this account holds, as one
+        JSON document built inside the request. A big account holds the
+        request open for a while; the app drives the job-based
+        `start_export` instead, this one for the small and the scripted."""
+        return await self._app_json(self._reads, "GET", _path("me", "export"))
+
+    async def start_export(self) -> dict[str, Any]:
+        """`POST /api/me/export` (202): the same document, built by the
+        server's worker. The answer is the job's row — `pending`, with the
+        `id` the status route polls — and the person is told in-app and by
+        mail when it is ready. One pending export per person (409), and a
+        start that lands twice would build two copies: a write, no
+        retries."""
+        return await self._app_json(self._writes, "POST", _path("me", "export"))
+
+    async def export_status(self, export_id: str) -> dict[str, Any]:
+        """`GET /api/me/export/{id}`: where one export stands — `pending`,
+        `ready`, `failed` or `expired` — with a fresh signed
+        `download_url` once it is ready. Another person's export is the
+        same 404 as none."""
+        return await self._app_json(self._reads, "GET", _path("me", "export", export_id))
+
+    async def export_download(self, path: str) -> bytes:
+        """The export's bytes, from the signed `download_url` the status
+        row carries: the signature rides the path's query, and the
+        caller's own credential goes beside it — the attachment
+        download's rule, a forwarded link being useless to anyone not
+        signed in as the owner. A read."""
+        parts = urlsplit(path)
+        response = await self._reads._send(
+            sdk_base.Request(
+                "GET", parts.path, None, True, False, params=dict(parse_qsl(parts.query))
+            )
+        )
+        return response.content
 
     async def transcribe(
         self, data: bytes, filename: str, content_type: str, language: str | None = None

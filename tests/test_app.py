@@ -1414,6 +1414,38 @@ async def test_an_import_is_uploaded_watched_and_summarised(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_an_account_export_is_polled_and_saved(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("matterwave_tui.app.EXPORT_POLL_S", 0.01)
+    api = FakeAPI()
+    api.export_done_after = 1  # the first poll finds the job ready
+    api.export_document = b'{"conversations": ["one"]}'
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        app.action_export_account()
+        await settle(app, pilot)
+        assert api.exports_started == ["asked"]
+        assert api.export_status_calls == ["exp1"]
+        assert api.export_downloads == [
+            "/api/me/export/exp1/download?expires=1&sig=signed"
+        ]
+        saved = tmp_path / "matterwave-export-2026-10-30.json"
+        assert saved.read_bytes() == b'{"conversations": ["one"]}'
+        assert any("Export starting" in s for s in shown)
+        assert any(f"Account export saved to {saved}" in s for s in shown)
+
+        # A job that fails is said, and saves nothing.
+        api.export_done_after = None
+        api.export_rows = [{"id": "exp2", "status": "failed"}]
+        app._watch_export("exp2")
+        await settle(app, pilot)
+        assert any("account export failed" in s for s in shown)
+        assert list(tmp_path.glob("matterwave-export-*.json")) == [saved]
+
+
+@pytest.mark.asyncio
 async def test_dictation_without_the_microphone_extra_transcribes_a_file(
     tmp_path, monkeypatch
 ):

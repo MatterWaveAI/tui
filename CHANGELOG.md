@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-10-30
+
+### Added
+
+- The account-wide export: "Export this account's data…" on the command
+  palette queues `POST /api/me/export`, polls the job to `ready` the way
+  an import is watched, and saves the bytes behind its fresh signed
+  download link to `matterwave-export-<date>.json` beside the terminal.
+  The wire adapters (`export_inline`, `start_export`, `export_status`,
+  `export_download`) sit behind the same `ChatAPI` protocol as the rest.
+
+### Changed
+
+- Announcements, share management (mine, per conversation, revoke) and
+  the library (folders, tags, move, set tags) go through the SDK's typed
+  resources instead of hand-rolled routes; the adapters' signatures
+  stand. `revoke_share` now answers `{}`: the typed resource discards
+  the route's body, which nothing read. The SDK floor rises to
+  `matterwave-sdk>=0.3.0` for those resources.
+
 ## [0.3.1] - 2026-10-30
 
 ### Added

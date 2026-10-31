@@ -14,6 +14,20 @@ Both install from the [MatterWaveAI](https://pypi.org/org/MatterWaveAI/) org on 
 
 From a checkout of this repo: `uv sync && uv run matterwave-tui`.
 
+## One-shot and scripting
+
+Without the interface: `matterwave-tui -p "two plus two?"` prints the answer to stdout and exits
+(`-m` picks the model). A piped-in stdin is the prompt, so scripts work the usual way:
+
+```sh
+cat notes.md | matterwave-tui -m grt-nano
+echo "explain this trace" | matterwave-tui -p > answer.txt
+```
+
+Exit 0 on a whole answer, 1 when the turn was refused or cut short (whatever arrived is already on
+stdout). `--shell` starts the shell assistant: each answer is treated as a proposed command, shown
+in a confirm that runs it only when you press Enter — nothing is ever executed without that.
+
 ## Sign in
 
 Point it at a deployment with `--base-url` or `MATTERWAVE_BASE_URL` (default
@@ -57,7 +71,16 @@ or the environment is never replaced behind your back.
 | `w` | anywhere | export the conversation to a Markdown file (the working directory) |
 | `i` | anywhere | attach a file (its path); it is uploaded and sent with the next message |
 | `o` | anywhere | cycle the sidebar list: default → pinned → archived → all |
+| `l` | anywhere | the library: folders and tags for the open conversation |
+| `L` | anywhere | prompt roles: apply, add or delete a named system prompt |
+| `y` | transcript | copy the selected message (or the last answer) to the clipboard |
+| `Y` | transcript | copy just the fenced code blocks of that message |
 | `Ctrl+Q` | anywhere | quit |
+
+Typing while an answer streams queues the prompt; it sends itself when the answer finishes, and
+`Esc` stops the stream and puts it back in the composer. A leading `/` in the composer is a
+command, not a message: `/role name` applies a saved prompt role, `/role --add name` makes one,
+`/shell` toggles the shell assistant.
 
 Letter keys apply when focus is not in the composer or the search box; `Esc` gets you there.
 

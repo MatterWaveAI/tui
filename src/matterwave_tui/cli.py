@@ -1,6 +1,8 @@
 """`matterwave-tui`: sign in, then open the app.
 
     matterwave-tui                     open (signs in by device code if needed)
+    matterwave-tui -p "prompt" [-m M]  one-shot: the answer, then exit
+    cat notes | matterwave-tui         a piped-in prompt is the prompt
     matterwave-tui login [--key [K]]   store a key, or sign in by device code
     matterwave-tui logout              forget the stored credential
 """
@@ -13,7 +15,10 @@ import getpass
 import sys
 from collections.abc import Callable
 
-from .api import DEFAULT_BASE_URL, HttpChatAPI
+from matterwave_sdk import frames as fr
+from matterwave_sdk.errors import APIConnectionError, APIError
+
+from .api import DEFAULT_BASE_URL, Cut, HttpChatAPI
 from .auth import (
     Credential,
     DeviceCode,
@@ -65,11 +70,65 @@ def build_parser() -> argparse.ArgumentParser:
         const=_PROMPT,
         help="an mw_ API key; with no value, prompts for it. Stored in the OS keyring.",
     )
+    parser.add_argument(
+        "-p",
+        "--prompt",
+        help="one-shot mode: send this prompt, print the answer to stdout, exit",
+    )
+    parser.add_argument("-m", "--model", help="the model for a one-shot prompt")
     sub = parser.add_subparsers(dest="command")
     login = sub.add_parser("login", help="store a key, or sign in by device code")
     login.add_argument("--key", nargs="?", const=_PROMPT, dest="login_key")
     sub.add_parser("logout", help="forget the stored credential for this deployment")
     return parser
+
+
+def _oneshot_prompt(args: argparse.Namespace) -> str | None:
+    """The one-shot prompt: `-p`, else stdin when it is a pipe rather than
+    a terminal. None means interactive mode."""
+    if args.prompt is not None:
+        return args.prompt.strip()
+    if sys.stdin is not None and not sys.stdin.isatty():
+        return sys.stdin.read().strip()
+    return None
+
+
+async def run_oneshot(
+    base_url: str, credential: Credential, prompt: str, model: str | None = None
+) -> int:
+    """One answer, no interface: a conversation is made, the prompt sent
+    through the SDK's stream, and the text deltas printed as they arrive.
+    0 on a whole answer, 1 when the turn failed or was cut short (whatever
+    arrived is already on stdout), 2 for a refused request."""
+    api = HttpChatAPI(base_url=base_url, token=credential.token)
+    wrote = False
+    try:
+        conversation = await api.create_conversation(model=model)
+        async for item in api.send(conversation.id, prompt, model):
+            if isinstance(item, fr.DeltaFrame) and not item.reasoning:
+                sys.stdout.write(item.content or "")
+                sys.stdout.flush()
+                wrote = wrote or bool(item.content)
+            elif isinstance(item, Cut):
+                print("\n(the answer was cut short; what arrived is above)", file=sys.stderr)
+                return 1
+            elif isinstance(item, fr.ErrorFrame):
+                print(f"\nerror: {item.detail}", file=sys.stderr)
+                return 1
+            elif isinstance(item, fr.ModerationBlockFrame):
+                print("\n(the answer was blocked by moderation)", file=sys.stderr)
+                return 1
+    except APIConnectionError as exc:
+        print(f"could not reach {base_url}: {exc}", file=sys.stderr)
+        return 1
+    except APIError as exc:
+        print(f"error: {exc} (request {exc.request_id or 'unknown'})", file=sys.stderr)
+        return 1
+    finally:
+        if wrote:
+            sys.stdout.write("\n")
+        await api.aclose()
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -96,6 +155,12 @@ def main(argv: list[str] | None = None) -> int:
     except LoginError as exc:
         print(exc, file=sys.stderr)
         return 1
+    prompt = _oneshot_prompt(args)
+    if prompt is not None:
+        if not prompt:
+            print("Nothing to send: give -p a prompt or pipe one in.", file=sys.stderr)
+            return 2
+        return asyncio.run(run_oneshot(base_url, credential, prompt, args.model))
     run_app(base_url, credential)
     return 0
 

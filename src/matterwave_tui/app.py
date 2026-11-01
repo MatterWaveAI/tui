@@ -14,8 +14,19 @@ from pathlib import Path
 from typing import Any
 
 from matterwave_sdk import frames as fr
-from matterwave_sdk.errors import APIConnectionError, APIError, ConflictError
-from matterwave_sdk.models import Attachment, Conversation, ConversationMessage, UsageBalance
+from matterwave_sdk.errors import (
+    APIConnectionError,
+    APIError,
+    ConflictError,
+    ConnectorConversationError,
+)
+from matterwave_sdk.models import (
+    Attachment,
+    Conversation,
+    ConversationMessage,
+    ConversationSource,
+    UsageBalance,
+)
 from textual import on, work
 from textual.app import App, ComposeResult, get_system_commands_provider
 from textual.binding import Binding
@@ -158,6 +169,24 @@ def _read_attachment(path_text: str) -> tuple[bytes, str]:
     return path.read_bytes(), path.name
 
 
+def source_label(source: ConversationSource) -> str:
+    """`Slack #support`: the connector by name, the channel as the server
+    labels it (with its own `#`); the connector alone when the channel is
+    unknown."""
+    name = (source.connector[:1].upper() + source.connector[1:]) or "its connector"
+    return f"{name} {source.channel_label}" if source.channel_label else name
+
+
+def connector_notice(source: ConversationSource) -> str:
+    """What stands in for a send in a conversation a connector opened:
+    where it is answered, the thread's link when the connector gave one,
+    and the fork as the way to continue here."""
+    text = f"Answered in {source_label(source)} — reply in the thread"
+    if source.url:
+        text += f": {source.url}"
+    return text + ". Press f to fork and continue here."
+
+
 class ConversationItem(ListItem):
     def __init__(self, conversation: Conversation, *, library: str = "") -> None:
         self.conversation = conversation
@@ -169,7 +198,10 @@ class ConversationItem(ListItem):
     def caption(self) -> str:
         c = self.conversation
         marks = ("📌 " if c.pinned_at else "") + ("🗄 " if c.archived_at else "")
-        return marks + (c.title or "New chat") + self.library
+        # A connector's conversation says where it is answered, ahead of
+        # the library tail.
+        source = f" — {source_label(c.source)}" if c.source is not None else ""
+        return marks + (c.title or "New chat") + source + self.library
 
     def retitle(self, title: str) -> None:
         self.conversation = replace(self.conversation, title=title)
@@ -274,6 +306,8 @@ class MatterWaveApp(App[None]):
     #announcements.shown { display: block; }
     #temporary { display: none; background: $warning 20%; color: $text; padding: 0 1; }
     #temporary.shown { display: block; }
+    #source { display: none; background: $primary 20%; color: $text; padding: 0 1; }
+    #source.shown { display: block; }
     #composer { height: 6; border: round $panel; }
     #composer:focus { border: round $accent; }
     #status { height: 1; background: $panel; color: $text-muted; padding: 0 1; }
@@ -349,6 +383,11 @@ class MatterWaveApp(App[None]):
         # The open conversation is temporary: created so in this session, so
         # no share or fork, and a notice standing in for the usual history.
         self.temporary_chat = False
+        # Where a connector opened the open conversation (one started from
+        # Slack): answered in that thread alone, so no send, edit or
+        # regenerate here, and a notice standing in for the composer's
+        # job. None for a conversation a person started.
+        self.connector_source: ConversationSource | None = None
         # The caller's own ratings in the open conversation, by message id.
         self.feedback: dict[str, dict[str, Any]] = {}
         # Which slice of the conversations the sidebar shows.
@@ -414,6 +453,7 @@ class MatterWaveApp(App[None]):
                 yield Transcript(id="transcript")
                 yield Static("", id="failure", markup=False)
                 yield Static("", id="temporary", markup=False)
+                yield Static("", id="source", markup=False)
                 yield TextArea(id="composer", placeholder="Message… (Ctrl+Enter sends)")
                 yield Static("", id="status", markup=False)
         yield Footer()
@@ -525,7 +565,11 @@ class MatterWaveApp(App[None]):
         self.render_status()
 
     def fail_from_exception(self, exc: Exception) -> None:
-        if isinstance(exc, APIConnectionError):
+        if isinstance(exc, ConnectorConversationError):
+            # The list was stale: the server says the conversation is a
+            # connector's and names the thread. Not a failure of the turn.
+            self._lock_connector_conversation(exc.source)
+        elif isinstance(exc, APIConnectionError):
             self.go_offline()
             self.show_failure(Failure("network", None))
         elif isinstance(exc, APIError):
@@ -551,12 +595,41 @@ class MatterWaveApp(App[None]):
         self.refresh_bindings()
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        """Share and fork do not exist for a temporary conversation: while
-        one is open the keys are dead and the commands off the footer. The
-        announcements banner offers its dismiss key only while it stands."""
+        """Share and fork do not exist for a temporary conversation, nor
+        edit and regenerate for a connector's: while one is open the keys
+        are dead and the commands off the footer. The announcements banner
+        offers its dismiss key only while it stands."""
         if action == "dismiss_announcements":
             return bool(self.announcements)
+        if self.connector_source is not None and action in ("edit", "regenerate"):
+            return False
         return not (self.temporary_chat and action in ("share", "fork"))
+
+    # --- a connector's conversation ---------------------------------------------
+
+    def set_connector_source(self, source: ConversationSource | None) -> None:
+        """Marks the open conversation as a connector's (or not) and
+        re-derives what depends on it: the notice over the composer and
+        the edit and regenerate keys."""
+        self.connector_source = source
+        banner = self.query_one("#source", Static)
+        if source is not None:
+            banner.update(connector_notice(source))
+            banner.add_class("shown")
+        else:
+            banner.remove_class("shown")
+            banner.update("")
+        self.refresh_bindings()
+
+    def _lock_connector_conversation(self, source: ConversationSource) -> None:
+        """The server refused a turn as a connector's: the conversation is
+        marked so here too, in the sidebar and over the composer, and the
+        draft stays for the fork to carry on with."""
+        if self.conversation is not None:
+            self._sync_conversation(replace(self.conversation, source=source))
+        self.set_connector_source(source)
+        self.show_failure(None)
+        self.notify(connector_notice(source))
 
     def go_offline(self) -> None:
         if self.connection != "offline":
@@ -726,6 +799,7 @@ class MatterWaveApp(App[None]):
         # was just created: the server keeps those out of every list and
         # every search, so only the creation itself can open one.
         self.set_temporary_chat(False)
+        self.set_connector_source(tree.source)
         self.show_failure(None)
         composer.text = self.drafts.get(conversation_id, "")
         self.context_used, self.context_window = None, None
@@ -993,6 +1067,11 @@ class MatterWaveApp(App[None]):
                 composer.text = ""
                 self.drafts.pop(self.conversation.id if self.conversation else "", None)
             return
+        if self.connector_source is not None:
+            # Answered in its own thread: nothing is posted, the draft stays,
+            # and the notice says where to reply and how to continue here.
+            self.notify(connector_notice(self.connector_source))
+            return
         if self.streaming:
             # The turn is going: the prompt queues and sends itself when
             # the answer is whole.
@@ -1032,6 +1111,9 @@ class MatterWaveApp(App[None]):
         await self._consume(self.api.send(conv.id, text, self.model, attachment_ids=attachment_ids))
 
     def action_edit(self) -> None:
+        if self.connector_source is not None:
+            self.notify(connector_notice(self.connector_source))
+            return
         message = self.selected_message()
         if message is not None and message.role == "assistant":
             message = self.thread.messages.get(message.parent_id or "")
@@ -1047,6 +1129,9 @@ class MatterWaveApp(App[None]):
 
     def action_regenerate(self) -> None:
         if self.conversation is None or self.streaming:
+            return
+        if self.connector_source is not None:
+            self.notify(connector_notice(self.connector_source))
             return
         message = self.selected_message()
         if message is None or message.role != "assistant":

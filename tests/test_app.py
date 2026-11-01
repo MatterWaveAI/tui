@@ -3,13 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 import httpx
 import pytest
 from matterwave_sdk import frames as fr
-from matterwave_sdk.errors import APIError, RateLimitError
-from matterwave_sdk.models import Conversation
+from matterwave_sdk.errors import APIError, ConnectorConversationError, RateLimitError
+from matterwave_sdk.models import Conversation, ConversationSource
 from textual.widgets import Collapsible, Input, ListView, Markdown, OptionList, Static, TextArea
 
 from matterwave_tui.api import Cut, HttpChatAPI, Opened, StreamItem
@@ -685,6 +685,95 @@ async def test_fork_copies_from_the_selected_message_and_opens_the_copy():
         assert app.conversation is not None and app.conversation.id == "c2"
         assert app.conversation.title == "Fork of New chat"
         assert [c.id for c in app.conversations] == ["c2", "c1"]
+
+
+SLACK_SOURCE = ConversationSource(
+    connector="slack",
+    connection_id="conn-1",
+    channel_label="#support",
+    url="https://acme.slack.com/archives/C01/p1700000000000100",
+)
+
+
+@pytest.mark.asyncio
+async def test_a_connector_conversation_is_captioned_and_takes_no_turn_but_forks():
+    api = FakeAPI(happy_script("Hello there"))
+    api.conversations = [conversation(source=asdict(SLACK_SOURCE))]
+    api.tree_messages = [
+        message("u1", "user", "Is the deploy done?"),
+        message("a1", "assistant", "It finished at noon.", parent="u1", created_at="2"),
+    ]
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert sidebar_captions(app) == ["New chat — Slack #support"]
+        banner = str(app.query_one("#source", Static).render())
+        assert "Answered in Slack #support — reply in the thread" in banner
+        assert SLACK_SOURCE.url in banner
+        assert "shown" in app.query_one("#source", Static).classes
+        # Edit and regenerate are not commands here; fork still is.
+        assert app.check_action("edit", ()) is False
+        assert app.check_action("regenerate", ()) is False
+        assert app.check_action("fork", ()) is True
+
+        # A send posts nothing and keeps the draft.
+        await pilot.press("h", "i")
+        await pilot.press("ctrl+enter")
+        await settle(app, pilot)
+        assert api.sent == []
+        assert any("reply in the thread" in s for s in shown)
+        assert app.query_one("#composer", TextArea).text == "hi"
+        assert app.failure is None
+        await pilot.press("escape", "r")
+        await settle(app, pilot)
+        assert api.sent == []
+
+        # The fork is an ordinary conversation: the notice goes, the composer works.
+        await pilot.press("f")
+        await settle(app, pilot)
+        assert api.forks == [("c1", "a1")]
+        assert app.conversation is not None and app.conversation.id == "c2"
+        assert app.connector_source is None
+        assert "shown" not in app.query_one("#source", Static).classes
+        assert sidebar_captions(app) == ["Fork of New chat", "New chat — Slack #support"]
+        app.query_one("#composer", TextArea).text = "yo"
+        await pilot.press("ctrl+enter")
+        await settle(app, pilot)
+        assert api.sent == [("c2", "yo", "grt-nano")]
+
+
+@pytest.mark.asyncio
+async def test_a_send_the_server_refuses_as_a_connectors_locks_the_conversation():
+    # The list was stale: the row had no source, the server's 409 names it.
+    api = FakeAPI(
+        refusal=ConnectorConversationError(
+            "This conversation is answered from slack in #support; reply there.",
+            source=SLACK_SOURCE,
+            request_id="req-409",
+        )
+    )
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert "shown" not in app.query_one("#source", Static).classes
+        await pilot.press("h", "i")
+        await pilot.press("ctrl+enter")
+        await settle(app, pilot)
+        assert api.sent == [("c1", "hi", "grt-nano")]
+        # Not a failed turn: the notice, the caption and the lock, no banner.
+        assert app.failure is None
+        assert app.connector_source == SLACK_SOURCE
+        assert "shown" in app.query_one("#source", Static).classes
+        assert sidebar_captions(app) == ["New chat — Slack #support"]
+        assert app.conversation is not None and app.conversation.source == SLACK_SOURCE
+        assert any("Answered in Slack #support" in s for s in shown)
+        assert not app.streaming
+        # The next send is refused here, before any request.
+        await pilot.press("ctrl+enter")
+        await settle(app, pilot)
+        assert len(api.sent) == 1
 
 
 @pytest.mark.asyncio

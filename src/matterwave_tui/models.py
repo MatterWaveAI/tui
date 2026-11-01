@@ -92,6 +92,32 @@ def model_window(models: list[dict[str, Any]], model_id: str | None) -> int | No
     return None
 
 
+# --- what an answer cost ----------------------------------------------------------
+
+
+def answer_usage(
+    models: list[dict[str, Any]],
+    model_id: str | None,
+    prompt_tokens: int | None,
+    completion_tokens: int | None,
+) -> str | None:
+    """The line under an answer: tokens in and out, and what they come to
+    at the model's list price per million (`/api/models`), when the list
+    has one. None when the turn reported no tokens."""
+    if prompt_tokens is None and completion_tokens is None:
+        return None
+    tokens_in, tokens_out = prompt_tokens or 0, completion_tokens or 0
+    line = f"{tokens_in:,} tokens in · {tokens_out:,} out"
+    row = next((m for m in models if m.get("id") == model_id), None)
+    price_in = row.get("input_usd_per_m") if row else None
+    price_out = row.get("output_usd_per_m") if row else None
+    priced = isinstance(price_in, int | float) and isinstance(price_out, int | float)
+    if priced and (price_in or price_out):
+        cost = (tokens_in * float(price_in or 0) + tokens_out * float(price_out or 0)) / 1_000_000
+        line += f" · ${cost:,.4f} at list price"
+    return line
+
+
 # --- vision ---------------------------------------------------------------------
 #
 # Which models accept images, from the same `GET /api/models` rows the

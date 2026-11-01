@@ -44,22 +44,29 @@ def root(tmp_path: Path) -> Path:
     return workspace
 
 
-async def session_for(fake: FakeV1, root: Path, events: RunEvents | None = None, **options) -> AgentSession:
+async def session_for(
+    fake: FakeV1, root: Path, events: RunEvents | None = None, **options
+) -> AgentSession:
     return (await open_session(fake.api(), SessionOptions(root=root, **options), events)).session
 
 
 @pytest.mark.asyncio
 async def test_writes_to_the_agents_own_settings_and_context_files_ask_even_in_yolo(root: Path):
-    fake = FakeV1([
-        call("write_file", path=".matterwave/settings.json", content='{"mcpServers": {}}'),
-        call("write_file", path="agents.md", content="new rules"),
-        call("write_file", path="src/b.py", content="B = 2\n"),
-        say("done"),
-    ])
+    fake = FakeV1(
+        [
+            call("write_file", path=".matterwave/settings.json", content='{"mcpServers": {}}'),
+            call("write_file", path="agents.md", content="new rules"),
+            call("write_file", path="src/b.py", content="B = 2\n"),
+            say("done"),
+        ]
+    )
     events = Asked(False, False)
     session = await session_for(fake, root, events, mode="yolo", yolo=True)
     await session.run("configure yourself")
-    assert [r.title for r in events.asked] == ["Create .matterwave/settings.json", "Create agents.md"]
+    assert [r.title for r in events.asked] == [
+        "Create .matterwave/settings.json",
+        "Create agents.md",
+    ]
     assert not (root / ".matterwave").exists() and not (root / "agents.md").exists()
     assert (root / "src" / "b.py").exists()
 
@@ -117,9 +124,21 @@ async def test_a_fetch_reports_a_redirect_instead_of_following_it():
 @pytest.mark.asyncio
 async def test_compaction_in_the_middle_of_a_run_shortens_the_next_request(root: Path):
     (root / "big.txt").write_text("word " * 1200, encoding="utf-8")
-    models = {"data": [{"id": "small", "label": "Small", "included": True, "supports_tools": True,
-                        "context_window": 3000}], "default_model": "small"}
-    fake = FakeV1([call("read_file", path="big.txt") for _ in range(4)] + [say("ok")], models=models)
+    models = {
+        "data": [
+            {
+                "id": "small",
+                "label": "Small",
+                "included": True,
+                "supports_tools": True,
+                "context_window": 3000,
+            }
+        ],
+        "default_model": "small",
+    }
+    fake = FakeV1(
+        [call("read_file", path="big.txt") for _ in range(4)] + [say("ok")], models=models
+    )
     session = await session_for(fake, root, Asked())
     await session.run("read it")
     sizes = [len(r["messages"]) for r in fake.requests]
@@ -138,8 +157,18 @@ async def test_compaction_in_the_middle_of_a_run_shortens_the_next_request(root:
 @pytest.mark.asyncio
 async def test_a_long_history_is_summarised_before_the_next_prompt_not_mid_round(root: Path):
     (root / "big.txt").write_text("word " * 2000, encoding="utf-8")
-    models = {"data": [{"id": "small", "label": "Small", "included": True, "supports_tools": True,
-                        "context_window": 3000}], "default_model": "small"}
+    models = {
+        "data": [
+            {
+                "id": "small",
+                "label": "Small",
+                "included": True,
+                "supports_tools": True,
+                "context_window": 3000,
+            }
+        ],
+        "default_model": "small",
+    }
     fake = FakeV1([call("read_file", path="big.txt"), say("read"), say("ok")], models=models)
     session = await session_for(fake, root, Asked())
     await session.run("read it")
@@ -149,19 +178,32 @@ async def test_a_long_history_is_summarised_before_the_next_prompt_not_mid_round
     assert last[-1] == {"role": "user", "content": "now the next thing"}
     assert "The run so far, summarised." in last[0]["content"]
     stored = fake.stored[session.conversation_id]
-    assert [m["content"] for m in stored if m["role"] == "user"] == ["read it", "now the next thing"]
+    assert [m["content"] for m in stored if m["role"] == "user"] == [
+        "read it",
+        "now the next thing",
+    ]
 
 
 def test_the_no_store_fallback_drops_rounds_and_keeps_the_users_messages(root: Path):
     session = AgentSession(FakeV1().api(), root, store=False, context_window=400)
     session.messages = [
         {"role": "user", "content": "FIRST TASK"},
-        {"role": "assistant", "content": None, "tool_calls": [{"id": "1", "type": "function",
-                                                               "function": {"name": "x", "arguments": "{}"}}]},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "1", "type": "function", "function": {"name": "x", "arguments": "{}"}}
+            ],
+        },
         {"role": "tool", "tool_call_id": "1", "content": "o" * 2000},
         {"role": "user", "content": "SECOND TASK"},
-        {"role": "assistant", "content": None, "tool_calls": [{"id": "2", "type": "function",
-                                                               "function": {"name": "x", "arguments": "{}"}}]},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "2", "type": "function", "function": {"name": "x", "arguments": "{}"}}
+            ],
+        },
         {"role": "tool", "tool_call_id": "2", "content": "p" * 50},
     ]
     dropped = session._drop_oldest_rounds(200)
@@ -182,7 +224,9 @@ async def test_a_commands_background_children_end_with_it(tmp_path: Path):
         f"open(r'{pid_file}', 'w').write(str(child.pid))\n",
         encoding="utf-8",
     )
-    result = await run_command(runner(quoted(str(script))), tmp_path, timeout_s=60, output_max_bytes=65536)
+    result = await run_command(
+        runner(quoted(str(script))), tmp_path, timeout_s=60, output_max_bytes=65536
+    )
     assert result.exit_code == 0
     child = int(pid_file.read_text())
     deadline = time.monotonic() + 2.0
@@ -195,12 +239,15 @@ def test_the_sandbox_mounts_git_and_the_agents_folder_read_only(root: Path):
     (root / ".git").mkdir()
     (root / ".matterwave").mkdir()
     argv, _ = build_argv("true", root, SandboxConfig(engine="docker", image="img"), name="n1")
-    assert "--init" in argv and argv[argv.index("--name"):argv.index("--name") + 2] == ["--name", "n1"]
+    assert "--init" in argv and argv[argv.index("--name") : argv.index("--name") + 2] == [
+        "--name",
+        "n1",
+    ]
     assert f"{root / '.git'}:/workspace/.git:ro" in argv
     assert f"{root / '.matterwave'}:/workspace/.matterwave:ro" in argv
     bwrap, _ = build_argv("true", root, SandboxConfig(engine="bwrap"))
     assert ["--ro-bind", str(root / ".git"), str(root / ".git")] == bwrap[
-        bwrap.index(str(root / ".git")) - 1: bwrap.index(str(root / ".git")) + 2
+        bwrap.index(str(root / ".git")) - 1 : bwrap.index(str(root / ".git")) + 2
     ]
     seatbelt, _ = build_argv("true", root, SandboxConfig(engine="seatbelt", network=True))
     assert "(deny network*)" not in seatbelt[2] and ".git" in seatbelt[2]

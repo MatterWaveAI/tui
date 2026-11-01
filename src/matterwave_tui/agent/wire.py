@@ -94,7 +94,9 @@ def model_rows(models: dict[str, Any]) -> list[dict[str, Any]]:
     return [m for m in data if isinstance(m, dict)] if isinstance(data, list) else []
 
 
-def unavailable_reason(me: Me | None, models: dict[str, Any] | None, model_id: str | None) -> str | None:
+def unavailable_reason(
+    me: Me | None, models: dict[str, Any] | None, model_id: str | None
+) -> str | None:
     """Why agent mode is off for this account and model, or None when it is
     on: the SDK's `local_agent_tools_of` and `tools_of`, where only "no"
     refuses, so a field the server does not send (an older server) allows it."""

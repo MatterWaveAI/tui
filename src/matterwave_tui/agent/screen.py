@@ -177,7 +177,9 @@ class ApprovalScreen(Deliberate):
         title = safe_text(f"{request.title}{who}?", strict=True)
         with Vertical():
             yield Static(Text(title, style="bold"), id="approval-title")
-            yield Static(f"mode {self.mode} │ y approves · n rejects", id="approval-mode", markup=False)
+            yield Static(
+                f"mode {self.mode} │ y approves · n rejects", id="approval-mode", markup=False
+            )
             if request.note:
                 yield Static(safe_text(request.note, strict=True), id="approval-note", markup=False)
             with VerticalScroll(id="approval-body"):
@@ -616,7 +618,9 @@ class AgentScreen(Screen[None]):
         if outcome is not None:
             self.outcomes.append(outcome)
         if stopped:
-            self.add_line("Stopped. The stream was closed and any running command was ended.", "notice")
+            self.add_line(
+                "Stopped. The stream was closed and any running command was ended.", "notice"
+            )
         elif outcome is not None and not outcome.ok and outcome.message:
             self.add_line(outcome.message, "error")
         if outcome is not None:
@@ -700,7 +704,9 @@ class AgentScreen(Screen[None]):
         if save:
             refused = save_default_mode(session.mode)
             self.add_line(
-                f"Not saved: {refused}." if refused else f"{session.mode} is now your default mode.",
+                f"Not saved: {refused}."
+                if refused
+                else f"{session.mode} is now your default mode.",
                 "error" if refused else "notice",
             )
         self.render_status()
@@ -739,10 +745,16 @@ class AgentScreen(Screen[None]):
             if row.get("id") == model_id and isinstance(row.get("context_window"), int):
                 session.context_window = int(row["context_window"])
         self.unavailable = unavailable_reason(None, self.opened.models, model_id)
-        if self.unavailable is None and self.opened.unavailable and "organisation" in self.opened.unavailable:
+        if (
+            self.unavailable is None
+            and self.opened.unavailable
+            and "organisation" in self.opened.unavailable
+        ):
             self.unavailable = self.opened.unavailable
         self.state = "unavailable" if self.unavailable else "idle"
-        self.add_line(self.unavailable or f"Model: {model_id}.", "error" if self.unavailable else "notice")
+        self.add_line(
+            self.unavailable or f"Model: {model_id}.", "error" if self.unavailable else "notice"
+        )
         self.render_status()
 
     @work(group="agent-cmd")
@@ -765,8 +777,7 @@ class AgentScreen(Screen[None]):
         lines = [
             f"Context: ~{session.context_estimate():,} tokens of {session.window():,} "
             f"({len(session.messages)} messages)",
-            "Context files: "
-            + (", ".join(session.context.names) or "none loaded"),
+            "Context files: " + (", ".join(session.context.names) or "none loaded"),
         ]
         if session.context.skipped:
             lines.append("Not loaded (folder not trusted): " + ", ".join(session.context.skipped))
@@ -803,7 +814,9 @@ class AgentScreen(Screen[None]):
             if value:
                 self._restore(value)
 
-        self.app.push_screen(PickScreen("Restore the files to before…", options, self.mode_name()), chosen)
+        self.app.push_screen(
+            PickScreen("Restore the files to before…", options, self.mode_name()), chosen
+        )
 
     @work(group="agent-cmd")
     async def _restore(self, value: str) -> None:
@@ -823,12 +836,20 @@ class AgentScreen(Screen[None]):
             self.busy = False
         rows = {r.id: r for r in session.checkpoints.entries()}
         row = rows.get(checkpoint_id)
-        if row is not None and row.turn is not None and row.conversation_id == session.conversation_id:
+        if (
+            row is not None
+            and row.turn is not None
+            and row.conversation_id == session.conversation_id
+        ):
             # The run's history goes back to where the checkpoint was taken,
             # so the model's picture of the files matches the files.
             del session.messages[row.turn :]
-            AgentSession._close_open_calls(session.messages, "the files were restored to before this call")
-        self.add_line(f"Restored to before checkpoint #{checkpoint_id}: {', '.join(paths)}.", "notice")
+            AgentSession._close_open_calls(
+                session.messages, "the files were restored to before this call"
+            )
+        self.add_line(
+            f"Restored to before checkpoint #{checkpoint_id}: {', '.join(paths)}.", "notice"
+        )
         self.render_status()
 
     def _cmd_init(self, rest: str) -> None:
@@ -836,7 +857,9 @@ class AgentScreen(Screen[None]):
         if session is None:
             return
         if (session.root / "MATTERWAVE.md").exists():
-            self.add_line("MATTERWAVE.md already exists; edit it, or delete it and run /init again.", "notice")
+            self.add_line(
+                "MATTERWAVE.md already exists; edit it, or delete it and run /init again.", "notice"
+            )
             return
         if self.running or self.unavailable:
             self.notify("Not now: a run is going, or the agent is unavailable.")
@@ -897,7 +920,10 @@ class AgentScreen(Screen[None]):
             self.opened.trusted = True
             self.opened.settings = load_settings(session.root, trusted=True)
         loaded = ", ".join(session.context.names) or "no context files"
-        self.add_line(f"Trusted {session.root}. Loaded: {loaded}. Project MCP servers start next session.", "notice")
+        self.add_line(
+            f"Trusted {session.root}. Loaded: {loaded}. Project MCP servers start next session.",
+            "notice",
+        )
 
     def _cmd_mcp(self, rest: str) -> None:
         session = self.session
@@ -920,13 +946,18 @@ class AgentScreen(Screen[None]):
     def _cmd_agents(self, rest: str) -> None:
         session = self.session
         if session is None or not session.subagents:
-            self.add_line("No subagents. Add Markdown definitions under .matterwave/agents/ "
-                     "or the agents/ folder of your config.", "notice")
+            self.add_line(
+                "No subagents. Add Markdown definitions under .matterwave/agents/ "
+                "or the agents/ folder of your config.",
+                "notice",
+            )
             return
-        self.add_line("\n".join(
-            f"  {d.name}: {d.description} (tools: {', '.join(d.tools) if d.tools else 'all'})"
-            for d in session.subagents.values()
-        ))
+        self.add_line(
+            "\n".join(
+                f"  {d.name}: {d.description} (tools: {', '.join(d.tools) if d.tools else 'all'})"
+                for d in session.subagents.values()
+            )
+        )
 
     def _cmd_clear(self, rest: str) -> None:
         session = self.session

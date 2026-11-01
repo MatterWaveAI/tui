@@ -189,7 +189,10 @@ class GrepProcess:
             line = b""
         if not line:
             self._kill(live)
-            return {"text": "grep failed: the search process ended without an answer.", "is_error": True}
+            return {
+                "text": "grep failed: the search process ended without an answer.",
+                "is_error": True,
+            }
         reply: dict[str, Any] = json.loads(line)
         return reply
 
@@ -221,7 +224,10 @@ class GrepProcess:
             return None
         live = _Live(proc, proc.stdin, queue.Queue())
         threading.Thread(
-            target=_read_answers, args=(proc.stdout, live.answers), name="matterwave-grep", daemon=True
+            target=_read_answers,
+            args=(proc.stdout, live.answers),
+            name="matterwave-grep",
+            daemon=True,
         ).start()
         try:
             ready = live.answers.get(timeout=START_TIMEOUT_S)

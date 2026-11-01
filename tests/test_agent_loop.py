@@ -61,7 +61,9 @@ def root(tmp_path: Path) -> Path:
     return workspace
 
 
-async def opened(fake: FakeV1, root: Path, events: RunEvents | None = None, **options) -> AgentSession:
+async def opened(
+    fake: FakeV1, root: Path, events: RunEvents | None = None, **options
+) -> AgentSession:
     result = await open_session(fake.api(), SessionOptions(root=root, **options), events)
     return result.session
 
@@ -74,12 +76,16 @@ def system_prompt(fake: FakeV1, index: int = 0) -> str:
 
 
 @pytest.mark.asyncio
-async def test_ask_mode_shows_the_diff_and_a_rejected_edit_leaves_the_file_byte_identical(root: Path):
+async def test_ask_mode_shows_the_diff_and_a_rejected_edit_leaves_the_file_byte_identical(
+    root: Path,
+):
     before = (root / "src" / "app.py").read_bytes()
-    fake = FakeV1([
-        call("edit", path="src/app.py", old_string="return 1", new_string="return 2"),
-        say("Understood, leaving it."),
-    ])
+    fake = FakeV1(
+        [
+            call("edit", path="src/app.py", old_string="return 1", new_string="return 2"),
+            say("Understood, leaving it."),
+        ]
+    )
     events = Recorder(False)
     session = await opened(fake, root, events)
     outcome = await session.run("change the return value")
@@ -94,10 +100,12 @@ async def test_ask_mode_shows_the_diff_and_a_rejected_edit_leaves_the_file_byte_
 
 @pytest.mark.asyncio
 async def test_an_approved_edit_is_applied_after_the_diff(root: Path):
-    fake = FakeV1([
-        call("edit", path="src/app.py", old_string="return 1", new_string="return 2"),
-        say("Done."),
-    ])
+    fake = FakeV1(
+        [
+            call("edit", path="src/app.py", old_string="return 1", new_string="return 2"),
+            say("Done."),
+        ]
+    )
     events = Recorder(True)
     session = await opened(fake, root, events)
     outcome = await session.run("change it")
@@ -110,11 +118,17 @@ async def test_an_approved_edit_is_applied_after_the_diff(root: Path):
 async def test_reading_needs_no_approval_and_refused_paths_never_reach_the_model(root: Path):
     outside = root.parent / "outside.txt"
     outside.write_text("outside secret", encoding="utf-8")
-    fake = FakeV1([
-        calls(("read_file", {"path": "src/util.py"}), ("read_file", {"path": ".env"}),
-              ("read_file", {"path": "../outside.txt"}), ("read_file", {"path": str(outside)})),
-        say("Read."),
-    ])
+    fake = FakeV1(
+        [
+            calls(
+                ("read_file", {"path": "src/util.py"}),
+                ("read_file", {"path": ".env"}),
+                ("read_file", {"path": "../outside.txt"}),
+                ("read_file", {"path": str(outside)}),
+            ),
+            say("Read."),
+        ]
+    )
     events = Recorder()
     session = await opened(fake, root, events)
     await session.run("read things")
@@ -132,10 +146,12 @@ async def test_reading_needs_no_approval_and_refused_paths_never_reach_the_model
 
 @pytest.mark.asyncio
 async def test_plan_mode_offers_the_model_read_tools_only(root: Path):
-    fake = FakeV1([
-        call("edit", path="src/app.py", old_string="return 1", new_string="return 2"),
-        say("I would change the return value."),
-    ])
+    fake = FakeV1(
+        [
+            call("edit", path="src/app.py", old_string="return 1", new_string="return 2"),
+            say("I would change the return value."),
+        ]
+    )
     events = Recorder(True)
     session = await opened(fake, root, events, mode="plan")
     await session.run("plan a change")
@@ -152,11 +168,13 @@ async def test_plan_mode_offers_the_model_read_tools_only(root: Path):
 
 @pytest.mark.asyncio
 async def test_auto_edit_applies_edits_without_asking_and_still_asks_before_run_shell(root: Path):
-    fake = FakeV1([
-        call("edit", path="src/util.py", old_string="VALUE = 2", new_string="VALUE = 3"),
-        call("run_shell", command="echo hi"),
-        say("Edited; did not run the command."),
-    ])
+    fake = FakeV1(
+        [
+            call("edit", path="src/util.py", old_string="VALUE = 2", new_string="VALUE = 3"),
+            call("run_shell", command="echo hi"),
+            say("Edited; did not run the command."),
+        ]
+    )
     events = Recorder(False)
     session = await opened(fake, root, events, mode="auto-edit")
     await session.run("edit and test")
@@ -196,7 +214,10 @@ async def test_yolo_runs_commands_without_asking(root: Path):
     await session.run("run it")
     assert events.asked == []
     assert "from-yolo" in fake.tool_results()[-1]
-    assert any("no sandbox" in n for n in (await open_session(fake.api(), SessionOptions(root=root, yolo=True))).notices)
+    assert any(
+        "no sandbox" in n
+        for n in (await open_session(fake.api(), SessionOptions(root=root, yolo=True))).notices
+    )
 
 
 @pytest.mark.asyncio
@@ -236,10 +257,12 @@ async def test_the_token_cap_ends_a_looping_model_with_a_clear_message(root: Pat
 
 @pytest.mark.asyncio
 async def test_a_402_mid_run_ends_it_with_the_budget_copy(root: Path):
-    fake = FakeV1([
-        call("list_dir"),
-        refuse(402, "The organisation's token budget is used up.", code="budget"),
-    ])
+    fake = FakeV1(
+        [
+            call("list_dir"),
+            refuse(402, "The organisation's token budget is used up.", code="budget"),
+        ]
+    )
     session = await opened(fake, root, Recorder())
     outcome = await session.run("work")
     assert outcome.status == "budget"
@@ -250,18 +273,28 @@ async def test_a_402_mid_run_ends_it_with_the_budget_copy(root: Path):
 
 @pytest.mark.asyncio
 async def test_a_429_out_of_quota_is_the_budget_and_a_429_window_is_a_rate_limit(root: Path):
-    quota = FakeV1([refuse(429, "Your organisation's monthly token budget is used up.",
-                          code="insufficient_quota")])
+    quota = FakeV1(
+        [
+            refuse(
+                429,
+                "Your organisation's monthly token budget is used up.",
+                code="insufficient_quota",
+            )
+        ]
+    )
     out = await (await opened(quota, root, Recorder())).run("x")
     assert out.status == "budget" and COPY["budget"].title in (out.message or "")
-    window = FakeV1([refuse(429, "Rate limit reached.", code="rate_limit_exceeded",
-                            **{"retry-after": "7"})])
+    window = FakeV1(
+        [refuse(429, "Rate limit reached.", code="rate_limit_exceeded", **{"retry-after": "7"})]
+    )
     out = await (await opened(window, root, Recorder())).run("x")
     assert out.status == "rate_limited" and COPY["rate_limited"].title in (out.message or "")
 
 
 @pytest.mark.asyncio
-async def test_agent_unavailable_for_a_model_without_tools_or_an_org_that_switched_it_off(root: Path):
+async def test_agent_unavailable_for_a_model_without_tools_or_an_org_that_switched_it_off(
+    root: Path,
+):
     fake = FakeV1()
     result = await open_session(fake.api(), SessionOptions(root=root, model="grt-nano"))
     assert result.unavailable and "GRT Nano cannot call tools" in result.unavailable
@@ -326,10 +359,21 @@ async def test_continue_with_no_earlier_run_says_so(root: Path):
 async def test_old_tool_output_is_folded_before_anything_is_summarised(root: Path):
     big = "x = 1  # " + "padding " * 400 + "\n"
     (root / "big.py").write_text(big, encoding="utf-8")
-    models = {"data": [{"id": "small", "label": "Small", "included": True, "supports_tools": True,
-                        "context_window": 4000}], "default_model": "small"}
-    fake = FakeV1([call("read_file", path="big.py") for _ in range(4)] + [say("Read it all.")],
-                  models=models)
+    models = {
+        "data": [
+            {
+                "id": "small",
+                "label": "Small",
+                "included": True,
+                "supports_tools": True,
+                "context_window": 4000,
+            }
+        ],
+        "default_model": "small",
+    }
+    fake = FakeV1(
+        [call("read_file", path="big.py") for _ in range(4)] + [say("Read it all.")], models=models
+    )
     session = await opened(fake, root, Recorder())
     await session.run("read it four times")
     last = fake.tool_results()
@@ -376,12 +420,19 @@ async def test_the_context_file_loads_in_a_trusted_folder_only(root: Path):
     assert trusted.trusted and not trusted.trust_unknown
     await trusted.session.run("hi")
     prompt = system_prompt(fake, 1)
-    assert '<project-instructions path="MATTERWAVE.md">\nUse four-space indents.\n</project-instructions>' in prompt
-    assert '<project-instructions path="AGENTS.md">\nRun pytest -q.\n</project-instructions>' in prompt
+    assert (
+        '<project-instructions path="MATTERWAVE.md">\nUse four-space indents.\n</project-instructions>'
+        in prompt
+    )
+    assert (
+        '<project-instructions path="AGENTS.md">\nRun pytest -q.\n</project-instructions>' in prompt
+    )
     # The contract's slot: the same text the SDK makes of the same files.
     files = trusted.session.context.files
     extras = trusted.session.offered_extras()
-    assert contract.system_prompt("ask", str(root), extra_tools=extras, context_files=files) in prompt
+    assert (
+        contract.system_prompt("ask", str(root), extra_tools=extras, context_files=files) in prompt
+    )
 
 
 @pytest.mark.asyncio
@@ -391,7 +442,10 @@ async def test_the_personal_override_and_account_instructions_layer_on_top(root:
     session = await opened(fake, root, Recorder(), trust=True)
     await session.run("hi")
     prompt = system_prompt(fake)
-    assert '<project-instructions path="MATTERWAVE.local.md">\nI prefer short answers.\n</project-instructions>' in prompt
+    assert (
+        '<project-instructions path="MATTERWAVE.local.md">\nI prefer short answers.\n</project-instructions>'
+        in prompt
+    )
     assert prompt.rstrip().endswith("Answer in British English.")
     assert any("not in .gitignore" in n for n in session.context.notices)
     assert "never as instructions" in prompt
@@ -426,11 +480,20 @@ def test_custom_commands_are_markdown_files(root: Path, private_dirs):
 
 
 def git(root: Path, *args: str) -> str:
-    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
-           "GIT_COMMITTER_EMAIL": "t@t"}
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+    }
     return subprocess.run(  # noqa: S603
-        ["git", "-c", "commit.gpgsign=false", *args], cwd=root, env=env,  # noqa: S607
-        capture_output=True, text=True, check=True,
+        ["git", "-c", "commit.gpgsign=false", *args],  # noqa: S607
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout
 
 
@@ -449,12 +512,14 @@ async def test_restore_after_two_edits_brings_both_files_back_and_leaves_git_alo
     app_before = (root / "src" / "app.py").read_bytes()
     util_before = (root / "src" / "util.py").read_bytes()
 
-    fake = FakeV1([
-        call("edit", path="src/app.py", old_string="return 1", new_string="return 10"),
-        call("write_file", path="src/util.py", content="VALUE = 20\n"),
-        call("write_file", path="src/new.py", content="NEW = 1\n"),
-        say("Three changes."),
-    ])
+    fake = FakeV1(
+        [
+            call("edit", path="src/app.py", old_string="return 1", new_string="return 10"),
+            call("write_file", path="src/util.py", content="VALUE = 20\n"),
+            call("write_file", path="src/new.py", content="NEW = 1\n"),
+            say("Three changes."),
+        ]
+    )
     session = await opened(fake, root, Recorder(), mode="auto-edit")
     await session.run("change things")
     assert (root / "src" / "app.py").read_bytes() != app_before
@@ -493,13 +558,15 @@ def write_agent(name: str, tools: str, max_turns: str | None = None) -> None:
 @pytest.mark.asyncio
 async def test_a_subagent_keeps_to_its_own_tool_allow_list(root: Path):
     write_agent("reader", "read_file, grep")
-    fake = FakeV1([
-        call("agent", agent="reader", task="Find VALUE in src/util.py"),
-        call("run_shell", command="rm -rf src"),
-        call("read_file", path="src/util.py"),
-        say("VALUE is 2."),
-        say("The subagent says VALUE is 2."),
-    ])
+    fake = FakeV1(
+        [
+            call("agent", agent="reader", task="Find VALUE in src/util.py"),
+            call("run_shell", command="rm -rf src"),
+            call("read_file", path="src/util.py"),
+            say("VALUE is 2."),
+            say("The subagent says VALUE is 2."),
+        ]
+    )
     events = Recorder(True)
     session = await opened(fake, root, events, mode="yolo", yolo=True)
     outcome = await session.run("delegate it")
@@ -532,22 +599,32 @@ async def test_a_subagents_calls_count_against_the_parents_caps(root: Path):
 def project_mcp(root: Path, log: Path, **extra) -> None:
     settings = root / ".matterwave" / "settings.json"
     settings.parent.mkdir(parents=True, exist_ok=True)
-    server = {"command": sys.executable, "args": [str(HERE / "mcp_stdio_server.py"), str(log)],
-              "tools": ["lookup", "deploy"], **extra}
-    settings.write_text(json.dumps({"mcpServers": {"demo": server},
-                                    "matterwaveMcp": {"enabled": False}}), encoding="utf-8")
+    server = {
+        "command": sys.executable,
+        "args": [str(HERE / "mcp_stdio_server.py"), str(log)],
+        "tools": ["lookup", "deploy"],
+        **extra,
+    }
+    settings.write_text(
+        json.dumps({"mcpServers": {"demo": server}, "matterwaveMcp": {"enabled": False}}),
+        encoding="utf-8",
+    )
 
 
 @pytest.mark.asyncio
-async def test_an_mcp_stdio_server_from_project_settings_lists_its_allowed_tools(root: Path, tmp_path: Path):
+async def test_an_mcp_stdio_server_from_project_settings_lists_its_allowed_tools(
+    root: Path, tmp_path: Path
+):
     log = tmp_path / "mcp-calls.jsonl"
     project_mcp(root, log)
-    fake = FakeV1([
-        call("mcp__demo__deploy", target="prod"),
-        call("mcp__demo__lookup", word="agent"),
-        call("mcp__demo__drop_database"),
-        say("Done."),
-    ])
+    fake = FakeV1(
+        [
+            call("mcp__demo__deploy", target="prod"),
+            call("mcp__demo__lookup", word="agent"),
+            call("mcp__demo__drop_database"),
+            say("Done."),
+        ]
+    )
     events = Recorder(False, True)
     session = await opened(fake, root, events, trust=True)
     try:
@@ -579,11 +656,20 @@ async def test_project_mcp_servers_do_not_start_in_an_untrusted_folder(root: Pat
 
 
 @pytest.mark.asyncio
-async def test_every_mcp_call_asks_and_a_trusted_servers_read_only_tool_asks_in_plan(root: Path, tmp_path: Path):
+async def test_every_mcp_call_asks_and_a_trusted_servers_read_only_tool_asks_in_plan(
+    root: Path, tmp_path: Path
+):
     log = tmp_path / "calls.jsonl"
     project_mcp(root, log, trust=True)
-    fake = FakeV1([call("mcp__demo__deploy", target="staging"), call("mcp__demo__lookup", word="x"),
-                   say("Deployed."), call("mcp__demo__lookup", word="y"), say("Looked.")])
+    fake = FakeV1(
+        [
+            call("mcp__demo__deploy", target="staging"),
+            call("mcp__demo__lookup", word="x"),
+            say("Deployed."),
+            call("mcp__demo__lookup", word="y"),
+            say("Looked."),
+        ]
+    )
     events = Recorder(True, True, True)
     session = await opened(fake, root, events, trust=True)
     try:
@@ -603,7 +689,9 @@ async def test_every_mcp_call_asks_and_a_trusted_servers_read_only_tool_asks_in_
 
 
 @pytest.mark.asyncio
-async def test_an_untrusted_servers_read_only_tool_is_not_offered_in_plan(root: Path, tmp_path: Path):
+async def test_an_untrusted_servers_read_only_tool_is_not_offered_in_plan(
+    root: Path, tmp_path: Path
+):
     project_mcp(root, tmp_path / "calls.jsonl")
     fake = FakeV1([say("ok")])
     session = await opened(fake, root, Recorder(), trust=True, mode="plan")
@@ -617,17 +705,28 @@ async def test_an_untrusted_servers_read_only_tool_is_not_offered_in_plan(root: 
 @pytest.mark.asyncio
 async def test_matterwaves_own_mcp_is_prewired_with_the_users_credential(root: Path):
     tools = [
-        {"name": "list_conversations", "description": "List", "inputSchema": {"type": "object"},
-         "annotations": {"readOnlyHint": True}},
+        {
+            "name": "list_conversations",
+            "description": "List",
+            "inputSchema": {"type": "object"},
+            "annotations": {"readOnlyHint": True},
+        },
         {"name": "send_message", "description": "Send", "inputSchema": {"type": "object"}},
     ]
-    fake = FakeV1([call("mcp__matterwave__list_conversations"),
-                   call("mcp__matterwave__send_message", conversation_id="c9", content="hi"),
-                   say("Listed.")], mcp_tools=tools)
+    fake = FakeV1(
+        [
+            call("mcp__matterwave__list_conversations"),
+            call("mcp__matterwave__send_message", conversation_id="c9", content="hi"),
+            say("Listed."),
+        ],
+        mcp_tools=tools,
+    )
     events = Recorder(True, False)
     session = await opened(fake, root, events)
     await session.run("what did I talk about?")
-    assert {"mcp__matterwave__list_conversations", "mcp__matterwave__send_message"} <= set(fake.tool_names(0))
+    assert {"mcp__matterwave__list_conversations", "mcp__matterwave__send_message"} <= set(
+        fake.tool_names(0)
+    )
     assert fake.mcp_called == [("list_conversations", {})]
     # Read-only or not, an MCP call asks in ask mode.
     assert [r.kind for r in events.asked] == ["mcp", "mcp"]
@@ -638,8 +737,13 @@ async def test_matterwaves_own_mcp_is_prewired_with_the_users_credential(root: P
 
 @pytest.mark.asyncio
 async def test_web_fetch_asks_first_and_takes_only_http(root: Path):
-    fake = FakeV1([call("web_fetch", url="file:///etc/passwd"), call("web_fetch", url="https://example.com/x"),
-                   say("Skipped.")])
+    fake = FakeV1(
+        [
+            call("web_fetch", url="file:///etc/passwd"),
+            call("web_fetch", url="https://example.com/x"),
+            say("Skipped."),
+        ]
+    )
     events = Recorder(False)
     session = await opened(fake, root, events)
     await session.run("fetch")
@@ -652,7 +756,10 @@ async def test_web_fetch_asks_first_and_takes_only_http(root: Path):
 
 @pytest.mark.asyncio
 async def test_the_todo_list_is_kept_and_shown(root: Path):
-    todos = [{"content": "read", "status": "completed"}, {"content": "edit", "status": "in_progress"}]
+    todos = [
+        {"content": "read", "status": "completed"},
+        {"content": "edit", "status": "in_progress"},
+    ]
     fake = FakeV1([call("todo_write", todos=todos), say("Working.")])
     events = Recorder()
     session = await opened(fake, root, events, mode="plan")

@@ -69,7 +69,9 @@ class Checkpoint:
             files={str(k): (str(v) if v else None) for k, v in files.items()}
             if isinstance(files, dict)
             else {},
-            conversation_id=row.get("conversation_id") if isinstance(row.get("conversation_id"), str) else None,
+            conversation_id=row.get("conversation_id")
+            if isinstance(row.get("conversation_id"), str)
+            else None,
             turn=row.get("turn") if isinstance(row.get("turn"), int) else None,
         )
 
@@ -143,7 +145,11 @@ class Checkpoints:
             rows = json.loads(self._index_path().read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return []
-        return [Checkpoint.from_dict(r) for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+        return (
+            [Checkpoint.from_dict(r) for r in rows if isinstance(r, dict)]
+            if isinstance(rows, list)
+            else []
+        )
 
     def _save(self, rows: list[Checkpoint]) -> None:
         path = self._index_path()
@@ -168,7 +174,9 @@ class Checkpoints:
         for rel in relatives:
             absolute = self.root / rel
             if absolute.is_file():
-                blob = self._git("hash-object", "-w", "--no-filters", "--stdin", data=absolute.read_bytes())
+                blob = self._git(
+                    "hash-object", "-w", "--no-filters", "--stdin", data=absolute.read_bytes()
+                )
                 files[rel] = blob.decode("ascii").strip()
             else:
                 files[rel] = None

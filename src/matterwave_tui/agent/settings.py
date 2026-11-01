@@ -3,11 +3,11 @@
 Two directories, both movable by environment for tests and for people who
 keep dotfiles elsewhere:
 
-- the state directory (`MATTERWAVE_STATE_DIR`, else `XDG_STATE_HOME`, else
-  `~/.local/state`) + `matterwave-tui/`: the trusted-folder answers, the
-  runs started per folder (for `--continue` and `/resume`) and the file
-  checkpoints. The app's other state (roles, dismissed announcements) is
-  there already.
+- the app's state directory (`paths.state_dir`: `MATTERWAVE_STATE_DIR`,
+  else the platform's own) + `matterwave-tui/`: the trusted-folder
+  answers, the runs started per folder (for `--continue` and `/resume`)
+  and the file checkpoints. The app's other state (roles, dismissed
+  announcements) is there already.
 - the config directory (`MATTERWAVE_CONFIG_DIR`, else `XDG_CONFIG_HOME`,
   else `~/.config`) + `matterwave/`: the user's `settings.json`, and the
   `commands/` and `agents/` folders of Markdown definitions.
@@ -29,6 +29,8 @@ from typing import Any, Literal
 
 from matterwave_sdk import agent as contract
 
+from .. import paths
+
 PROJECT_DIR = ".matterwave"
 SETTINGS_FILE = "settings.json"
 TRUST_FILE = "trusted-folders.json"
@@ -43,11 +45,7 @@ Trust = Literal["trusted", "untrusted"]
 
 
 def state_dir() -> Path:
-    root = os.environ.get("MATTERWAVE_STATE_DIR")
-    if not root:
-        xdg = os.environ.get("XDG_STATE_HOME")
-        root = xdg if xdg else str(Path.home() / ".local" / "state")
-    return Path(root) / "matterwave-tui"
+    return paths.state_dir()
 
 
 def config_dir() -> Path:
@@ -193,7 +191,9 @@ def _str_map(value: Any) -> dict[str, str]:
     return {str(k): str(v) for k, v in value.items() if isinstance(v, (str, int, float))}
 
 
-def _server(name: str, raw: Mapping[str, Any], source: Literal["user", "project"]) -> McpServerConfig:
+def _server(
+    name: str, raw: Mapping[str, Any], source: Literal["user", "project"]
+) -> McpServerConfig:
     timeout = raw.get("timeout_s")
     return McpServerConfig(
         name=name,
@@ -272,7 +272,11 @@ def load_settings(root: Path, *, trusted: bool) -> AgentSettings:
 
     def positive(key: str, default: int) -> int:
         value = values.get(key)
-        return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else default
+        return (
+            value
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0
+            else default
+        )
 
     engine = str(sandbox.get("engine") or "none")
     return AgentSettings(

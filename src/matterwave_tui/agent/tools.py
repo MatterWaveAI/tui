@@ -126,7 +126,9 @@ def _load(path: Path) -> bytes:
     if not path.is_file():
         raise OSError(f"{path.name} is not a regular file")
     if path.stat().st_size > WRITE_MAX_BYTES:
-        raise OSError(f"it is larger than {WRITE_MAX_BYTES // (1024 * 1024)} MB, too large to change here")
+        raise OSError(
+            f"it is larger than {WRITE_MAX_BYTES // (1024 * 1024)} MB, too large to change here"
+        )
     return path.read_bytes()
 
 
@@ -223,8 +225,11 @@ class LocalTools:
         limits = self.limits
         if name == "read_file":
             text = contract.run_read_file(
-                self.root, _required(args, "path"), _line(args, "start_line"),
-                _line(args, "end_line"), limits=limits,
+                self.root,
+                _required(args, "path"),
+                _line(args, "start_line"),
+                _line(args, "end_line"),
+                limits=limits,
             )
             return ToolOutcome(text)
         path = _string(args, "path", required=False) or "."
@@ -235,7 +240,10 @@ class LocalTools:
         if name == "glob":
             return ToolOutcome(
                 contract.run_glob(
-                    self.root, _required(args, "pattern"), path, ignore=self.search_ignore(),
+                    self.root,
+                    _required(args, "pattern"),
+                    path,
+                    ignore=self.search_ignore(),
                     limits=limits,
                 )
             )

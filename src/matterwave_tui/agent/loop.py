@@ -56,8 +56,16 @@ from .tools import ArgumentError, LocalTools, PendingWrite, ToolOutcome, parse_a
 from .wire import AgentWire, Completed, TextDelta
 
 Status = Literal[
-    "done", "stopped", "budget", "rate_limited", "plan", "error",
-    "step_cap", "token_cap", "refused", "unavailable",
+    "done",
+    "stopped",
+    "budget",
+    "rate_limited",
+    "plan",
+    "error",
+    "step_cap",
+    "token_cap",
+    "refused",
+    "unavailable",
 ]
 
 DEFAULT_CONTEXT_WINDOW = 32_768
@@ -348,7 +356,9 @@ class AgentSession:
 
     def cycle_modes(self) -> list[str]:
         return [
-            m for m in contract.MODE_NAMES if not contract.mode(m).requires_flag or self.yolo_allowed
+            m
+            for m in contract.MODE_NAMES
+            if not contract.mode(m).requires_flag or self.yolo_allowed
         ]
 
     def next_mode(self) -> str:
@@ -452,10 +462,16 @@ class AgentSession:
     def window(self) -> int:
         return self.context_window or DEFAULT_CONTEXT_WINDOW
 
-    def fold_tool_output(self, messages: list[dict[str, Any]], keep_rounds: int = FOLD_KEEP_ROUNDS) -> int:
+    def fold_tool_output(
+        self, messages: list[dict[str, Any]], keep_rounds: int = FOLD_KEEP_ROUNDS
+    ) -> int:
         """Shorten old tool results in place, the newest `keep_rounds`
         rounds left whole. No model call. The characters saved."""
-        rounds = [i for i, m in enumerate(messages) if m.get("role") == "assistant" and m.get("tool_calls")]
+        rounds = [
+            i
+            for i, m in enumerate(messages)
+            if m.get("role") == "assistant" and m.get("tool_calls")
+        ]
         if len(rounds) <= keep_rounds:
             return 0
         boundary = rounds[-keep_rounds] if keep_rounds else len(messages)
@@ -497,7 +513,8 @@ class AgentSession:
             dropped = self._drop_oldest_rounds(int(SUMMARISE_AT * window))
             if dropped:
                 why = (
-                    "the run is not stored" if self.conversation_id is None
+                    "the run is not stored"
+                    if self.conversation_id is None
                     else "the stored conversation keeps them"
                 )
                 notes.append(f"left out {dropped} of the oldest rounds ({why})")
@@ -530,7 +547,9 @@ class AgentSession:
         the round after it, if any; the summary goes in the system prompt."""
         task_index = self._last_user_index()
         rounds = [
-            i for i, m in enumerate(self.messages) if m.get("role") == "assistant" and m.get("tool_calls")
+            i
+            for i, m in enumerate(self.messages)
+            if m.get("role") == "assistant" and m.get("tool_calls")
         ]
         tail: list[dict[str, Any]] = []
         if rounds and (task_index is None or rounds[-1] > task_index):
@@ -545,7 +564,9 @@ class AgentSession:
         dropped = 0
         while self.context_estimate() > target:
             rounds = [
-                i for i, m in enumerate(self.messages) if m.get("role") == "assistant" and m.get("tool_calls")
+                i
+                for i, m in enumerate(self.messages)
+                if m.get("role") == "assistant" and m.get("tool_calls")
             ]
             if len(rounds) <= 1:
                 break
@@ -554,7 +575,10 @@ class AgentSession:
             while end < len(self.messages) and self.messages[end].get("role") == "tool":
                 end += 1
             self.messages[start:end] = [
-                {"role": "assistant", "content": "(an earlier tool round was left out to save context)"}
+                {
+                    "role": "assistant",
+                    "content": "(an earlier tool round was left out to save context)",
+                }
             ]
             dropped += 1
         return dropped
@@ -573,7 +597,9 @@ class AgentSession:
         if self.conversation_id is not None or not self.store:
             return
         title = " ".join(prompt.split())[:60] or "Agent run"
-        conversation = await self.wire.create_conversation(title=f"Agent: {title}", model=self.model)
+        conversation = await self.wire.create_conversation(
+            title=f"Agent: {title}", model=self.model
+        )
         self.conversation_id = conversation.id
         self.title = conversation.title or title
         await self.load_account_instructions()
@@ -588,7 +614,9 @@ class AgentSession:
         except (APIError, APIConnectionError):
             return
         effective = levels.get("effective")
-        self.account_instructions = effective if isinstance(effective, str) and effective.strip() else None
+        self.account_instructions = (
+            effective if isinstance(effective, str) and effective.strip() else None
+        )
 
     async def run(self, prompt: str) -> RunOutcome:
         """One agent run for `prompt`. Cancelling the task that awaits it is
@@ -623,13 +651,20 @@ class AgentSession:
             kind = classify(exc.message, exc.status_code, exc.code)
             failure = Failure(kind, exc.request_id, retry_after=exc.retry_after)
             status: Status = (
-                "budget" if kind == "budget"
-                else "rate_limited" if kind == "rate_limited"
-                else "plan" if kind == "plan"
+                "budget"
+                if kind == "budget"
+                else "rate_limited"
+                if kind == "rate_limited"
+                else "plan"
+                if kind == "plan"
                 else "error"
             )
-            return RunOutcome(status, message=failure.render(), request_id=exc.request_id,
-                              usage=self.budget.usage())
+            return RunOutcome(
+                status,
+                message=failure.render(),
+                request_id=exc.request_id,
+                usage=self.budget.usage(),
+            )
         failure = Failure("network", None)
         return RunOutcome("error", message=failure.render(), usage=self.budget.usage())
 
@@ -646,8 +681,11 @@ class AgentSession:
                 for call in message["tool_calls"]:
                     if call.get("id") not in answered:
                         messages.append(
-                            {"role": "tool", "tool_call_id": call.get("id"),
-                             "content": NOT_RUN.format(reason=reason)}
+                            {
+                                "role": "tool",
+                                "tool_call_id": call.get("id"),
+                                "content": NOT_RUN.format(reason=reason),
+                            }
                         )
                 return
             if message.get("role") == "user":
@@ -667,12 +705,16 @@ class AgentSession:
         while True:
             cap = self.budget.exceeded()
             if cap is not None:
-                return RunOutcome(cap, last_text, self.budget.cap_message(cap), request_id, self.budget.usage())
+                return RunOutcome(
+                    cap, last_text, self.budget.cap_message(cap), request_id, self.budget.usage()
+                )
             if turn_limit is not None and own_turns >= turn_limit:
                 return RunOutcome(
-                    "step_cap", last_text,
+                    "step_cap",
+                    last_text,
                     f"Stopped: the subagent made {own_turns} model calls, its own limit.",
-                    request_id, self.budget.usage(),
+                    request_id,
+                    self.budget.usage(),
                 )
             if agent is None:
                 await self._fit_context()
@@ -700,7 +742,10 @@ class AgentSession:
                 return outcome
             if completed is None:
                 return RunOutcome(
-                    "error", last_text, Failure("truncated", request_id).render(), request_id,
+                    "error",
+                    last_text,
+                    Failure("truncated", request_id).render(),
+                    request_id,
                     self.budget.usage(),
                 )
             request_id = completed.request_id or request_id
@@ -732,7 +777,9 @@ class AgentSession:
             cap = self.budget.exceeded()
             if cap is not None:
                 self._close_open_calls(messages, "the run reached its token cap")
-                return RunOutcome(cap, last_text, self.budget.cap_message(cap), request_id, self.budget.usage())
+                return RunOutcome(
+                    cap, last_text, self.budget.cap_message(cap), request_id, self.budget.usage()
+                )
             for call in calls:
                 try:
                     result = await self._dispatch(call, agent=agent, allowed=allowed)
@@ -740,18 +787,28 @@ class AgentSession:
                     # Stop: a command it ended answers with what it printed.
                     stopped = self.local.take_stopped()
                     if stopped is not None:
-                        messages.append({"role": "tool", "tool_call_id": call.id, "content": stopped.text})
+                        messages.append(
+                            {"role": "tool", "tool_call_id": call.id, "content": stopped.text}
+                        )
                     raise
                 except _Refused as refused:
-                    messages.append({"role": "tool", "tool_call_id": call.id, "content": refused.sentence})
+                    messages.append(
+                        {"role": "tool", "tool_call_id": call.id, "content": refused.sentence}
+                    )
                     self.events.on_tool_end(
-                        call, ToolOutcome(refused.sentence, is_error=True), agent.name if agent else None
+                        call,
+                        ToolOutcome(refused.sentence, is_error=True),
+                        agent.name if agent else None,
                     )
                     if agent is not None:
                         raise
                     self._close_open_calls(messages, "the approval was refused")
                     return RunOutcome(
-                        "refused", last_text, str(refused), request_id, self.budget.usage(),
+                        "refused",
+                        last_text,
+                        str(refused),
+                        request_id,
+                        self.budget.usage(),
                         refused=refused.request.title,
                     )
                 except _CapReached as reached:
@@ -759,8 +816,11 @@ class AgentSession:
                         raise
                     self._close_open_calls(messages, "the run reached its cap")
                     return RunOutcome(
-                        reached.status, last_text, self.budget.cap_message(reached.status),
-                        request_id, self.budget.usage(),
+                        reached.status,
+                        last_text,
+                        self.budget.cap_message(reached.status),
+                        request_id,
+                        self.budget.usage(),
                     )
                 except Exception as exc:  # a tool that broke is a failed call, not a failed run
                     result = ToolOutcome(f"The tool failed: {exc}", is_error=True)
@@ -821,8 +881,15 @@ class AgentSession:
             except (ArgumentError, contract.ToolError) as exc:
                 return ToolOutcome(str(exc), is_error=True)
             if ask and not await self._approve(
-                ApprovalRequest(name, "shell", "Run a command", command, call.id, who,
-                                note=self._unreviewed_note())
+                ApprovalRequest(
+                    name,
+                    "shell",
+                    "Run a command",
+                    command,
+                    call.id,
+                    who,
+                    note=self._unreviewed_note(),
+                )
             ):
                 return self._rejected(name)
             return await self.local.run_shell(command, timeout)
@@ -836,7 +903,9 @@ class AgentSession:
         if name == "exit_plan_mode":
             plan = str(args.get("plan") or "")
             if not await self._approve(
-                ApprovalRequest(name, "plan", "Approve this plan and switch to ask mode", plan, call.id, who)
+                ApprovalRequest(
+                    name, "plan", "Approve this plan and switch to ask mode", plan, call.id, who
+                )
             ):
                 return ToolOutcome(
                     "The user did not approve the plan. Stay in plan mode: refine it, or ask what to change."
@@ -853,8 +922,15 @@ class AgentSession:
             if reason:
                 return ToolOutcome(reason, is_error=True)
             if ask and not await self._approve(
-                ApprovalRequest(name, "web", "Fetch a URL", url_detail(url), call.id, who,
-                                note=self._unreviewed_note())
+                ApprovalRequest(
+                    name,
+                    "web",
+                    "Fetch a URL",
+                    url_detail(url),
+                    call.id,
+                    who,
+                    note=self._unreviewed_note(),
+                )
             ):
                 return self._rejected(name)
             text, failed = await web_fetch(url)
@@ -865,8 +941,12 @@ class AgentSession:
             info = self.mcp.tools[name]
             if ask and not await self._approve(
                 ApprovalRequest(
-                    name, "mcp", f"Call {info.name} on MCP server {info.server}",
-                    json.dumps(args, indent=2, ensure_ascii=False), call.id, who,
+                    name,
+                    "mcp",
+                    f"Call {info.name} on MCP server {info.server}",
+                    json.dumps(args, indent=2, ensure_ascii=False),
+                    call.id,
+                    who,
                     note=self._unreviewed_note(),
                 )
             ):
@@ -893,8 +973,14 @@ class AgentSession:
         everywhere = protected or self.holds_home or in_own_folders(pending.path.absolute)
         if ask or everywhere:
             verb = "Create" if pending.created else ("Edit" if name == "edit" else "Overwrite")
-            request = ApprovalRequest(name, "edit" if name == "edit" else "write",
-                                      f"{verb} {pending.relative}", pending.diff, call.id, agent)
+            request = ApprovalRequest(
+                name,
+                "edit" if name == "edit" else "write",
+                f"{verb} {pending.relative}",
+                pending.diff,
+                call.id,
+                agent,
+            )
             if not await self._approve(
                 request, protected=pending.relative if protected else None, everywhere=everywhere
             ):
@@ -904,7 +990,11 @@ class AgentSession:
             return stale
         await self._checkpoint([pending.relative], f"{name} {pending.relative}")
         result = await asyncio.to_thread(self.local.apply_write, pending)
-        if not (ask or everywhere) and not result.is_error and pending.relative not in self.unreviewed:
+        if (
+            not (ask or everywhere)
+            and not result.is_error
+            and pending.relative not in self.unreviewed
+        ):
             self.unreviewed.append(pending.relative)
         return result
 
@@ -941,7 +1031,9 @@ class AgentSession:
         names.discard("exit_plan_mode")
         sub_messages: list[dict[str, Any]] = [{"role": "user", "content": task}]
         self.events.on_notice(f"Subagent {name} started.")
-        outcome = await self._loop(sub_messages, agent=definition, allowed=names, turn_limit=definition.max_turns)
+        outcome = await self._loop(
+            sub_messages, agent=definition, allowed=names, turn_limit=definition.max_turns
+        )
         self.events.on_notice(f"Subagent {name} finished ({outcome.status}).")
         if outcome.status in ("token_cap", "step_cap") and self.budget.exceeded() is not None:
             raise _CapReached(outcome.status)

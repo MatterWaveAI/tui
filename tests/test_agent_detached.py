@@ -24,7 +24,9 @@ from matterwave_tui.agent.shell import ProcessTree, run_command
 from .test_agent_shell import alive
 
 PY = sys.executable
-WINDOWS = pytest.mark.skipif(sys.platform != "win32", reason="a Windows job object; POSIX has its own tests here")
+WINDOWS = pytest.mark.skipif(
+    sys.platform != "win32", reason="a Windows job object; POSIX has its own tests here"
+)
 LINUX = pytest.mark.skipif(
     not sys.platform.startswith("linux"),
     reason="the keeper is a Linux child subreaper; Windows and macOS have their own tests here",
@@ -36,9 +38,7 @@ def child_script(tmp_path: Path) -> Path:
     """A program that writes its pid to the file it is given and sleeps."""
     script = tmp_path / "child.py"
     script.write_text(
-        "import os, sys, time\n"
-        "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
-        "time.sleep(60)\n",
+        "import os, sys, time\nopen(sys.argv[1], 'w').write(str(os.getpid()))\ntime.sleep(60)\n",
         encoding="utf-8",
     )
     return script
@@ -139,7 +139,9 @@ async def test_a_child_that_asks_to_break_away_from_the_job_still_dies(tmp_path:
 
 @WINDOWS
 @pytest.mark.asyncio
-async def test_a_start_b_child_ends_with_its_command_without_waiting_for_the_timeout(tmp_path: Path):
+async def test_a_start_b_child_ends_with_its_command_without_waiting_for_the_timeout(
+    tmp_path: Path,
+):
     pid_file = tmp_path / "left.pid"
     child = child_script(tmp_path)
     no_spaces(PY, child, pid_file)
@@ -157,7 +159,9 @@ async def test_a_start_b_child_ends_with_its_command_without_waiting_for_the_tim
 
 @WINDOWS
 @pytest.mark.asyncio
-async def test_the_shell_is_in_the_job_before_it_runs_its_first_instruction(tmp_path: Path, monkeypatch):
+async def test_the_shell_is_in_the_job_before_it_runs_its_first_instruction(
+    tmp_path: Path, monkeypatch
+):
     # Started suspended, assigned, then resumed: nothing the shell starts can
     # race the assignment.
     order: list[str] = []
@@ -185,12 +189,16 @@ async def test_the_shell_is_in_the_job_before_it_runs_its_first_instruction(tmp_
 
 @WINDOWS
 @pytest.mark.asyncio
-async def test_without_a_job_the_shell_still_runs_and_stop_falls_back_to_taskkill(tmp_path: Path, monkeypatch):
+async def test_without_a_job_the_shell_still_runs_and_stop_falls_back_to_taskkill(
+    tmp_path: Path, monkeypatch
+):
     def refuse(self: shell._WindowsJob, pid: int) -> None:
         raise OSError("AssignProcessToJobObject failed")
 
     monkeypatch.setattr(shell._WindowsJob, "assign", refuse)
-    result = await run_command("Write-Output ran; exit 4", tmp_path, timeout_s=60, output_max_bytes=65536)
+    result = await run_command(
+        "Write-Output ran; exit 4", tmp_path, timeout_s=60, output_max_bytes=65536
+    )
     assert result.exit_code == 4 and result.output.strip() == "ran"
 
 
@@ -200,7 +208,9 @@ async def test_without_a_job_the_shell_still_runs_and_stop_falls_back_to_taskkil
 @LINUX
 @pytest.mark.asyncio
 async def test_on_linux_setsid_nohup_and_double_forked_children_die_on_stop(tmp_path: Path):
-    setsid_pid, nohup_pid, daemon_pid = (tmp_path / n for n in ("setsid.pid", "nohup.pid", "daemon.pid"))
+    setsid_pid, nohup_pid, daemon_pid = (
+        tmp_path / n for n in ("setsid.pid", "nohup.pid", "daemon.pid")
+    )
     child = child_script(tmp_path)
     daemon = tmp_path / "daemon.py"
     daemon.write_text(
@@ -238,7 +248,9 @@ async def test_on_linux_what_a_finished_command_detached_is_ended(tmp_path: Path
     child = child_script(tmp_path)
     started = time.monotonic()
     result = await run_command(
-        f"setsid '{PY}' '{child}' '{pid_file}' & sleep 1; exit 3", tmp_path, timeout_s=60,
+        f"setsid '{PY}' '{child}' '{pid_file}' & sleep 1; exit 3",
+        tmp_path,
+        timeout_s=60,
         output_max_bytes=65536,
     )
     assert result.exit_code == 3 and not result.timed_out

@@ -66,7 +66,9 @@ class McpToolInfo:
     def to_extra(self) -> contract.ExtraTool:
         """The tool as the contract gates and offers it: kind `mcp`,
         read-only when the server's word for it is taken."""
-        schema = dict(self.input_schema) if self.input_schema else {"type": "object", "properties": {}}
+        schema = (
+            dict(self.input_schema) if self.input_schema else {"type": "object", "properties": {}}
+        )
         schema.setdefault("type", "object")
         return contract.ExtraTool(
             self.qualified,
@@ -241,7 +243,9 @@ class StdioServer:
         return [t for t in tools if isinstance(t, dict)] if isinstance(tools, list) else []
 
     async def call(self, tool: str, arguments: dict[str, Any]) -> tuple[str, bool]:
-        return _result_text(await self._request("tools/call", {"name": tool, "arguments": arguments}))
+        return _result_text(
+            await self._request("tools/call", {"name": tool, "arguments": arguments})
+        )
 
     async def close(self) -> None:
         if self._tree is not None:
@@ -306,7 +310,9 @@ class HttpServer:
             if session:
                 self._session = session
             kind = response.headers.get("content-type", "")
-            return httpx.Response(response.status_code, headers={"content-type": kind}, content=bytes(data))
+            return httpx.Response(
+                response.status_code, headers={"content-type": kind}, content=bytes(data)
+            )
 
     async def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         self._next += 1
@@ -315,7 +321,9 @@ class HttpServer:
             # The client's timeout is per read: a server that trickles its
             # answer would otherwise hold the run for as long as it likes.
             response = await asyncio.wait_for(
-                self._post({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}),
+                self._post(
+                    {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
+                ),
                 self.config.timeout_s,
             )
         except TimeoutError as exc:
@@ -360,7 +368,9 @@ class HttpServer:
         return [t for t in tools if isinstance(t, dict)] if isinstance(tools, list) else []
 
     async def call(self, tool: str, arguments: dict[str, Any]) -> tuple[str, bool]:
-        return _result_text(await self._request("tools/call", {"name": tool, "arguments": arguments}))
+        return _result_text(
+            await self._request("tools/call", {"name": tool, "arguments": arguments})
+        )
 
     async def close(self) -> None:
         if self._owns and self._client is not None:
@@ -447,7 +457,9 @@ class McpManager:
             if server is not None:
                 plan.append((server, config))
         if self.matterwave is not None and "matterwave" not in self.configs:
-            builtin = McpServerConfig(name="matterwave", tools=self.matterwave_tools, source="builtin")
+            builtin = McpServerConfig(
+                name="matterwave", tools=self.matterwave_tools, source="builtin"
+            )
             plan.append((MatterWaveServer(self.matterwave), builtin))
 
         async def one(server: McpServer, config: McpServerConfig) -> None:

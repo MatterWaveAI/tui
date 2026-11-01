@@ -1,22 +1,87 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
+import keyring
 import pytest
+from keyring.backend import KeyringBackend
+from keyring.errors import PasswordDeleteError
+
+from matterwave_tui import markers
 
 STREAMS = Path(__file__).parent / "streams"
 
 
+class MemoryKeyring(KeyringBackend):
+    """A keyring that lives in the test's memory. The suite signs in with
+    `--key` and logs out like a person would; none of that may land in the
+    keyring of the machine running it, nor fail on a runner that has no
+    keyring at all."""
+
+    priority = 1
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entries: dict[tuple[str, str], str] = {}
+
+    def get_password(self, service: str, username: str) -> str | None:
+        return self.entries.get((service, username))
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        self.entries[(service, username)] = password
+
+    def delete_password(self, service: str, username: str) -> None:
+        if self.entries.pop((service, username), None) is None:
+            raise PasswordDeleteError(username)
+
+
 @pytest.fixture(autouse=True)
-def private_dirs(tmp_path_factory, monkeypatch):
-    """Every test gets its own state and config directories, so nothing a
-    test does (trusted folders, checkpoints, settings, recorded runs)
-    reaches the real home directory or another test."""
-    state = tmp_path_factory.mktemp("state")
-    config = tmp_path_factory.mktemp("config")
-    monkeypatch.setenv("MATTERWAVE_STATE_DIR", str(state))
+def memory_keyring() -> Iterator[MemoryKeyring]:
+    """Every test gets a fresh in-memory keyring in place of the OS one,
+    which is never even loaded."""
+    backend = MemoryKeyring()
+    keyring.set_keyring(backend)
+    yield backend
+
+
+@pytest.fixture(autouse=True)
+def state_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Every test keeps its roles and dismissed announcements in a scratch
+    directory, never the developer's own."""
+    root = tmp_path_factory.mktemp("state")
+    monkeypatch.setenv("MATTERWAVE_STATE_DIR", str(root))
+    return root
+
+
+@pytest.fixture(autouse=True)
+def no_config_file(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch):
+    """No test reads the developer's own config file or profile."""
+    monkeypatch.setenv("MATTERWAVE_CONFIG", str(tmp_path_factory.mktemp("config") / "none.toml"))
+    monkeypatch.delenv("MATTERWAVE_PROFILE", raising=False)
+    monkeypatch.delenv("MATTERWAVE_MODEL", raising=False)
+    # Nor asks PyPI for a newer release.
+    monkeypatch.setenv("MATTERWAVE_NO_UPDATE_CHECK", "1")
+
+
+@pytest.fixture(autouse=True)
+def symbols_with_words() -> Iterator[None]:
+    """Each test starts with the default marks, whatever one before chose."""
+    markers.configure(False)
+    yield
+    markers.configure(False)
+
+
+@pytest.fixture(autouse=True)
+def private_dirs(
+    state_home: Path, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path]:
+    """Agent mode's config directory is a scratch one too, so nothing a test
+    does (trusted folders, checkpoints, settings, recorded runs) reaches the
+    real home directory or another test."""
+    config = tmp_path_factory.mktemp("agent-config")
     monkeypatch.setenv("MATTERWAVE_CONFIG_DIR", str(config))
-    return state, config
+    return state_home, config
 
 
 @pytest.fixture

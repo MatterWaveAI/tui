@@ -46,7 +46,12 @@ def _tool(
         name,
         kind,
         description,
-        {"type": "object", "properties": properties, "required": required, "additionalProperties": False},
+        {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": False,
+        },
     )
 
 
@@ -140,7 +145,9 @@ def render_todos(todos: list[dict[str, str]]) -> str:
 
 _SCRIPT = re.compile(r"<(script|style|noscript)\b.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
 _TAG = re.compile(r"<[^>]+>")
-_BLOCK = re.compile(r"</?(p|div|br|li|h[1-6]|tr|section|article|header|footer)\b[^>]*>", re.IGNORECASE)
+_BLOCK = re.compile(
+    r"</?(p|div|br|li|h[1-6]|tr|section|article|header|footer)\b[^>]*>", re.IGNORECASE
+)
 
 
 def html_to_text(markup: str) -> str:
@@ -221,7 +228,10 @@ async def web_fetch(url: str, *, client: httpx.AsyncClient | None = None) -> tup
     if "html" in kind:
         body = html_to_text(body)
     elif not (kind.startswith("text/") or "json" in kind or "xml" in kind or not kind):
-        return f"HTTP {status}; the content is {kind}, which is not text, so it was not returned.", True
+        return (
+            f"HTTP {status}; the content is {kind}, which is not text, so it was not returned.",
+            True,
+        )
     note = f"\n(cut off at {WEB_FETCH_MAX_BYTES} bytes)" if cut else ""
     return f"HTTP {status} {url}\n\n{body}{note}", status >= 400
 

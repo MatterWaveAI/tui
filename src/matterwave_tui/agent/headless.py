@@ -104,7 +104,9 @@ class HeadlessEvents(RunEvents):
         self.tool_calls += 1
         if self.format == "stream-json":
             record: dict[str, Any] = {
-                "type": "tool_call", "id": call.id, "name": call.function.name,
+                "type": "tool_call",
+                "id": call.id,
+                "name": call.function.name,
                 "arguments": call.function.arguments,
             }
             if agent:
@@ -117,8 +119,11 @@ class HeadlessEvents(RunEvents):
     def on_tool_end(self, call: ToolCall, outcome: ToolOutcome, agent: str | None) -> None:
         if self.format == "stream-json":
             record: dict[str, Any] = {
-                "type": "tool_result", "id": call.id, "name": call.function.name,
-                "is_error": outcome.is_error, "output": outcome.text,
+                "type": "tool_result",
+                "id": call.id,
+                "name": call.function.name,
+                "is_error": outcome.is_error,
+                "output": outcome.text,
             }
             if agent:
                 record["agent"] = agent
@@ -145,8 +150,13 @@ class HeadlessEvents(RunEvents):
 
 
 def result_record(
-    outcome: RunOutcome, *, conversation_id: str | None, mode: str, model: str | None,
-    notices: list[str], tool_calls: int,
+    outcome: RunOutcome,
+    *,
+    conversation_id: str | None,
+    mode: str,
+    model: str | None,
+    notices: list[str],
+    tool_calls: int,
 ) -> dict[str, Any]:
     return {
         "type": "result",
@@ -197,8 +207,14 @@ async def run_headless(
         events.on_notice(notice)
     if output_format == "stream-json":
         events.line(
-            {"type": "init", "root": str(session.root), "mode": session.mode, "model": session.model,
-             "conversation_id": session.conversation_id, "trusted": opened.trusted}
+            {
+                "type": "init",
+                "root": str(session.root),
+                "mode": session.mode,
+                "model": session.model,
+                "conversation_id": session.conversation_id,
+                "trusted": opened.trusted,
+            }
         )
     try:
         if opened.unavailable is not None:
@@ -218,8 +234,12 @@ async def run_headless(
     finally:
         await session.aclose()
     record = result_record(
-        outcome, conversation_id=session.conversation_id, mode=session.mode, model=session.model,
-        notices=events.notices, tool_calls=events.tool_calls,
+        outcome,
+        conversation_id=session.conversation_id,
+        mode=session.mode,
+        model=session.model,
+        notices=events.notices,
+        tool_calls=events.tool_calls,
     )
     if output_format == "text":
         events.end_text()

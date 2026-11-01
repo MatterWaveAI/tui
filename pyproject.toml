@@ -1,14 +1,17 @@
 [project]
 name = "matterwave-tui"
-version = "0.4.0"
+dynamic = ["version"]
 description = "A terminal client for MatterWave chat: the same conversations as the web app"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "MIT"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 dependencies = [
     "matterwave-sdk>=0.5.0",
     "httpx>=0.27",
     "keyring>=25",
+    "markdown-it-py>=3",
+    "platformdirs>=4",
     "textual>=0.86",
 ]
 classifiers = [
@@ -34,20 +37,25 @@ dev = [
     "mypy>=1.13",
 ]
 
-[tool.uv.sources]
-# Agent mode imports `matterwave_sdk.agent` at agent contract 1.2.0, which
-# ships in the SDK release after 0.5.0. Until that is on PyPI, uv resolves
-# the SDK from a python-sdk checkout beside this one that carries the 1.2
-# contract. pip ignores this table, and so does the published wheel's
-# metadata.
-matterwave-sdk = { path = "../python-sdk", editable = true }
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.version]
+# The one place the version is written; the package and the User-Agent read it.
+path = "src/matterwave_tui/__init__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/matterwave_tui"]
+
+[tool.uv.sources]
+# matterwave-sdk is not on PyPI. Agent mode imports `matterwave_sdk.agent` at
+# agent contract 1.2.0, which is not yet on the SDK's repository, so until it
+# is uv resolves the SDK from a python-sdk checkout beside this one that
+# carries it (uv.lock records the checkout); then this goes back to a `git`
+# source at a pinned `rev`. pip ignores this table, and so does the published
+# metadata, which carries only the version range above.
+matterwave-sdk = { path = "../python-sdk", editable = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

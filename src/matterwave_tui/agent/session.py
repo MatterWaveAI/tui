@@ -93,10 +93,14 @@ async def open_session(
 
     sandbox = settings.sandbox
     if options.sandbox is not None:
-        sandbox = SandboxConfig(engine=options.sandbox, image=sandbox.image, network=sandbox.network)
+        sandbox = SandboxConfig(
+            engine=options.sandbox, image=sandbox.image, network=sandbox.network
+        )
     reason = sandbox_available(sandbox)
     if reason is not None:
-        notices.append(f"The sandbox ({sandbox.engine}) cannot run here: {reason}. Commands will be refused.")
+        notices.append(
+            f"The sandbox ({sandbox.engine}) cannot run here: {reason}. Commands will be refused."
+        )
     if options.yolo and sandbox.engine == "none":
         notices.append(
             "yolo is available this session and no sandbox is on: commands the model runs "

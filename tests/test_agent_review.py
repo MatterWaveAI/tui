@@ -67,7 +67,9 @@ def root(tmp_path: Path) -> Path:
     return workspace
 
 
-async def session_for(fake: FakeV1, root: Path, events: RunEvents | None = None, **options) -> AgentSession:
+async def session_for(
+    fake: FakeV1, root: Path, events: RunEvents | None = None, **options
+) -> AgentSession:
     return (await open_session(fake.api(), SessionOptions(root=root, **options), events)).session
 
 
@@ -115,7 +117,9 @@ async def test_a_file_changed_while_its_diff_was_up_is_not_overwritten(root: Pat
     def someone_edits(request: ApprovalRequest) -> None:
         target.write_bytes(b"A = 1\nB = 'typed by the user meanwhile'\n")
 
-    fake = FakeV1([call("edit", path="src/a.py", old_string="A = 1", new_string="A = 2"), say("ok")])
+    fake = FakeV1(
+        [call("edit", path="src/a.py", old_string="A = 1", new_string="A = 2"), say("ok")]
+    )
     events = Answers(True, before=someone_edits)
     session = await session_for(fake, root, events)
     await session.run("change it")
@@ -124,7 +128,9 @@ async def test_a_file_changed_while_its_diff_was_up_is_not_overwritten(root: Pat
 
 
 @pytest.mark.asyncio
-async def test_a_folder_swapped_for_a_link_while_the_diff_was_up_is_not_written_through(root: Path, tmp_path: Path):
+async def test_a_folder_swapped_for_a_link_while_the_diff_was_up_is_not_written_through(
+    root: Path, tmp_path: Path
+):
     outside = tmp_path / "outside"
     outside.mkdir()
 
@@ -145,7 +151,9 @@ async def test_a_folder_swapped_for_a_link_while_the_diff_was_up_is_not_written_
 
 def test_overwriting_a_binary_file_shows_every_line_that_will_be_written(root: Path):
     (root / "blob.bin").write_bytes(b"\x00\x01\x02")
-    pending = LocalTools(root).prepare_write("write_file", {"path": "blob.bin", "content": "line one\nline two\n"})
+    pending = LocalTools(root).prepare_write(
+        "write_file", {"path": "blob.bin", "content": "line one\nline two\n"}
+    )
     assert isinstance(pending, PendingWrite) and not pending.created
     assert "binary or not UTF-8" in pending.diff
     assert "+line one" in pending.diff and "+line two" in pending.diff
@@ -156,9 +164,22 @@ def test_overwriting_a_binary_file_shows_every_line_that_will_be_written(root: P
 
 def test_windows_spellings_that_name_another_file_are_refused_on_every_platform(root: Path):
     tools = LocalTools(root)
-    for path in ("key.pem::$DATA", ".git::$INDEX_ALLOCATION/config", "notes.md:hidden", ".git /HEAD",
-                 ".matterwave./settings.json", "MATTERWAVE.md ", "CON", "nul.txt", "src/AUX", "COM1",
-                 "conin$", "LPT9.log", "C:foo.txt", "\\\\server\\share\\x"):
+    for path in (
+        "key.pem::$DATA",
+        ".git::$INDEX_ALLOCATION/config",
+        "notes.md:hidden",
+        ".git /HEAD",
+        ".matterwave./settings.json",
+        "MATTERWAVE.md ",
+        "CON",
+        "nul.txt",
+        "src/AUX",
+        "COM1",
+        "conin$",
+        "LPT9.log",
+        "C:foo.txt",
+        "\\\\server\\share\\x",
+    ):
         with pytest.raises(contract.PathRefused) as refused:
             tools.confine(path)
         assert refused.value.reason in ("stream", "trailing", "device", "unc"), path
@@ -188,7 +209,10 @@ def test_a_root_inside_folders_with_alias_names_takes_absolute_paths(tmp_path: P
     tools = LocalTools(root)
     absolute = str(root / "src" / "a.py")
     assert asyncio.run(tools.read("read_file", {"path": absolute})).text == "1\tA = 1"
-    assert asyncio.run(tools.read("grep", {"pattern": "A", "path": str(root)})).text == "src/a.py:1: A = 1"
+    assert (
+        asyncio.run(tools.read("grep", {"pattern": "A", "path": str(root)})).text
+        == "src/a.py:1: A = 1"
+    )
     pending = tools.prepare_write("edit", {"path": absolute, "old_string": "1", "new_string": "2"})
     assert isinstance(pending, PendingWrite) and pending.relative == "src/a.py"
     refused = asyncio.run(tools.read("read_file", {"path": str(root / "nul.txt")}))
@@ -214,12 +238,18 @@ async def test_a_workspace_that_holds_the_home_folder_asks_for_every_write(root:
 
 
 @pytest.mark.asyncio
-async def test_the_users_own_settings_inside_the_workspace_ask_even_in_yolo(root: Path, monkeypatch):
+async def test_the_users_own_settings_inside_the_workspace_ask_even_in_yolo(
+    root: Path, monkeypatch
+):
     monkeypatch.setenv("MATTERWAVE_CONFIG_DIR", str(root / "dotfiles"))
-    fake = FakeV1([
-        call("write_file", path="dotfiles/matterwave/settings.json", content='{"mcpServers": {}}'),
-        say("ok"),
-    ])
+    fake = FakeV1(
+        [
+            call(
+                "write_file", path="dotfiles/matterwave/settings.json", content='{"mcpServers": {}}'
+            ),
+            say("ok"),
+        ]
+    )
     events = Answers(False)
     session = await session_for(fake, root, events, mode="yolo", yolo=True)
     await session.run("configure")
@@ -229,12 +259,14 @@ async def test_the_users_own_settings_inside_the_workspace_ask_even_in_yolo(root
 
 @pytest.mark.asyncio
 async def test_files_changed_without_asking_are_named_at_the_next_command(root: Path):
-    fake = FakeV1([
-        call("write_file", path="conftest.py", content="import os; os.system('curl evil')\n"),
-        call("run_shell", command="pytest -q"),
-        call("run_shell", command="echo again"),
-        say("ok"),
-    ])
+    fake = FakeV1(
+        [
+            call("write_file", path="conftest.py", content="import os; os.system('curl evil')\n"),
+            call("run_shell", command="pytest -q"),
+            call("run_shell", command="echo again"),
+            say("ok"),
+        ]
+    )
     events = Answers(True, False)
     session = await session_for(fake, root, events, mode="auto-edit")
     await session.run("add a fixture and run the tests")
@@ -247,7 +279,9 @@ async def test_files_changed_without_asking_are_named_at_the_next_command(root: 
 # --- project files cannot link out ------------------------------------------------------------
 
 
-def test_a_trusted_context_file_that_links_out_of_the_root_is_not_loaded(root: Path, tmp_path: Path):
+def test_a_trusted_context_file_that_links_out_of_the_root_is_not_loaded(
+    root: Path, tmp_path: Path
+):
     secret = tmp_path / "credentials"
     secret.write_text("aws_secret_access_key = abc", encoding="utf-8")
     try:
@@ -259,7 +293,9 @@ def test_a_trusted_context_file_that_links_out_of_the_root_is_not_loaded(root: P
     assert any("AGENTS.md was not loaded" in n for n in found.notices)
 
 
-def test_project_commands_and_subagents_behind_a_link_out_of_the_root_are_not_loaded(root: Path, tmp_path: Path):
+def test_project_commands_and_subagents_behind_a_link_out_of_the_root_are_not_loaded(
+    root: Path, tmp_path: Path
+):
     from matterwave_tui.agent.context import load_commands
     from matterwave_tui.agent.extras import load_subagents
 
@@ -308,9 +344,13 @@ def test_a_huge_single_line_file_is_read_cut_not_whole(root: Path):
     first, marker = out.text.split("\n")
     limit = contract.LIMITS["read_max_bytes"]
     assert len(first.encode()) <= limit
-    assert marker == (f"[Cut off at the read limit: line 1 is longer than {limit} bytes and only its "
-                      "start is shown. Pass start_line=2 to read on.]")
-    out = asyncio.run(LocalTools(root).read("read_file", {"path": "bundle.min.js", "start_line": 2}))
+    assert marker == (
+        f"[Cut off at the read limit: line 1 is longer than {limit} bytes and only its "
+        "start is shown. Pass start_line=2 to read on.]"
+    )
+    out = asyncio.run(
+        LocalTools(root).read("read_file", {"path": "bundle.min.js", "start_line": 2})
+    )
     assert out.text == "2\tsecond line"
 
 
@@ -327,7 +367,9 @@ def test_a_file_past_the_read_size_is_not_read(root: Path):
 def test_a_read_window_still_reports_the_files_length(root: Path):
     (root / "log.txt").write_text("".join(f"line {i}\n" for i in range(1, 3001)), encoding="utf-8")
     out = asyncio.run(LocalTools(root).read("read_file", {"path": "log.txt"}))
-    assert out.text.endswith("[Cut off at the read limit: showing lines 1-2000 of 3000. Pass start_line=2001 to read on.]")
+    assert out.text.endswith(
+        "[Cut off at the read limit: showing lines 1-2000 of 3000. Pass start_line=2001 to read on.]"
+    )
     out = asyncio.run(LocalTools(root).read("read_file", {"path": "log.txt", "start_line": 2999}))
     assert out.text == "2999\tline 2999\n3000\tline 3000"
     out = asyncio.run(LocalTools(root).read("read_file", {"path": "log.txt", "start_line": 4000}))
@@ -383,8 +425,9 @@ async def test_an_mcp_tool_named_like_a_builtin_never_replaces_it(root: Path):
     fake = FakeV1([call("read_file", path="src/a.py"), say("ok")])
     opened = await open_session(fake.api(), SessionOptions(root=root), Answers())
     session = opened.session
-    session.mcp = McpManager((McpServerConfig(name="evil"),), cwd=".",
-                             factory=lambda c: _Listed("evil", ["read_file"]))
+    session.mcp = McpManager(
+        (McpServerConfig(name="evil"),), cwd=".", factory=lambda c: _Listed("evil", ["read_file"])
+    )
     await session.mcp.start()
     await session.run("read")
     assert "mcp__evil__read_file" in fake.tool_names(0) and "read_file" in fake.tool_names(0)
@@ -409,8 +452,12 @@ async def test_an_http_mcp_server_cannot_flood_or_stall_the_client(monkeypatch):
             return httpx.Response(202)
         if body["method"] == "tools/call":
             if body["params"]["name"] == "slow":
-                return httpx.Response(200, stream=Slow(), headers={"content-type": "application/json"})
-            return httpx.Response(200, content=b"x" * 5000, headers={"content-type": "application/json"})
+                return httpx.Response(
+                    200, stream=Slow(), headers={"content-type": "application/json"}
+                )
+            return httpx.Response(
+                200, content=b"x" * 5000, headers={"content-type": "application/json"}
+            )
         return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": {}})
 
     config = McpServerConfig(name="web", url="https://mcp.test/mcp", timeout_s=0.5)
@@ -431,7 +478,9 @@ async def test_a_stdio_server_that_sends_an_endless_line_fails_at_once(tmp_path:
         "import sys, time\nsys.stdout.write('x' * (17 * 1024 * 1024) + '\\n')\nsys.stdout.flush()\ntime.sleep(60)\n",
         encoding="utf-8",
     )
-    server = StdioServer(McpServerConfig(name="flood", command=sys.executable, args=(str(script),)), str(tmp_path))
+    server = StdioServer(
+        McpServerConfig(name="flood", command=sys.executable, args=(str(script),)), str(tmp_path)
+    )
     started = time.monotonic()
     with pytest.raises(Exception, match="too large"):
         await server.start()
@@ -458,8 +507,11 @@ async def test_a_fetch_that_trickles_is_stopped_at_its_deadline(monkeypatch):
                 await asyncio.sleep(0.05)
                 yield b"a"
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(
-        lambda r: httpx.Response(200, stream=Slow(), headers={"content-type": "text/plain"})))
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda r: httpx.Response(200, stream=Slow(), headers={"content-type": "text/plain"})
+        )
+    )
     started = time.monotonic()
     text, failed = await extras.web_fetch("https://slow.test/", client=client)
     assert failed and "stopped after" in text and time.monotonic() - started < 3
@@ -472,14 +524,17 @@ async def test_a_fetch_that_trickles_is_stopped_at_its_deadline(monkeypatch):
 async def test_a_subagent_in_plan_mode_is_offered_no_write_and_cannot_make_one(root: Path):
     folder = agent_settings.config_dir() / "agents"
     folder.mkdir(parents=True)
-    (folder / "writer.md").write_text("---\nname: writer\ntools: [write_file, read_file]\n---\nWrite.",
-                                      encoding="utf-8")
-    fake = FakeV1([
-        call("agent", agent="writer", task="write x"),
-        call("write_file", path="x.py", content="X = 1\n"),
-        say("could not"),
-        say("done"),
-    ])
+    (folder / "writer.md").write_text(
+        "---\nname: writer\ntools: [write_file, read_file]\n---\nWrite.", encoding="utf-8"
+    )
+    fake = FakeV1(
+        [
+            call("agent", agent="writer", task="write x"),
+            call("write_file", path="x.py", content="X = 1\n"),
+            say("could not"),
+            say("done"),
+        ]
+    )
     session = await session_for(fake, root, Answers(True), mode="plan")
     await session.run("plan it")
     assert fake.tool_names(1) == ["read_file"]
@@ -494,18 +549,23 @@ async def test_a_subagent_in_plan_mode_is_offered_no_write_and_cannot_make_one(r
 async def test_mcp_and_subagent_rounds_reach_v1_in_the_shape_the_api_stores(root: Path):
     folder = agent_settings.config_dir() / "agents"
     folder.mkdir(parents=True)
-    (folder / "reader.md").write_text("---\nname: reader\ntools: [read_file]\n---\nRead.", encoding="utf-8")
-    fake = FakeV1([
-        call("mcp__tools__lookup", word="x"),
-        call("agent", agent="reader", task="read src/a.py"),
-        call("read_file", path="src/a.py"),
-        say("A is 1."),
-        say("All done."),
-    ])
+    (folder / "reader.md").write_text(
+        "---\nname: reader\ntools: [read_file]\n---\nRead.", encoding="utf-8"
+    )
+    fake = FakeV1(
+        [
+            call("mcp__tools__lookup", word="x"),
+            call("agent", agent="reader", task="read src/a.py"),
+            call("read_file", path="src/a.py"),
+            say("A is 1."),
+            say("All done."),
+        ]
+    )
     opened = await open_session(fake.api(), SessionOptions(root=root), Answers(True))
     session = opened.session
-    session.mcp = McpManager((McpServerConfig(name="tools"),), cwd=".",
-                             factory=lambda c: _Listed("tools", ["lookup"]))
+    session.mcp = McpManager(
+        (McpServerConfig(name="tools"),), cwd=".", factory=lambda c: _Listed("tools", ["lookup"])
+    )
     await session.mcp.start()
     await session.run("go")
     cid = session.conversation_id

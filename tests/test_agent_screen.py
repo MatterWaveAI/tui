@@ -84,8 +84,12 @@ async def finished(pilot, screen: AgentScreen) -> None:
 @pytest.mark.asyncio
 async def test_an_edit_shows_its_diff_and_rejecting_it_leaves_the_file_byte_identical(root: Path):
     before = (root / "src" / "app.py").read_bytes()
-    fake = FakeV1([call("edit", path="src/app.py", old_string="return 1", new_string="return 2"),
-                   say("Left it alone.")])
+    fake = FakeV1(
+        [
+            call("edit", path="src/app.py", old_string="return 1", new_string="return 2"),
+            say("Left it alone."),
+        ]
+    )
     app = app_for(fake, root)
     async with app.run_test(size=(120, 40)) as pilot:
         screen = await ready(app, pilot)
@@ -113,13 +117,17 @@ async def test_keys_typed_as_the_dialog_opens_do_not_answer_it(root: Path, monke
     # the test ends it by moving the dialog's clock, not by waiting.
     monkeypatch.setattr(agent_screen, "ANSWER_GRACE_S", 30.0)
     before = (root / "src" / "app.py").read_bytes()
-    fake = FakeV1([call("edit", path="src/app.py", old_string="return 1", new_string="return 2"),
-                   say("ok")])
+    fake = FakeV1(
+        [call("edit", path="src/app.py", old_string="return 1", new_string="return 2"), say("ok")]
+    )
     app = app_for(fake, root)
     async with app.run_test(size=(120, 40)) as pilot:
         screen = await ready(app, pilot)
         await send(app, pilot, "change it")
-        await until(pilot, lambda: isinstance(app.screen, ApprovalScreen) and hasattr(app.screen, "opened_at"))
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ApprovalScreen) and hasattr(app.screen, "opened_at"),
+        )
         await pilot.press("y", "enter", "y")
         assert isinstance(app.screen, ApprovalScreen) and not app.screen.armed
         assert (root / "src" / "app.py").read_bytes() == before
@@ -149,28 +157,43 @@ def terminal_output(app: MatterWaveApp) -> str:
 
 
 @pytest.mark.asyncio
-async def test_escape_sequences_from_files_commands_and_the_model_never_reach_the_terminal(root: Path):
+async def test_escape_sequences_from_files_commands_and_the_model_never_reach_the_terminal(
+    root: Path,
+):
     # A file that sets the clipboard (OSC 52) when printed, a command whose
     # output clears the screen, and a model that answers with both.
-    (root / "src" / "app.py").write_text(f"def main():  # {OSC52}\n    return 1\n", encoding="utf-8")
-    fake = FakeV1([
-        call("read_file", path="src/app.py"),
-        call("edit", path="src/app.py", old_string="return 1", new_string="return 2"),
-        call("run_shell", command=f"echo hi # {OSC52}"),
-        say(f"done \x1b[2J{OSC52}"),
-    ])
+    (root / "src" / "app.py").write_text(
+        f"def main():  # {OSC52}\n    return 1\n", encoding="utf-8"
+    )
+    fake = FakeV1(
+        [
+            call("read_file", path="src/app.py"),
+            call("edit", path="src/app.py", old_string="return 1", new_string="return 2"),
+            call("run_shell", command=f"echo hi # {OSC52}"),
+            say(f"done \x1b[2J{OSC52}"),
+        ]
+    )
     app = app_for(fake, root)
     async with app.run_test(size=(120, 40)) as pilot:
         screen = await ready(app, pilot)
         await send(app, pilot, "change it")
-        await until(pilot, lambda: isinstance(app.screen, ApprovalScreen) and hasattr(app.screen, "opened_at"))
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ApprovalScreen) and hasattr(app.screen, "opened_at"),
+        )
         detail = app.screen.query_one("#approval-detail", Static).content.code
         assert "\\x1b]52;c;aGFja2Vk\\x07" in detail and "\x1b]52" not in detail
         assert "\x1b]52" not in terminal_output(app)
         app.screen.opened_at -= 60
         await pilot.press("y")
-        await until(pilot, lambda: isinstance(app.screen, ApprovalScreen) and app.screen.request.kind == "shell"
-                    and hasattr(app.screen, "opened_at"))
+        await until(
+            pilot,
+            lambda: (
+                isinstance(app.screen, ApprovalScreen)
+                and app.screen.request.kind == "shell"
+                and hasattr(app.screen, "opened_at")
+            ),
+        )
         command = app.screen.query_one("#approval-detail", Static).content.code
         assert command == "echo hi # \\x1b]52;c;aGFja2Vk\\x07"
         assert "\x1b]52" not in terminal_output(app)
@@ -220,8 +243,12 @@ async def test_pick_lists_do_not_read_titles_as_markup(root: Path):
 
 @pytest.mark.asyncio
 async def test_approving_the_diff_applies_the_edit(root: Path):
-    fake = FakeV1([call("edit", path="src/app.py", old_string="return 1", new_string="return 2"),
-                   say("Changed.")])
+    fake = FakeV1(
+        [
+            call("edit", path="src/app.py", old_string="return 1", new_string="return 2"),
+            say("Changed."),
+        ]
+    )
     app = app_for(fake, root)
     async with app.run_test(size=(120, 40)) as pilot:
         screen = await ready(app, pilot)
@@ -310,7 +337,9 @@ async def test_esc_during_sleep_60_ends_the_command_within_two_seconds(root: Pat
         assert tree is not None and tree.proc.returncode is None
         stop = time.monotonic()
         await pilot.press("escape")
-        await until(pilot, lambda: tree.proc.returncode is not None and not screen.running, wait_s=5)
+        await until(
+            pilot, lambda: tree.proc.returncode is not None and not screen.running, wait_s=5
+        )
         assert time.monotonic() - stop < 2.0
         assert any("Stopped." in line for line in screen.log_texts())
         assert screen.session is not None and screen.session.last_outcome is not None

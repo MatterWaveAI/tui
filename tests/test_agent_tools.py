@@ -28,22 +28,25 @@ def workspace(tmp_path: Path) -> Path:
     root = tmp_path / "ws"
     root.mkdir()
     (tmp_path / "outside.txt").write_text("secret outside", encoding="utf-8")
-    return tree(root, {
-        "README.md": "# demo\n",
-        "src/app.py": "def main():\n    return 1\n",
-        "src/util.py": "VALUE = 2\n",
-        ".env": "KEY=1\n",
-        "keys/deploy.pem": "-----BEGIN-----\n",
-        "build/out.py": "generated = True\n",
-        "private/notes.md": "private\n",
-        ".gitignore": "build/\n*.log\n!keep.log\n",
-        ".matterwaveignore": "private/\n",
-        "debug.log": "noise\n",
-        "keep.log": "kept\n",
-        "pkg/.gitignore": "local_only.py\n",
-        "pkg/local_only.py": "x = 1\n",
-        "pkg/shared.py": "y = 2\n",
-    })
+    return tree(
+        root,
+        {
+            "README.md": "# demo\n",
+            "src/app.py": "def main():\n    return 1\n",
+            "src/util.py": "VALUE = 2\n",
+            ".env": "KEY=1\n",
+            "keys/deploy.pem": "-----BEGIN-----\n",
+            "build/out.py": "generated = True\n",
+            "private/notes.md": "private\n",
+            ".gitignore": "build/\n*.log\n!keep.log\n",
+            ".matterwaveignore": "private/\n",
+            "debug.log": "noise\n",
+            "keep.log": "kept\n",
+            "pkg/.gitignore": "local_only.py\n",
+            "pkg/local_only.py": "x = 1\n",
+            "pkg/shared.py": "y = 2\n",
+        },
+    )
 
 
 def read(tools: LocalTools, name: str, **args) -> ToolOutcome:
@@ -130,8 +133,15 @@ def test_writes_are_confined_too(workspace: Path):
 
 def test_a_protected_path_is_worked_out_to_be_asked_about_not_refused(workspace: Path):
     tools = LocalTools(workspace)
-    for path in (".matterwaveignore", "AGENTS.md", "docs/agents.md", ".matterwave/settings.json",
-                 ".bashrc", "home/me/.ssh/config", "me/.config/matterwave/settings.json"):
+    for path in (
+        ".matterwaveignore",
+        "AGENTS.md",
+        "docs/agents.md",
+        ".matterwave/settings.json",
+        ".bashrc",
+        "home/me/.ssh/config",
+        "me/.config/matterwave/settings.json",
+    ):
         pending = tools.prepare_write("write_file", {"path": path, "content": "x"})
         assert isinstance(pending, PendingWrite) and pending.protected, path
         # Without the user's approval the SDK refuses the write itself.
@@ -193,7 +203,10 @@ def test_grep_finds_matches_and_skips_ignored_files(workspace: Path):
 
 
 def test_the_search_rules_follow_gits_rules_and_ignore_case(tmp_path: Path):
-    tree(tmp_path, {".gitignore": "*.tmp\n/top.txt\nlogs/\n!important.tmp\n", "a/.gitignore": "!x.tmp\n"})
+    tree(
+        tmp_path,
+        {".gitignore": "*.tmp\n/top.txt\nlogs/\n!important.tmp\n", "a/.gitignore": "!x.tmp\n"},
+    )
     rules = LocalTools(tmp_path).search_ignore()
     assert rules.ignored("x.tmp")
     assert rules.ignored("deep/y.tmp")
@@ -209,11 +222,22 @@ def test_glob_matches_names_at_any_depth_and_a_path_pattern_under_path(workspace
     tools = LocalTools(workspace)
     found = read(tools, "glob", pattern="*.PY").text.splitlines()
     assert found == ["pkg/shared.py", "src/app.py", "src/util.py"]
-    assert read(tools, "glob", pattern="src/*.py").text.splitlines() == ["src/app.py", "src/util.py"]
+    assert read(tools, "glob", pattern="src/*.py").text.splitlines() == [
+        "src/app.py",
+        "src/util.py",
+    ]
     # A grep glob with a / is matched against the path under `path`.
-    assert read(tools, "grep", pattern="return", glob="src/*.py").text == "src/app.py:2:     return 1"
-    assert read(tools, "grep", pattern="return", glob="src/*.py", path="src").text == "No matches for return."
-    assert read(tools, "grep", pattern="return", glob="*.py", path="src").text == "src/app.py:2:     return 1"
+    assert (
+        read(tools, "grep", pattern="return", glob="src/*.py").text == "src/app.py:2:     return 1"
+    )
+    assert (
+        read(tools, "grep", pattern="return", glob="src/*.py", path="src").text
+        == "No matches for return."
+    )
+    assert (
+        read(tools, "grep", pattern="return", glob="*.py", path="src").text
+        == "src/app.py:2:     return 1"
+    )
 
 
 # --- writes --------------------------------------------------------------------------------
@@ -239,7 +263,9 @@ def test_edit_failures_leave_the_file_alone(workspace: Path):
     (workspace / "dup.txt").write_text("a\na\n", encoding="utf-8")
     missing = tools.prepare_write("edit", {"path": "nope.py", "old_string": "a", "new_string": "b"})
     assert isinstance(missing, ToolOutcome) and "does not exist" in missing.text
-    not_found = tools.prepare_write("edit", {"path": "src/app.py", "old_string": "zzz", "new_string": "b"})
+    not_found = tools.prepare_write(
+        "edit", {"path": "src/app.py", "old_string": "zzz", "new_string": "b"}
+    )
     assert isinstance(not_found, ToolOutcome) and "was not found" in not_found.text
     twice = tools.prepare_write("edit", {"path": "dup.txt", "old_string": "a", "new_string": "b"})
     assert isinstance(twice, ToolOutcome) and "occurs 2 times" in twice.text
@@ -250,7 +276,9 @@ def test_an_edit_keeps_crlf_and_the_rest_of_the_bytes(workspace: Path):
     path = workspace / "win.txt"
     path.write_bytes(b"\xef\xbb\xbfone\r\ntwo\r\nthree\r\n")
     tools = LocalTools(workspace)
-    pending = tools.prepare_write("edit", {"path": "win.txt", "old_string": "two\nthree", "new_string": "2\n3"})
+    pending = tools.prepare_write(
+        "edit", {"path": "win.txt", "old_string": "two\nthree", "new_string": "2\n3"}
+    )
     assert isinstance(pending, PendingWrite)
     tools.apply_write(pending)
     assert path.read_bytes() == b"\xef\xbb\xbfone\r\n2\r\n3\r\n"

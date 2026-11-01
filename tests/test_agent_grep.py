@@ -95,7 +95,9 @@ def test_a_search_process_left_alone_ends_itself(root: Path):
     # As when the TUI died mid-search: no one kills it, and it ends a
     # moment after the search's deadline even inside one endless match.
     proc = subprocess.Popen(  # noqa: S603 -- this interpreter, the search module
-        GrepProcess().command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        GrepProcess().command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
     try:
@@ -125,7 +127,9 @@ async def test_a_slow_search_ends_itself_and_keeps_the_process(
     await tools.read("grep", {"pattern": "A", "path": "src"})
     first = grep.pid
     out = await tools.read("grep", {"pattern": CATASTROPHIC, "path": "many.txt"})
-    assert out.is_error and out.text.startswith(f"The search for {CATASTROPHIC} stopped after 0.5 s")
+    assert out.is_error and out.text.startswith(
+        f"The search for {CATASTROPHIC} stopped after 0.5 s"
+    )
     assert grep.pid == first
 
 

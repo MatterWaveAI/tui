@@ -62,9 +62,11 @@ async def test_a_selected_message_is_what_y_copies():
 @pytest.mark.asyncio
 async def test_y_copies_the_code_blocks_only():
     answer = message(
-        "a1", "assistant",
+        "a1",
+        "assistant",
         "Run these:\n\n```bash\ngit status\n```\n\n```python\nprint(1)\n```",
-        parent="u1", model="grt-nano",
+        parent="u1",
+        model="grt-nano",
     )
     api = FakeAPI()
     api.script = happy_script()

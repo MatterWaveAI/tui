@@ -43,7 +43,9 @@ def _thaw(value: Any) -> Any:
 
 
 def _id(case: Mapping[str, Any]) -> str:
-    return "|".join(f"{k}={case[k]!r}" for k in ("tool", "path", "args", "limits") if k in case)[:90]
+    return "|".join(f"{k}={case[k]!r}" for k in ("tool", "path", "args", "limits") if k in case)[
+        :90
+    ]
 
 
 def _make_specials(root: Path) -> set[str]:
@@ -135,7 +137,9 @@ def test_tools(workspace: Path, case: Mapping[str, Any]):
 def test_ignore(workspace: Path, case: Mapping[str, Any]):
     rules = LocalTools(workspace).search_ignore()
     verdict = rules.ignored(
-        case["path"], is_dir=bool(case.get("is_dir", False)), ancestors=bool(case.get("ancestors", True))
+        case["path"],
+        is_dir=bool(case.get("is_dir", False)),
+        ancestors=bool(case.get("ancestors", True)),
     )
     assert verdict is case["ignored"]
 
@@ -147,7 +151,9 @@ def test_shell(case: Mapping[str, Any]):
     if "omitted" in case:
         # The start and the end a buffer kept, and the bytes it dropped
         # from between them.
-        result = ShellResult(case["exit_code"], case["output"], omitted_bytes=case["omitted"], **flags)
+        result = ShellResult(
+            case["exit_code"], case["output"], omitted_bytes=case["omitted"], **flags
+        )
     else:
         buffer = OutputBuffer(contract.limit("shell_output_max_bytes", limits))
         data = str(case["output"]).encode("utf-8")
@@ -158,6 +164,8 @@ def test_shell(case: Mapping[str, Any]):
     assert result.render(case.get("timeout_s"), limits=limits) == case["expected"]
 
 
-@pytest.mark.parametrize("case", CASES["alias_roots"], ids=lambda c: f"{c['path']!r} in {c['root']!r}")
+@pytest.mark.parametrize(
+    "case", CASES["alias_roots"], ids=lambda c: f"{c['path']!r} in {c['root']!r}"
+)
 def test_alias_roots(case: Mapping[str, Any]):
     assert contract.windows_alias(case["path"], case["root"]) == case["refused"]

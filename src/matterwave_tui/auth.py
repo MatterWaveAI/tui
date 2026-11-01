@@ -49,19 +49,20 @@ def _keyring() -> Any:
     return keyring
 
 
-def load_token(base_url: str) -> str | None:
+def load_token(base_url: str, entry: str | None = None) -> str | None:
     """The stored bearer for this deployment, keyed by its origin so a
-    staging key is never sent to production."""
+    staging key is never sent to production -- or by a profile's own
+    `entry` beside it (`config.keyring_entry`)."""
     try:
-        value = _keyring().get_password(KEYRING_SERVICE, base_url)
+        value = _keyring().get_password(KEYRING_SERVICE, entry or base_url)
     except Exception as exc:
         raise KeyringUnavailable(f"The OS keyring could not be read: {exc}") from exc
     return str(value) if value else None
 
 
-def save_token(base_url: str, token: str) -> None:
+def save_token(base_url: str, token: str, entry: str | None = None) -> None:
     try:
-        _keyring().set_password(KEYRING_SERVICE, base_url, token)
+        _keyring().set_password(KEYRING_SERVICE, entry or base_url, token)
     except Exception as exc:
         raise KeyringUnavailable(
             f"The OS keyring could not store the credential ({exc}). Nothing was written "
@@ -69,9 +70,9 @@ def save_token(base_url: str, token: str) -> None:
         ) from exc
 
 
-def delete_token(base_url: str) -> bool:
+def delete_token(base_url: str, entry: str | None = None) -> bool:
     try:
-        _keyring().delete_password(KEYRING_SERVICE, base_url)
+        _keyring().delete_password(KEYRING_SERVICE, entry or base_url)
     except Exception:
         return False
     return True
@@ -226,13 +227,15 @@ class Credential:
     source: str
 
 
-def resolve_credential(base_url: str, key_flag: str | None) -> Credential | None:
+def resolve_credential(
+    base_url: str, key_flag: str | None, entry: str | None = None
+) -> Credential | None:
     if key_flag:
         return Credential(key_flag, "flag")
     env = os.environ.get(API_KEY_ENV, "").strip()
     if env:
         return Credential(env, "env")
-    stored = load_token(base_url)
+    stored = load_token(base_url, entry)
     if stored:
         return Credential(stored, "keyring")
     return None

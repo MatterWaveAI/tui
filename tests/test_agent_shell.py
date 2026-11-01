@@ -65,8 +65,9 @@ def runner(command: str) -> str:
 async def test_stop_during_sleep_60_ends_the_child_within_two_seconds(tmp_path: Path):
     started: list[ProcessTree] = []
     task = asyncio.create_task(
-        run_command("sleep 60", tmp_path, timeout_s=120, output_max_bytes=65536,
-                    on_start=started.append)
+        run_command(
+            "sleep 60", tmp_path, timeout_s=120, output_max_bytes=65536, on_start=started.append
+        )
     )
     for _ in range(100):
         if started:
@@ -194,7 +195,9 @@ def _podman_image() -> str | None:
         try:
             ran = subprocess.run(  # noqa: S603
                 ["podman", "run", "--rm", "--pull=never", image, "/bin/sh", "-c", "true"],  # noqa: S607
-                capture_output=True, timeout=120, check=False,
+                capture_output=True,
+                timeout=120,
+                check=False,
             )
         except (OSError, subprocess.TimeoutExpired):
             return None
@@ -204,27 +207,39 @@ def _podman_image() -> str | None:
 
 
 @pytest.mark.asyncio
-async def test_with_the_sandbox_on_a_write_outside_the_root_fails_and_inside_succeeds(tmp_path: Path):
+async def test_with_the_sandbox_on_a_write_outside_the_root_fails_and_inside_succeeds(
+    tmp_path: Path,
+):
     image = _podman_image()
     if image is None:
         pytest.skip("podman with the sandbox image is not available here")
     box = SandboxConfig(engine="podman", image=image)
-    outside = await run_command("touch /tmp/x", tmp_path, timeout_s=120, output_max_bytes=65536, sandbox=box)
+    outside = await run_command(
+        "touch /tmp/x", tmp_path, timeout_s=120, output_max_bytes=65536, sandbox=box
+    )
     assert outside.exit_code != 0, outside.output
     assert "Read-only file system" in outside.output
-    inside = await run_command("touch inside.txt", tmp_path, timeout_s=120, output_max_bytes=65536, sandbox=box)
+    inside = await run_command(
+        "touch inside.txt", tmp_path, timeout_s=120, output_max_bytes=65536, sandbox=box
+    )
     assert inside.exit_code == 0, inside.output
     assert (tmp_path / "inside.txt").exists()
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(not sys.platform.startswith("linux") or shutil.which("bwrap") is None,
-                    reason="bubblewrap runs on Linux, where it is installed")
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux") or shutil.which("bwrap") is None,
+    reason="bubblewrap runs on Linux, where it is installed",
+)
 async def test_with_bwrap_a_write_outside_the_root_fails(tmp_path: Path):
     box = SandboxConfig(engine="bwrap")
-    outside = await run_command("touch /tmp/mw-sandbox-x", tmp_path, timeout_s=30, output_max_bytes=65536, sandbox=box)
+    outside = await run_command(
+        "touch /tmp/mw-sandbox-x", tmp_path, timeout_s=30, output_max_bytes=65536, sandbox=box
+    )
     assert outside.exit_code != 0
-    inside = await run_command("touch inside.txt", tmp_path, timeout_s=30, output_max_bytes=65536, sandbox=box)
+    inside = await run_command(
+        "touch inside.txt", tmp_path, timeout_s=30, output_max_bytes=65536, sandbox=box
+    )
     assert inside.exit_code == 0 and (tmp_path / "inside.txt").exists()
 
 
@@ -235,8 +250,14 @@ async def test_stop_in_the_sandbox_removes_the_container(tmp_path: Path):
         pytest.skip("podman with a runnable local image is not available here")
     started: list[ProcessTree] = []
     task = asyncio.create_task(
-        run_command("sleep 60", tmp_path, timeout_s=120, output_max_bytes=65536,
-                    sandbox=SandboxConfig(engine="podman", image=image), on_start=started.append)
+        run_command(
+            "sleep 60",
+            tmp_path,
+            timeout_s=120,
+            output_max_bytes=65536,
+            sandbox=SandboxConfig(engine="podman", image=image),
+            on_start=started.append,
+        )
     )
     for _ in range(200):
         if started:
@@ -250,6 +271,9 @@ async def test_stop_in_the_sandbox_removes_the_container(tmp_path: Path):
         await task
     left = subprocess.run(  # noqa: S603, ASYNC221 -- a check after the fact
         ["podman", "ps", "-a", "--filter", f"name={name}", "--format", "{{.Names}}"],  # noqa: S607
-        capture_output=True, text=True, timeout=60, check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
     ).stdout
     assert name not in left

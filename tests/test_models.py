@@ -18,9 +18,19 @@ from .fake_api import MODELS, FakeAPI
 
 def test_rows_are_grouped_like_the_web_picker():
     rows = picker_rows(MODELS)
-    assert [r.label for r in rows if r.is_heading] == [GRT_HEADING, PARTNER_HEADING, PREVIEW_HEADING]
+    assert [r.label for r in rows if r.is_heading] == [
+        GRT_HEADING,
+        PARTNER_HEADING,
+        PREVIEW_HEADING,
+    ]
     assert [r.model_id for r in rows] == [
-        None, "grt-nano", "grt-max", None, "other-7b", None, "lab-x"
+        None,
+        "grt-nano",
+        "grt-max",
+        None,
+        "other-7b",
+        None,
+        "lab-x",
     ]
 
 

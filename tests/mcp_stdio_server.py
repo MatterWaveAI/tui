@@ -14,7 +14,11 @@ TOOLS = [
     {
         "name": "lookup",
         "description": "Look a word up.",
-        "inputSchema": {"type": "object", "properties": {"word": {"type": "string"}}, "required": ["word"]},
+        "inputSchema": {
+            "type": "object",
+            "properties": {"word": {"type": "string"}},
+            "required": ["word"],
+        },
         "annotations": {"readOnlyHint": True},
     },
     {
@@ -44,8 +48,14 @@ for line in sys.stdin:
     if "id" not in message:
         continue
     if method == "initialize":
-        answer(message["id"], {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
-                               "serverInfo": {"name": "demo", "version": "1"}})
+        answer(
+            message["id"],
+            {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "demo", "version": "1"},
+            },
+        )
     elif method == "tools/list":
         answer(message["id"], {"tools": TOOLS})
     elif method == "tools/call":
@@ -58,6 +68,14 @@ for line in sys.stdin:
         text = f"{name} ran with {json.dumps(args, sort_keys=True)}"
         answer(message["id"], {"content": [{"type": "text", "text": text}], "isError": False})
     else:
-        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": message["id"],
-                                     "error": {"code": -32601, "message": "no such method"}}) + "\n")
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": message["id"],
+                    "error": {"code": -32601, "message": "no such method"},
+                }
+            )
+            + "\n"
+        )
         sys.stdout.flush()

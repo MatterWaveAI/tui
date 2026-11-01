@@ -70,12 +70,14 @@ def root(tmp_path: Path) -> Path:
     return workspace
 
 
-async def session_for(fake: FakeV1, root: Path, events: RunEvents, *, trust: bool = True,
-                      **options) -> tuple[AgentSession, Server]:
+async def session_for(
+    fake: FakeV1, root: Path, events: RunEvents, *, trust: bool = True, **options
+) -> tuple[AgentSession, Server]:
     session = (await open_session(fake.api(), SessionOptions(root=root, **options), events)).session
     server = Server("srv")
-    session.mcp = McpManager((McpServerConfig(name="srv", trust=trust),), cwd=str(root),
-                             factory=lambda config: server)
+    session.mcp = McpManager(
+        (McpServerConfig(name="srv", trust=trust),), cwd=str(root), factory=lambda config: server
+    )
     await session.mcp.start()
     return session, server
 
@@ -151,12 +153,14 @@ async def test_yolo_runs_mcp_tools_without_asking(root: Path):
 
 @pytest.mark.asyncio
 async def test_a_protected_write_asks_in_yolo_and_is_written_only_on_a_yes(root: Path):
-    fake = FakeV1([
-        call("write_file", path=".bashrc", content="alias ll='ls -l'\n"),
-        call("edit", path="src/a.py", old_string="A = 1", new_string="A = 2"),
-        call("write_file", path="AGENTS.md", content="Be brief.\n"),
-        say("done"),
-    ])
+    fake = FakeV1(
+        [
+            call("write_file", path=".bashrc", content="alias ll='ls -l'\n"),
+            call("edit", path="src/a.py", old_string="A = 1", new_string="A = 2"),
+            call("write_file", path="AGENTS.md", content="Be brief.\n"),
+            say("done"),
+        ]
+    )
     events = Seen(False, True)
     session, _ = await session_for(fake, root, events, mode="yolo", yolo=True)
     await session.run("set things up")
@@ -168,11 +172,13 @@ async def test_a_protected_write_asks_in_yolo_and_is_written_only_on_a_yes(root:
 
 @pytest.mark.asyncio
 async def test_a_rejection_is_the_contracts_sentence_as_an_ordinary_result(root: Path):
-    fake = FakeV1([call("edit", path="src/a.py", old_string="A = 1", new_string="A = 2"), say("ok")])
+    fake = FakeV1(
+        [call("edit", path="src/a.py", old_string="A = 1", new_string="A = 2"), say("ok")]
+    )
     events = Seen(False)
     session, _ = await session_for(fake, root, events)
     await session.run("change it")
-    (name, outcome), = events.results
+    ((name, outcome),) = events.results
     assert name == "edit" and not outcome.is_error
     assert outcome.text == contract.refusal("rejected", tool="edit")
     assert fake.tool_results()[-1] == outcome.text
@@ -192,7 +198,9 @@ async def test_headless_a_protected_write_is_refused_with_needs_approval_even_in
 
 
 @pytest.mark.asyncio
-async def test_headless_a_call_the_mode_asks_about_is_refused_with_the_headless_sentence(root: Path):
+async def test_headless_a_call_the_mode_asks_about_is_refused_with_the_headless_sentence(
+    root: Path,
+):
     fake = FakeV1([call("run_shell", command="echo hi"), say("no")])
     session, _ = await session_for(fake, root, Seen(), mode="auto-edit", interactive=False)
     outcome = await session.run("run it")
@@ -223,7 +231,11 @@ async def test_a_bad_timeout_is_the_contracts_error(root: Path):
 
 @pytest.mark.asyncio
 async def test_a_command_stopped_by_the_user_answers_with_what_it_printed(root: Path):
-    command = "Write-Output started; Start-Sleep 60" if sys.platform == "win32" else "echo started; sleep 60"
+    command = (
+        "Write-Output started; Start-Sleep 60"
+        if sys.platform == "win32"
+        else "echo started; sleep 60"
+    )
     fake = FakeV1([call("run_shell", command=command), say("never")])
     session, _ = await session_for(fake, root, Seen(), mode="yolo", yolo=True)
     started: list[ProcessTree] = []

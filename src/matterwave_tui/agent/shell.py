@@ -166,7 +166,9 @@ class ShellResult:
     omitted_bytes: int = 0
     cap: int | None = None
 
-    def render(self, timeout_s: float | None = None, *, limits: Mapping[str, int] | None = None) -> str:
+    def render(
+        self, timeout_s: float | None = None, *, limits: Mapping[str, int] | None = None
+    ) -> str:
         """The tool result, as the contract words it: the contract makes
         the cut, from the start and the end that were kept."""
         if self.cap is not None:
@@ -230,7 +232,9 @@ def _seatbelt_profile(root: str, read_only: list[str], network: bool) -> str:
     rules = ["(version 1)", "(allow default)", "(deny file-write*)"]
     if not network:
         rules.append("(deny network*)")
-    rules.append(f'(allow file-write* (subpath {_quoted(root)}) (literal "/dev/null") (literal "/dev/tty"))')
+    rules.append(
+        f'(allow file-write* (subpath {_quoted(root)}) (literal "/dev/null") (literal "/dev/tty"))'
+    )
     rules.extend(f"(deny file-write* (subpath {_quoted(path)}))" for path in read_only)
     return "".join(rules)
 
@@ -265,8 +269,20 @@ def build_argv(
         return argv, str(root)
     if sandbox.engine == "bwrap":
         argv = [
-            "bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
-            "--bind", str(root), str(root), "--chdir", str(root), "--die-with-parent",
+            "bwrap",
+            "--ro-bind",
+            "/",
+            "/",
+            "--dev",
+            "/dev",
+            "--proc",
+            "/proc",
+            "--bind",
+            str(root),
+            str(root),
+            "--chdir",
+            str(root),
+            "--die-with-parent",
         ]
         for folder in read_only_folders(root):
             argv += ["--ro-bind", str(root / folder), str(root / folder)]
@@ -350,10 +366,17 @@ class _WindowsJob:
             ]
 
         class _Io(ctypes.Structure):
-            _fields_ = [(n, ctypes.c_uint64) for n in (
-                "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
-                "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
-            )]
+            _fields_ = [
+                (n, ctypes.c_uint64)
+                for n in (
+                    "ReadOperationCount",
+                    "WriteOperationCount",
+                    "OtherOperationCount",
+                    "ReadTransferCount",
+                    "WriteTransferCount",
+                    "OtherTransferCount",
+                )
+            ]
 
         class _Extended(ctypes.Structure):
             _fields_ = [
@@ -483,13 +506,21 @@ def _posix_table() -> dict[int, int]:
     try:
         listing = subprocess.run(  # noqa: S603 -- a fixed argv
             ["ps", "-A", "-o", "pid=,ppid=,stat="],  # noqa: S607 -- ps from PATH, as any shell finds it
-            capture_output=True, text=True, timeout=5, check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return table
     for line in listing.splitlines():
         parts = line.split()
-        if len(parts) >= 3 and parts[0].isdigit() and parts[1].isdigit() and not parts[2].startswith("Z"):
+        if (
+            len(parts) >= 3
+            and parts[0].isdigit()
+            and parts[1].isdigit()
+            and not parts[2].startswith("Z")
+        ):
             table[int(parts[0])] = int(parts[1])
     return table
 
@@ -510,7 +541,11 @@ def descendants(pid: int) -> list[int]:
 
 
 def _uses_keeper() -> bool:
-    return sys.platform.startswith("linux") and bool(sys.executable) and not getattr(sys, "frozen", False)
+    return (
+        sys.platform.startswith("linux")
+        and bool(sys.executable)
+        and not getattr(sys, "frozen", False)
+    )
 
 
 def _signal_all(pids: list[int], signum: int) -> None:
@@ -614,8 +649,13 @@ class ProcessTree:
 async def _taskkill(pid: int) -> None:
     with contextlib.suppress(OSError):
         killer = await asyncio.create_subprocess_exec(
-            "taskkill", "/T", "/F", "/PID", str(pid),
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            "taskkill",
+            "/T",
+            "/F",
+            "/PID",
+            str(pid),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         await killer.wait()
 
@@ -623,8 +663,12 @@ async def _taskkill(pid: int) -> None:
 async def _remove_container(engine: str, name: str) -> None:
     with contextlib.suppress(OSError, TimeoutError):
         remover = await asyncio.create_subprocess_exec(
-            engine, "rm", "-f", name,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            engine,
+            "rm",
+            "-f",
+            name,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         await asyncio.wait_for(remover.wait(), 15)
 
@@ -682,9 +726,7 @@ async def spawn(
     return ProcessTree(proc, container, job=job)
 
 
-async def start(
-    argv: list[str], cwd: str, container: tuple[str, str] | None = None
-) -> ProcessTree:
+async def start(argv: list[str], cwd: str, container: tuple[str, str] | None = None) -> ProcessTree:
     """A command for run_shell: no input, its output and errors in one pipe."""
     return await spawn(
         argv,

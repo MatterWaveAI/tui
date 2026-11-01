@@ -136,7 +136,10 @@ resume) before it is reported as cut off.
 ```sh
 uv sync --extra dev --extra images
 uv run ruff check . && uv run ruff format --check . && uv run mypy --strict && uv run pytest -q
+pre-commit install   # once per clone: gitleaks refuses a commit that adds a secret
 ```
+
+CI runs the same checks, the suite on Linux and Windows, and a gitleaks scan of the whole history.
 
 The wire is the Python SDK's (`matterwave-sdk` from your package index): `client.conversations.*`,
 its typed frames and its stream resume, plus `client.attachments`, `client.shares` and

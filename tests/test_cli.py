@@ -10,6 +10,7 @@ from collections.abc import Callable
 from typing import Any
 
 import httpx
+import keyring
 
 from matterwave_tui import cli
 
@@ -136,3 +137,16 @@ def test_a_cut_stream_warns_and_exits_one(capsys, monkeypatch):
     captured = capsys.readouterr()
     assert "Hal" in captured.out
     assert "cut short" in captured.err
+
+
+def test_a_key_is_stored_in_the_test_keyring_never_the_os_one(memory_keyring, monkeypatch):
+    """`--key` stores the key in the keyring; in the suite that is the
+    in-memory one, so a run leaves nothing in the developer's keyring and
+    needs none on a headless runner."""
+    assert keyring.get_keyring() is memory_keyring
+    seen: list[httpx.Request] = []
+    monkeypatch.setattr("matterwave_tui.api.httpx.AsyncClient", mock_api(seen))
+    assert cli.main(["--base-url", BASE, "--key", "mw_k", "-p", "hi"]) == 0
+    assert memory_keyring.entries == {("matterwave", BASE): "mw_k"}
+    assert cli.main(["--base-url", BASE, "logout"]) == 0
+    assert memory_keyring.entries == {}

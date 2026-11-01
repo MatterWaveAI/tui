@@ -22,7 +22,6 @@ import asyncio
 import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -202,7 +201,7 @@ class Checkpoints:
         for rel in paths:
             try:
                 targets[rel] = contract.confine(self.root, rel, write=True, approved=True).absolute
-            except (contract.PathRefused, re.error) as exc:
+            except contract.PathRefused as exc:
                 raise CheckpointError(f"{rel} cannot be put back: {exc}") from exc
         self.snapshot(paths, f"before /restore {checkpoint_id}")
         for row in reversed(chosen):

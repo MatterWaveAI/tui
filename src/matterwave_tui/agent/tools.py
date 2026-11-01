@@ -2,10 +2,13 @@
 
 The read tools are the SDK's own (`agent.run_read_file`, `run_list_dir`,
 `run_glob`, `run_grep`): every path goes through `agent.confine` first, so a
-`..`, an absolute path outside the root, a link out of it, a denied file
-and a name Windows would read as another (a stream, a trailing dot, a
-device) are refused before anything is read, and search leaves out what
-`.gitignore` and `.matterwaveignore` ignore. Their text is the contract's.
+`..`, an absolute path outside the root, a link out of it or a loop of
+links, a denied file and a name Windows would read as another (a stream, a
+trailing dot, a device) are refused before anything is read, and search
+leaves out what `.gitignore` and `.matterwaveignore` ignore. Their text is
+the contract's. grep runs in a process of its own with a deadline
+(`grep.py`), so a pattern that backtracks without end cannot freeze the
+TUI.
 
 A write is split in two: `prepare_write` reads the file and works out the
 new text and its diff (the SDK's `apply_edit` and `unified_diff`), and
@@ -24,7 +27,6 @@ import asyncio
 import contextlib
 import json
 import os
-import re
 import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -33,12 +35,14 @@ from typing import Any
 
 from matterwave_sdk import agent as contract
 
+from .grep import GREP_TIMEOUT_S, GrepProcess
 from .settings import SandboxConfig
 from .shell import ProcessTree, SandboxUnavailable, ShellResult, run_command
 
-LIMITS = contract.LIMITS
 # edit and write_file hold the old and new text and diff them.
 WRITE_MAX_BYTES = 8 * 1024 * 1024
+# The search process every LocalTools shares unless it is given its own.
+SEARCH = GrepProcess()
 
 
 @dataclass(frozen=True)
@@ -157,7 +161,8 @@ def write_text(path: Path, text: str) -> None:
 
 class LocalTools:
     """The contract's tools over one workspace root. `limits` overrides
-    the contract's limits (the conformance cases do)."""
+    the contract's limits (the conformance cases do); `grep` is the search
+    process grep runs in, and `grep_timeout_s` its deadline."""
 
     def __init__(
         self,
@@ -166,11 +171,15 @@ class LocalTools:
         sandbox: SandboxConfig | None = None,
         on_shell_start: Callable[[ProcessTree], None] | None = None,
         limits: Mapping[str, int] | None = None,
+        grep: GrepProcess | None = None,
+        grep_timeout_s: float = GREP_TIMEOUT_S,
     ) -> None:
         self.root = Path(os.path.abspath(root))
         self.sandbox = sandbox or SandboxConfig()
         self.on_shell_start = on_shell_start
         self.limits = limits
+        self.grep = grep or SEARCH
+        self.grep_timeout_s = grep_timeout_s
         # What a command printed before Stop ended it, for the call's result.
         self._stopped: ToolOutcome | None = None
 
@@ -190,17 +199,25 @@ class LocalTools:
 
     async def read(self, name: str, args: Mapping[str, Any]) -> ToolOutcome:
         try:
+            if name == "grep":
+                reply = await self.grep.search(self._grep_request(args))
+                return ToolOutcome(str(reply["text"]), is_error=bool(reply["is_error"]))
             return await asyncio.to_thread(self._read, name, args)
         except (ArgumentError, contract.PathRefused, contract.ToolError) as exc:
             return ToolOutcome(str(exc), is_error=True)
-        except re.error as exc:
-            return ToolOutcome(
-                f"{name} failed: a glob (the `glob` or `pattern` given, or a line of "
-                f".gitignore or .matterwaveignore) is not valid: {exc}.",
-                is_error=True,
-            )
         except OSError as exc:
             return ToolOutcome(f"{name} failed: {exc.strerror or exc}.", is_error=True)
+
+    def _grep_request(self, args: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "root": str(self.root),
+            "pattern": _required(args, "pattern"),
+            "path": _string(args, "path", required=False) or ".",
+            "glob": _string(args, "glob", required=False) or None,
+            "ignore_case": args.get("ignore_case") is True,
+            "limits": dict(self.limits) if self.limits is not None else None,
+            "timeout_s": self.grep_timeout_s,
+        }
 
     def _read(self, name: str, args: Mapping[str, Any]) -> ToolOutcome:
         limits = self.limits
@@ -222,15 +239,6 @@ class LocalTools:
                     limits=limits,
                 )
             )
-        if name == "grep":
-            return ToolOutcome(
-                contract.run_grep(
-                    self.root, _required(args, "pattern"), path,
-                    glob=_string(args, "glob", required=False) or None,
-                    ignore_case=args.get("ignore_case") is True,
-                    ignore=self.search_ignore(), limits=limits,
-                )
-            )
         raise ArgumentError(f"{name} is not a read tool.")
 
     # --- writes -----------------------------------------------------------------
@@ -244,8 +252,6 @@ class LocalTools:
             return self._prepare_write_file(args)
         except (ArgumentError, contract.PathRefused, contract.EditError) as exc:
             return ToolOutcome(str(exc), is_error=True)
-        except re.error as exc:
-            return ToolOutcome(f"{name} failed: a line of .matterwaveignore is not valid: {exc}.", is_error=True)
         except OSError as exc:
             return ToolOutcome(f"{name} failed: {exc.strerror or exc}.", is_error=True)
 
@@ -317,8 +323,6 @@ class LocalTools:
             again = self.confine(pending.relative, write=True, approved=pending.protected)
         except contract.PathRefused as exc:
             return ToolOutcome(f"{pending.relative} was not written: {exc}", is_error=True)
-        except re.error as exc:
-            return ToolOutcome(f"{pending.relative} was not written: {exc}.", is_error=True)
         if os.path.normcase(str(again.absolute)) != os.path.normcase(str(pending.path.absolute)):
             return ToolOutcome(
                 f"{pending.relative} was not written: where its path leads changed after the "
@@ -362,16 +366,11 @@ class LocalTools:
             raise ArgumentError("`command` is empty.")
         timeout = args.get("timeout_s")
         if timeout is None:
-            return command, self._limit("shell_timeout_s_default")
-        most = self._limit("shell_timeout_s_max")
+            return command, contract.limit("shell_timeout_s_default", self.limits)
+        most = contract.limit("shell_timeout_s_max", self.limits)
         if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= most:
             raise contract.ToolError("bad_timeout", max=most)
         return command, timeout
-
-    def _limit(self, name: str) -> int:
-        if self.limits is not None and name in self.limits:
-            return int(self.limits[name])
-        return LIMITS[name]
 
     def take_stopped(self) -> ToolOutcome | None:
         """The result of the command Stop ended, once."""
@@ -388,7 +387,7 @@ class LocalTools:
                 command,
                 self.root,
                 timeout_s=timeout_s,
-                output_max_bytes=self._limit("shell_output_max_bytes"),
+                output_max_bytes=contract.limit("shell_output_max_bytes", self.limits),
                 sandbox=self.sandbox,
                 on_start=self.on_shell_start,
                 on_stop=stopped,

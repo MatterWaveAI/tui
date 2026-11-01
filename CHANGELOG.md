@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Coding-agent mode: `matterwave-tui code [path]` opens the agent on a
   folder as a screen of the app (also on the command palette). It runs
   its own loop against `/v1/chat/completions` with the SDK's agent
-  contract (`matterwave_sdk.agent` 1.1.0): the seven tools (`read_file`,
+  contract (`matterwave_sdk.agent` 1.2.0): the seven tools (`read_file`,
   `list_dir`, `glob`, `grep`, `edit`, `write_file`, `run_shell`), path
   confinement through the SDK's `confine` (no `..`, nothing outside the
   root, no link out of it), the deny list (`.env*`, `*.pem`, `id_*`,
@@ -112,7 +112,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Agent mode follows agent contract 1.1.0, so it reads, searches, gates
+- Agent mode follows agent contract 1.2.0, so it reads, searches, gates
   and refuses as the VS Code extension and the desktop app do. What the
   SDK now owns is no longer the TUI's own copy: the search rules and walk
   (`SearchIgnore`, `walk`; matching ignores case on Linux too), the read
@@ -146,8 +146,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A command that exits while something it detached holds its output
     open ends at once, with that process, instead of running to its
     timeout (asyncio's `wait()` waits for the pipe to close as well).
+  - A loop of links is refused (`loop`); a pipe, socket or device is
+    never opened and answers `special_file` instead of "does not exist";
+    a `[...]` range that runs backwards in a glob is the `invalid_glob`
+    error, and such a line in `.gitignore` or `.matterwaveignore` (or a
+    leading BOM) is skipped instead of failing every search; an absolute
+    path is accepted under a root inside folders named like Windows
+    devices (`con`, `x.`).
+  - grep runs in a Python process of its own with a 30-second deadline.
+    A long search answers with the contract's `timeout` error; one stuck
+    inside a single match (a pattern that backtracks without end, which
+    Python's `re` cannot interrupt) is killed, so it no longer freezes
+    the TUI. Stop kills it too.
+  - The context files are read in the contract's order (`CONTEXT_FILES`:
+    `MATTERWAVE.md`, `AGENTS.md`, then the personal `MATTERWAVE.local.md`)
+    and run_shell's cut is the SDK's own (`format_shell(omitted=)`) from
+    the start and end the TUI kept.
 - The SDK floor rises to `matterwave-sdk>=0.5.0`, and uv resolves the SDK
-  from a sibling `python-sdk` checkout carrying agent contract 1.1 until
+  from a sibling `python-sdk` checkout carrying agent contract 1.2 until
   the release that carries it is published.
 - CI runs on Linux, Windows and macOS, and runs mypy.
 

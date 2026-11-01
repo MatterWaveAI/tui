@@ -88,26 +88,30 @@ def _decode(data: bytes) -> str:
         return data.decode(locale.getpreferredencoding(False) or "utf-8", errors="replace")
 
 
-def _decode_head(data: bytes) -> str:
-    """The start of a stream, a character cut off at its end left out."""
+def _decode_head(data: bytes) -> tuple[str, int]:
+    """The start of a stream as text, a character cut off at its end left
+    out, and how many of the bytes that text took."""
+    decoder = codecs.getincrementaldecoder("utf-8")()
     try:
-        return codecs.getincrementaldecoder("utf-8")().decode(data, final=False)
+        text = decoder.decode(data, final=False)
     except UnicodeDecodeError:
-        return _decode(data)
+        return _decode(data), len(data)
+    return text, len(data) - len(decoder.getstate()[0])
 
 
-def _decode_tail(data: bytes) -> str:
-    """The end of a stream, a character cut off at its start left out."""
+def _decode_tail(data: bytes) -> tuple[str, int]:
+    """The end of a stream as text, a character cut off at its start left
+    out, and how many of the bytes that text took."""
     start = 0
     while start < min(3, len(data)) and (data[start] & 0xC0) == 0x80:
         start += 1
-    return _decode(data[start:])
+    return _decode(data[start:]), len(data) - start
 
 
 class OutputBuffer:
     """A command's output as it arrives, held to the cap: the whole of it
     when it fits, else only its head and its tail (a few bytes more than
-    the contract keeps of each, so a character cut at a boundary can be
+    the contract shows of each, so a character cut at a boundary can be
     finished or left out), and the count of everything."""
 
     def __init__(self, cap: int) -> None:
@@ -132,49 +136,50 @@ class OutputBuffer:
     def result(
         self, exit_code: int | None, *, timed_out: bool = False, stopped: bool = False
     ) -> ShellResult:
-        dropped = self.total - len(self.head) - len(self.tail)
-        if dropped == 0:
+        if self.total == len(self.head) + len(self.tail):
             text = _decode(bytes(self.head + self.tail))
-            return ShellResult(exit_code, text, timed_out=timed_out, stopped=stopped)
-        head = contract.utf8_head(_decode_head(bytes(self.head)), self.cap // 2)
-        tail = contract.utf8_tail(_decode_tail(bytes(self.tail)), self.cap - self.cap // 2)
-        omitted = self.total - len(head.encode("utf-8", "surrogatepass")) - len(
-            tail.encode("utf-8", "surrogatepass")
-        )
+            return ShellResult(exit_code, text, timed_out=timed_out, stopped=stopped, cap=self.cap)
+        head, head_bytes = _decode_head(bytes(self.head))
+        tail, tail_bytes = _decode_tail(bytes(self.tail))
         return ShellResult(
-            exit_code, head, timed_out=timed_out, stopped=stopped, omitted_bytes=omitted, tail=tail
+            exit_code,
+            head + tail,
+            timed_out=timed_out,
+            stopped=stopped,
+            omitted_bytes=self.total - head_bytes - tail_bytes,
+            cap=self.cap,
         )
 
 
 @dataclass(frozen=True)
 class ShellResult:
     """A command's end and its output: the whole output, or, when it was
-    over the cap, its head (`output`), its `tail` and the bytes left out
-    between them. `exit_code` is None for a command ended by a signal."""
+    over the cap, its start and its end joined (`output`) and the bytes
+    dropped from between them (`omitted_bytes`). `exit_code` is None for a
+    command ended by a signal. `cap` is the output cap the buffer kept it
+    to; the result is cut at that cap, whatever `limits` says."""
 
     exit_code: int | None
     output: str
     timed_out: bool = False
     stopped: bool = False
     omitted_bytes: int = 0
-    tail: str = ""
+    cap: int | None = None
 
     def render(self, timeout_s: float | None = None, *, limits: Mapping[str, int] | None = None) -> str:
-        """The tool result, as the contract words it."""
-        flags: dict[str, Any] = {
-            "exit_code": self.exit_code,
-            "timed_out": self.timed_out,
-            "stopped": self.stopped,
-            "timeout_s": timeout_s,
-            "limits": limits,
-        }
-        if not self.omitted_bytes:
-            return contract.format_shell(self.output, **flags)
-        # The whole output was never held, so the cut the contract makes is
-        # made here, from the head and the tail that were kept.
-        status = contract.format_shell("", **flags).split("\n", 1)[0]
-        cut = str(contract.OUTPUTS["shell"]["cut"]).replace("{omitted}", str(self.omitted_bytes))
-        return f"{status}\n{self.output}\n{cut}\n{self.tail}"
+        """The tool result, as the contract words it: the contract makes
+        the cut, from the start and the end that were kept."""
+        if self.cap is not None:
+            limits = {**(limits or {}), "shell_output_max_bytes": self.cap}
+        return contract.format_shell(
+            self.output,
+            exit_code=self.exit_code,
+            timed_out=self.timed_out,
+            stopped=self.stopped,
+            timeout_s=timeout_s,
+            limits=limits,
+            omitted=self.omitted_bytes,
+        )
 
 
 def exit_code_of(returncode: int | None) -> int | None:

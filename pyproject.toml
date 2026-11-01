@@ -35,9 +35,9 @@ dev = [
 ]
 
 [tool.uv.sources]
-# Agent mode imports `matterwave_sdk.agent` at agent contract 1.1.0, which
+# Agent mode imports `matterwave_sdk.agent` at agent contract 1.2.0, which
 # ships in the SDK release after 0.5.0. Until that is on PyPI, uv resolves
-# the SDK from a python-sdk checkout beside this one that carries the 1.1
+# the SDK from a python-sdk checkout beside this one that carries the 1.2
 # contract. pip ignores this table, and so does the published wheel's
 # metadata.
 matterwave-sdk = { path = "../python-sdk", editable = true }

@@ -42,23 +42,25 @@ as a conversation (`metadata.conversation_id`), so it opens in the web app with 
 results; `--no-store` keeps it out.
 
 **Tools.** `read_file`, `list_dir`, `glob`, `grep`, `edit`, `write_file` and `run_shell`, as
-the SDK's agent contract defines them (`matterwave_sdk.agent`, contract 1.1.0, shared with the
+the SDK's agent contract defines them (`matterwave_sdk.agent`, contract 1.2.0, shared with the
 VS Code extension and the desktop app). The read tools are the SDK's own, so they read, search
 and word their results exactly as the other clients do; the TUI's tests run the contract's
 conformance cases through them. Every path is resolved and must stay under the root after links
-are followed: `..`, an absolute path outside the root and a link out of it are refused before
-anything happens. `.env*`, `*.pem`, `id_*`, `.git/` and anything listed in `.matterwaveignore`
-are refused for reading as well as writing, in any case (`.ENV`, `ID_RSA`). On every platform, a
-name Windows would read as another one is refused too: a `:` stream (`key.pem::$DATA`, `C:x`), a
-name ending in a dot or a space (`.git `), a device name (`CON`, `NUL.txt`, `COM1`) and a `\\?\`,
-`\\.\` or network path. Search (`glob`, `grep`, `list_dir`) also skips what the `.gitignore` and
-`.matterwaveignore` files from the root down ignore, ignoring case; `list_dir` still shows the
-protected files below. A `glob` pattern without a `/` matches file names at any depth (`*.ts`);
-one with a `/` matches the path under the search's `path`. `read_file` reads files up to 16 MB,
-a window of 2,000 lines or 256 KB at a time, and a line longer than that is shown cut; `grep`
-skips files over 4 MB and cuts a matching line at 400 characters; `edit` / `write_file` work on
-files up to 8 MB. Confinement is not a sandbox: `run_shell` can reach anything you can, which is
-why commands ask.
+are followed: `..`, an absolute path outside the root, a link out of it and a loop of links are
+refused before anything happens. `.env*`, `*.pem`, `id_*`, `.git/` and anything listed in
+`.matterwaveignore` are refused for reading as well as writing, in any case (`.ENV`, `ID_RSA`). On
+every platform, a name Windows would read as another one is refused too: a `:` stream
+(`key.pem::$DATA`, `C:x`), a name ending in a dot or a space (`.git `), a device name (`CON`,
+`NUL.txt`, `COM1`) and a `\\?\`, `\\.\` or network path. Search (`glob`, `grep`, `list_dir`) also
+skips what the `.gitignore` and `.matterwaveignore` files from the root down ignore, ignoring case;
+`list_dir` still shows the protected files below. A `glob` pattern without a `/` matches file names
+at any depth (`*.ts`); one with a `/` matches the path under the search's `path`. `read_file` reads
+files up to 16 MB, a window of 2,000 lines or 256 KB at a time, and a line longer than that is
+shown cut; `grep` skips files over 4 MB and cuts a matching line at 400 characters, and runs in a
+Python process of its own that is stopped after 30 seconds, so a pattern that backtracks without end
+cannot freeze the TUI; a pipe, socket or device is not opened; `edit` / `write_file` work on files
+up to 8 MB. Confinement is not a sandbox: `run_shell` can reach anything you can, which is why
+commands ask.
 
 **Approval modes.** The status line always shows the mode. `Shift+Tab` cycles it, and
 `/approval-mode <mode>` sets it (`--save` keeps it as your default).
@@ -120,14 +122,15 @@ or 429 from `/v1` ends the run with the same copy the chat shows.
 agent tools off (`/api/me` `local_agent_tools`) or the model cannot call tools (`supports_tools`
 on `/api/models`; `/model` picks another). A server that sends neither field allows it.
 
-**Context.** `MATTERWAVE.md` and `AGENTS.md` at the root, and your own `MATTERWAVE.local.md`
-(keep it in `.gitignore`), are read as instructions, with `MATTERWAVE.md` in the config folder
-for every project and your account's custom instructions on top. A repository can carry
-instructions, so the root's files and `.matterwave/` settings load only in a folder you trust:
-the first time a folder has any, you are asked, and the answer is remembered (`/trust` changes
-it). `/init` has the agent draft a `MATTERWAVE.md`. `@path` in a prompt attaches that file or
-folder, under the same confinement. The project's context files, commands and subagents are read
-under it as well, so a `MATTERWAVE.md` that is a link to a file outside the root is not loaded.
+**Context.** `MATTERWAVE.md` in the config folder (for every project), then `MATTERWAVE.md` and
+`AGENTS.md` at the root, then your own `MATTERWAVE.local.md` (keep it in `.gitignore`) are read as
+instructions in that order, so the more personal file wins, with your account's custom
+instructions on top. A repository can carry instructions, so the root's files and `.matterwave/`
+settings load only in a folder you trust: the first time a folder has any, you are asked, and the
+answer is remembered (`/trust` changes it). `/init` has the agent draft a `MATTERWAVE.md`. `@path`
+in a prompt attaches that file or folder, under the same confinement. The project's context
+files, commands and subagents are read under it as well, so a `MATTERWAVE.md` that is a link to a
+file outside the root is not loaded.
 
 **Checkpoints.** Before each applied change, the touched files' bytes go into a shadow git
 repository in the state folder, outside the project, one per workspace and readable by you alone.

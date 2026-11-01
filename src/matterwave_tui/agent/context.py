@@ -1,15 +1,17 @@
 """What a run knows before the model reads a file: the context files, the
 `@path` mentions in a prompt, and the custom commands.
 
-Context files, layered in this order:
+Context files, layered from the most shared to the most personal, so the
+later one wins:
 
 1. `MATTERWAVE.md` in the config directory: the user's own, any folder.
-2. `MATTERWAVE.md`, then `AGENTS.md`, at the workspace root: the project's.
-3. `MATTERWAVE.local.md` at the root: a personal override, meant to be
-   gitignored (a notice says so when it is not).
-4. The account's custom instructions, read from the server, on top.
+2. The contract's `CONTEXT_FILES` at the workspace root: `MATTERWAVE.md`,
+   then `AGENTS.md` (the project's), then `MATTERWAVE.local.md`, a
+   personal override meant to be gitignored (a notice says so when it is
+   not).
+3. The account's custom instructions, read from the server, on top.
 
-The repository's files (2 and 3) are loaded only in a folder the user has
+The repository's files (2) are loaded only in a folder the user has
 trusted: a cloned repository can carry instructions, and the files are
 read as instructions, not as data. In a folder that is not trusted they
 are skipped with a notice. The files go into the contract's prompt slot
@@ -31,7 +33,7 @@ from .settings import PROJECT_DIR, config_dir
 
 DEFINITION_MAX_CHARS = 64_000
 
-PROJECT_FILES = ("MATTERWAVE.md", "AGENTS.md")
+# The one of the contract's CONTEXT_FILES that is the user's own.
 PERSONAL_FILE = "MATTERWAVE.local.md"
 # The contract cuts each context file in the prompt at this many characters.
 CONTEXT_FILE_MAX_CHARS = int(contract.CONTRACT["system_prompt"]["context_files"]["max_chars"])
@@ -104,7 +106,7 @@ def _shown_path(path: Path) -> str:
 def project_context_present(root: Path) -> bool:
     """Whether the repository carries anything the trust question is about:
     a context file or project settings."""
-    return any((root / name).is_file() for name in (*PROJECT_FILES, PERSONAL_FILE)) or (
+    return any((root / name).is_file() for name in contract.CONTEXT_FILES) or (
         root / PROJECT_DIR
     ).is_dir()
 
@@ -136,10 +138,7 @@ def _gitignored(root: Path, name: str) -> bool:
         text = (root / ".gitignore").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
-    try:
-        return contract.IgnoreFile(text).match(name) is True
-    except re.error:
-        return False
+    return contract.IgnoreFile(text).match(name) is True
 
 
 def load_context(root: Path, *, trusted: bool) -> ContextFiles:
@@ -152,7 +151,7 @@ def load_context(root: Path, *, trusted: bool) -> ContextFiles:
             )
         except (OSError, ValueError):
             found.notices.append(f"{user_file} could not be read.")
-    for name in (*PROJECT_FILES, PERSONAL_FILE):
+    for name in contract.CONTEXT_FILES:
         path = root / name
         if not path.is_file():
             continue
@@ -164,7 +163,7 @@ def load_context(root: Path, *, trusted: bool) -> ContextFiles:
         except contract.PathRefused as exc:
             found.notices.append(f"{name} was not loaded: {exc}")
             continue
-        except (OSError, ValueError, re.error):
+        except (OSError, ValueError):
             found.notices.append(f"{name} could not be read as UTF-8 text.")
             continue
         found.files.append(contract.ContextFile(name, text, trusted=True))
@@ -208,8 +207,6 @@ def expand_mentions(prompt: str, root: Path) -> Mentions:
         seen.add(raw)
         try:
             target = contract.confine(root, raw)
-        except re.error:
-            continue
         except contract.PathRefused as exc:
             if (root / raw).exists() or contract.is_absolute(raw) or ".." in raw:
                 out.notices.append(f"@{raw} was not attached: {exc}")
@@ -224,7 +221,7 @@ def expand_mentions(prompt: str, root: Path) -> Mentions:
             base = "" if target.relative == "." else target.relative
             try:
                 found = list(itertools.islice(contract.walk(root, target.relative), MENTION_MAX_LISTED))
-            except (contract.PathRefused, contract.ToolError, OSError, re.error) as exc:
+            except (contract.PathRefused, contract.ToolError, OSError) as exc:
                 out.notices.append(f"@{raw} was not attached: {exc}")
                 continue
             names = [rel[len(base) + 1 :] if base else rel for rel in found]

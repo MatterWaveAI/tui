@@ -178,6 +178,23 @@ def test_streams_devices_and_trailing_dots_are_refused_by_the_tools(root: Path):
     assert sorted(p.name for p in root.iterdir()) == ["key.pem", "src"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows cannot name a folder con, a:b or x.")
+@pytest.mark.parametrize("parent", ["con", "a:b", "x.", "NUL.d"])
+def test_a_root_inside_folders_with_alias_names_takes_absolute_paths(tmp_path: Path, parent: str):
+    # Only the names below the root are checked as Windows aliases.
+    root = tmp_path / parent / "repo"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "a.py").write_text("A = 1\n", encoding="utf-8")
+    tools = LocalTools(root)
+    absolute = str(root / "src" / "a.py")
+    assert asyncio.run(tools.read("read_file", {"path": absolute})).text == "1\tA = 1"
+    assert asyncio.run(tools.read("grep", {"pattern": "A", "path": str(root)})).text == "src/a.py:1: A = 1"
+    pending = tools.prepare_write("edit", {"path": absolute, "old_string": "1", "new_string": "2"})
+    assert isinstance(pending, PendingWrite) and pending.relative == "src/a.py"
+    refused = asyncio.run(tools.read("read_file", {"path": str(root / "nul.txt")}))
+    assert refused.is_error and refused.text.startswith("Refused:")
+
+
 # --- writes that outlast the session ask in every mode ----------------------------------------
 
 
@@ -321,7 +338,7 @@ def test_a_read_window_still_reports_the_files_length(root: Path):
 def test_a_named_pipe_is_not_read(root: Path):
     os.mkfifo(root / "pipe")
     out = asyncio.run(asyncio.wait_for(LocalTools(root).read("read_file", {"path": "pipe"}), 5))
-    assert out.is_error
+    assert out.is_error and out.text == str(contract.ToolError("special_file", path="pipe"))
     grep = asyncio.run(asyncio.wait_for(LocalTools(root).read("grep", {"pattern": "x"}), 5))
     assert not grep.is_error
 

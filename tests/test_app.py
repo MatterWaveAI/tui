@@ -31,6 +31,7 @@ from matterwave_tui.screens import (
     Library,
     ModelPicker,
     Notifications,
+    PendingAttachments,
     Prompt,
     Shares,
 )
@@ -1373,6 +1374,86 @@ async def test_the_scan_is_polled_on_its_route_before_the_turn_goes(tmp_path, mo
             ("GET", "/api/attachments/att1/scan"),
             ("POST", "/api/conversations/c1/messages"),
         ]
+
+
+@pytest.mark.asyncio
+async def test_pending_attachments_stay_with_their_conversation(tmp_path):
+    notes = tmp_path / "notes.txt"
+    notes.write_bytes(b"notes")
+    api = FakeAPI(happy_script("Seen."))
+    api.conversations = [conversation("c1", title="First"), conversation("c2", title="Second")]
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert app.conversation is not None and app.conversation.id == "c1"
+        app.apply_attach(str(notes))
+        await settle(app, pilot)
+        assert "attached: notes.txt" in status(app)
+        await app.open_conversation("c2")
+        await settle(app, pilot)
+        assert "attached" not in status(app)
+        composer = app.query_one("#composer", TextArea)
+        composer.text = "no files here"
+        app.action_send()
+        await settle(app, pilot)
+        assert api.sent_attachment_ids == [None]
+        await app.open_conversation("c1")
+        await settle(app, pilot)
+        assert "attached: notes.txt" in status(app)
+        composer.text = "with the file"
+        app.action_send()
+        await settle(app, pilot)
+        assert api.sent_attachment_ids == [None, ["att1"]]
+        assert api.sent[-1][0] == "c1"
+
+
+@pytest.mark.asyncio
+async def test_a_pending_attachment_can_be_taken_off(tmp_path):
+    (tmp_path / "keep.txt").write_bytes(b"keep")
+    (tmp_path / "drop.txt").write_bytes(b"drop")
+    api = FakeAPI(happy_script("Seen."))
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        app.apply_attach(str(tmp_path / "keep.txt"))
+        await settle(app, pilot)
+        app.apply_attach(str(tmp_path / "drop.txt"))
+        await settle(app, pilot)
+        assert "attached: keep.txt, drop.txt" in status(app)
+        await pilot.press("escape", "I")
+        await settle(app, pilot)
+        assert isinstance(app.screen, PendingAttachments)
+        await pilot.press("down", "x")
+        await settle(app, pilot)
+        assert not isinstance(app.screen, PendingAttachments)
+        assert api.attachment_deletes == ["att2"]
+        assert "attached: keep.txt" in status(app) and "drop.txt" not in status(app)
+        app.query_one("#composer", TextArea).text = "one file"
+        app.action_send()
+        await settle(app, pilot)
+        assert api.sent_attachment_ids == [["att1"]]
+
+
+@pytest.mark.asyncio
+async def test_a_quoted_or_home_relative_path_attaches(tmp_path, monkeypatch):
+    folder = tmp_path / "My Files"
+    folder.mkdir()
+    (folder / "notes.txt").write_bytes(b"notes")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    api = FakeAPI()
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        # Windows' "Copy as path" puts double quotes round it; a drag into
+        # a shell may use single ones.
+        app.apply_attach(f'"{folder / "notes.txt"}"')
+        await settle(app, pilot)
+        app.apply_attach(f"'{folder / 'notes.txt'}'")
+        await settle(app, pilot)
+        app.apply_attach("~/My Files/notes.txt")
+        await settle(app, pilot)
+        assert [name for name, _ in api.uploads] == ["notes.txt"] * 3
 
 
 @pytest.mark.asyncio

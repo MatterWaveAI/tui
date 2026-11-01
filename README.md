@@ -69,7 +69,8 @@ or the environment is never replaced behind your back.
 | `f` | transcript | fork the conversation from the selected message |
 | `s` | anywhere | create a share link for the conversation |
 | `w` | anywhere | export the conversation to a Markdown file (the working directory) |
-| `i` | anywhere | attach a file (its path); it is uploaded and sent with the next message |
+| `i` | anywhere | attach a file (its path, quoted or not, `~` allowed); it goes with this conversation's next message |
+| `I` | anywhere | take a pending file off the next message (and delete the upload) |
 | `o` | anywhere | cycle the sidebar list: default → pinned → archived → all |
 | `l` | anywhere | the library: folders and tags for the open conversation |
 | `L` | anywhere | prompt roles: apply, add or delete a named system prompt |

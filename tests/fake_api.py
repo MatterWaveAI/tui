@@ -163,6 +163,7 @@ class FakeAPI:
         self.scan_answers: list[str] = []
         self.scan_polls: list[str] = []
         self.scan_gate: asyncio.Event | None = None
+        self.attachment_deletes: list[str] = []
         # Temporary chats are fixed at creation; the server keeps them out
         # of every list and every search, and refuses pin, fork and share.
         self.creates: list[tuple[str | None, str | None, bool]] = []
@@ -389,6 +390,9 @@ class FakeAPI:
         if len(self.scan_answers) > 1:
             return self.scan_answers.pop(0)
         return self.scan_answers[0] if self.scan_answers else "clean"
+
+    async def delete_attachment(self, attachment_id: str) -> None:
+        self.attachment_deletes.append(attachment_id)
 
     async def library(self) -> dict[str, Any]:
         return {

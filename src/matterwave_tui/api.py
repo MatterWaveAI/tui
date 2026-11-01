@@ -194,6 +194,8 @@ class ChatAPI(Protocol):
 
     async def attachment_scan_status(self, attachment_id: str) -> str: ...
 
+    async def delete_attachment(self, attachment_id: str) -> None: ...
+
     async def context(self, conversation_id: str) -> ConversationContext: ...
 
     async def compact(self, conversation_id: str) -> ConversationMessage: ...
@@ -686,6 +688,11 @@ class HttpChatAPI:
         it is `clean`. The SDK has no method for the route; a read."""
         body = await self._app_json(self._reads, "GET", _path("attachments", attachment_id, "scan"))
         return str(body.get("scan_status") or "")
+
+    async def delete_attachment(self, attachment_id: str) -> None:
+        """`DELETE /api/attachments/{id}` by way of the SDK: an upload taken
+        off the message before it was sent. A write: no retries."""
+        await self._writes.attachments.delete(attachment_id)
 
     async def context(self, conversation_id: str) -> ConversationContext:
         return await self._reads.conversations.context(conversation_id)

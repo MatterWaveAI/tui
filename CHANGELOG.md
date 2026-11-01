@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with "One of those attachments is not available": the status line shows
   the file as `(scanning…)`, the message goes once the scan is clean, and
   a file the scan rejects leaves the message with its name said.
+- Files attached but not sent stay with the conversation they were attached
+  in, instead of going out with the next message of whichever conversation
+  is open; `I` takes one off the message and deletes the upload; a path
+  pasted with quotes round it (Windows' "Copy as path") or starting with
+  `~` attaches.
 - The test suite signs in against an in-memory keyring, so a run no longer
   writes to the developer's OS keyring and passes on a runner without one.
 

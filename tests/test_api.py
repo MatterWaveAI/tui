@@ -452,6 +452,28 @@ async def test_an_attachment_is_uploaded_as_multipart():
     assert attachment.content_type == "image/png"
 
 
+@pytest.mark.asyncio
+async def test_a_detached_upload_is_deleted_once_and_never_retried():
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        return httpx.Response(503, json={"detail": "busy"})
+
+    with pytest.raises(ServerError):
+        await make(handler).delete_attachment("att1")
+    assert seen == [("DELETE", "/api/attachments/att1")]
+
+
+@pytest.mark.asyncio
+async def test_a_scan_status_is_read_from_its_route():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert (request.method, request.url.path) == ("GET", "/api/attachments/att1/scan")
+        return httpx.Response(200, json={"id": "att1", "scan_status": "scanning"})
+
+    assert await make(handler).attachment_scan_status("att1") == "scanning"
+
+
 DONE_ONLY = 'event: done\ndata: {"id": "a1", "role": "assistant", "truncated": false}\n\n'
 
 

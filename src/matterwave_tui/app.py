@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -43,6 +44,7 @@ from .screens import (
     LibraryState,
     ModelPicker,
     Notifications,
+    PendingAttachments,
     Prompt,
     RoleEditor,
     Roles,
@@ -177,9 +179,23 @@ def scan_refusal(filename: str, scan_status: str) -> str:
     return f"Scanning {filename} is taking longer than expected; attach it again."
 
 
+def typed_path(path_text: str) -> Path:
+    """A path as it was typed or pasted: the quotes Windows' "Copy as path"
+    (or a shell's drag and drop) puts round it come off, and `~` expands."""
+    text = path_text.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1].strip()
+    return Path(text).expanduser()
+
+
+def attachment_label(attachment: Attachment) -> str:
+    """A pending file as the status line and the detach list name it."""
+    return attachment.filename + (" (scanning…)" if scan_pending(attachment.scan_status) else "")
+
+
 def _read_attachment(path_text: str) -> tuple[bytes, str]:
     """The file's bytes and its name, off the event loop (it may be large)."""
-    path = Path(path_text).expanduser()
+    path = typed_path(path_text)
     return path.read_bytes(), path.name
 
 
@@ -330,6 +346,7 @@ class MatterWaveApp(App[None]):
         Binding("A", "dismiss_announcements", "Dismiss"),
         Binding("w", "export_markdown", "Export"),
         Binding("i", "attach", "Attach"),
+        Binding("I", "detach", "Detach"),
         Binding("v", "dictate", "Dictate"),
         Binding("o", "cycle_filter", "List"),
         Binding("y", "copy", "Copy"),
@@ -369,8 +386,10 @@ class MatterWaveApp(App[None]):
         # The org's balance this period, for the status line; None until the
         # usage route has answered (or forever, when it is not there).
         self.usage_balance: UsageBalance | None = None
-        # Files uploaded but not sent yet; their ids go with the next turn.
-        self.pending_attachments: list[Attachment] = []
+        # Files uploaded but not sent yet, per conversation ("" before one
+        # exists), the way drafts are kept: their ids go with that
+        # conversation's next turn and nowhere else.
+        self.attachment_drafts: dict[str, list[Attachment]] = {}
         # A send asked for while an upload was still being scanned: it goes
         # by itself once every scan is clean, and not at all if one fails.
         self.send_after_scan = False
@@ -429,6 +448,22 @@ class MatterWaveApp(App[None]):
         # The answer the turn that just ended produced, for the shell gate.
         self._completed_answer: Message | None = None
         self._search_seq = 0
+
+    @property
+    def pending_attachments(self) -> list[Attachment]:
+        """The open conversation's uploads, waiting for its next turn."""
+        return self.attachment_drafts.get(self._draft_key(), [])
+
+    @pending_attachments.setter
+    def pending_attachments(self, attachments: list[Attachment]) -> None:
+        key = self._draft_key()
+        if attachments:
+            self.attachment_drafts[key] = list(attachments)
+        else:
+            self.attachment_drafts.pop(key, None)
+
+    def _draft_key(self) -> str:
+        return self.conversation.id if self.conversation is not None else ""
 
     # --- layout ----------------------------------------------------------------
 
@@ -499,10 +534,7 @@ class MatterWaveApp(App[None]):
         if self.unread_notifications:
             bits.append(f"✉ {self.unread_notifications} unread")
         if self.pending_attachments:
-            names = ", ".join(
-                a.filename + (" (scanning…)" if scan_pending(a.scan_status) else "")
-                for a in self.pending_attachments
-            )
+            names = ", ".join(attachment_label(a) for a in self.pending_attachments)
             bits.append(f"attached: {names}")
         if self.send_after_scan:
             bits.append("sends when the scan is done")
@@ -751,6 +783,9 @@ class MatterWaveApp(App[None]):
             self.fail_from_exception(exc)
             return
         self.conversation = replace(tree, messages=[])
+        # A send that was waiting on a scan belonged to the conversation
+        # left; its text and files stay there, and nothing goes by itself.
+        self.send_after_scan = False
         self.thread = Thread.from_tree(tree.messages, tree.current_leaf_message_id)
         self.model = tree.default_model or self.model
         self.editing = None
@@ -1066,10 +1101,12 @@ class MatterWaveApp(App[None]):
         except Exception as exc:
             self.fail_from_exception(exc)
             return
+        # The files attached before the conversation existed go with this
+        # turn; they are no longer waiting for one.
+        self.attachment_drafts.pop("", None)
         await self.refresh_conversations()
         await self.open_conversation(conv.id)
         self.query_one("#composer", TextArea).text = ""
-        self.pending_attachments = []
         await self._consume(self.api.send(conv.id, text, self.model, attachment_ids=attachment_ids))
 
     def action_edit(self) -> None:
@@ -1233,6 +1270,7 @@ class MatterWaveApp(App[None]):
         except Exception as exc:
             self.fail_from_exception(exc)
             return
+        self.attachment_drafts.pop(conversation_id, None)
         if self.conversation is not None and self.conversation.id == conversation_id:
             if self.streaming:
                 self._detach_turn()
@@ -1329,6 +1367,9 @@ class MatterWaveApp(App[None]):
             )
             return
         conversation_id = self.conversation.id if self.conversation else None
+        # The file belongs to the conversation it was attached in, even if
+        # another is open by the time the upload lands.
+        key = self._draft_key()
         try:
             attachment = await self.api.upload_attachment(
                 data, filename, conversation_id=conversation_id
@@ -1340,7 +1381,7 @@ class MatterWaveApp(App[None]):
             # A scanner that decides inside the upload, and said no.
             self.notify(scan_refusal(attachment.filename, attachment.scan_status), severity="error")
             return
-        self.pending_attachments.append(attachment)
+        self.attachment_drafts[key] = [*self.attachment_drafts.get(key, []), attachment]
         if scan_pending(attachment.scan_status):
             self.notify(f"Attached {attachment.filename}; it is being scanned.")
             self.run_worker(self._watch_scan(attachment.id), group="scan")
@@ -1354,7 +1395,7 @@ class MatterWaveApp(App[None]):
         scan_status = ""
         for _ in range(SCAN_POLLS_MAX):
             await asyncio.sleep(SCAN_POLL_S)
-            if not any(a.id == attachment_id for a in self.pending_attachments):
+            if self._attachment_key(attachment_id) is None:
                 return
             try:
                 scan_status = await self.api.attachment_scan_status(attachment_id)
@@ -1371,19 +1412,23 @@ class MatterWaveApp(App[None]):
         other leaves the message with the file named, and a send that was
         waiting stays in the composer for the person to decide. When the
         last scan comes back clean, the waiting send goes."""
-        attachment = next((a for a in self.pending_attachments if a.id == attachment_id), None)
-        if attachment is None:
+        key = self._attachment_key(attachment_id)
+        if key is None:
             return
+        held = self.attachment_drafts[key]
+        attachment = next(a for a in held if a.id == attachment_id)
         if scan_status == SCAN_CLEAN:
-            self.pending_attachments = [
-                replace(a, scan_status=SCAN_CLEAN) if a.id == attachment_id else a
-                for a in self.pending_attachments
+            self.attachment_drafts[key] = [
+                replace(a, scan_status=SCAN_CLEAN) if a.id == attachment_id else a for a in held
             ]
         else:
-            self.pending_attachments = [
-                a for a in self.pending_attachments if a.id != attachment_id
-            ]
-            self.send_after_scan = False
+            kept = [a for a in held if a.id != attachment_id]
+            if kept:
+                self.attachment_drafts[key] = kept
+            else:
+                del self.attachment_drafts[key]
+            if key == self._draft_key():
+                self.send_after_scan = False
             self.notify(scan_refusal(attachment.filename, scan_status), severity="error")
         self.render_status()
         if self.send_after_scan and not any(
@@ -1391,6 +1436,44 @@ class MatterWaveApp(App[None]):
         ):
             self.send_after_scan = False
             self.action_send()
+
+    def _attachment_key(self, attachment_id: str) -> str | None:
+        """Which conversation's pending files hold this upload, if any."""
+        for key, held in self.attachment_drafts.items():
+            if any(a.id == attachment_id for a in held):
+                return key
+        return None
+
+    def action_detach(self) -> None:
+        """`I`: take a file off the open conversation's next message."""
+        pending = list(self.pending_attachments)
+        if not pending:
+            self.notify("Nothing is attached to this message.")
+            return
+
+        def chosen(attachment_id: str | None) -> None:
+            if attachment_id:
+                self.apply_detach(attachment_id)
+
+        self.push_screen(
+            PendingAttachments([(a.id, attachment_label(a)) for a in pending]), chosen
+        )
+
+    @work(group="action")
+    async def apply_detach(self, attachment_id: str) -> None:
+        """Off the message at once; then off the server too, where nothing
+        else names the upload and it would count against the quota until
+        the sweeper took it."""
+        removed = next((a for a in self.pending_attachments if a.id == attachment_id), None)
+        if removed is None:
+            return
+        self.pending_attachments = [a for a in self.pending_attachments if a.id != attachment_id]
+        self.render_status()
+        self.notify(f"Removed {removed.filename}.")
+        # The file is off the message whatever the server says; one it
+        # keeps is unreferenced, and its sweeper removes it.
+        with contextlib.suppress(Exception):
+            await self.api.delete_attachment(attachment_id)
 
     @work(group="action")
     async def action_cycle_filter(self) -> None:
@@ -1629,6 +1712,8 @@ class MatterWaveApp(App[None]):
         # The drafts, ratings, notifications and sidebar were the old
         # account's; the new account's state is read back whole.
         self.drafts.clear()
+        self.attachment_drafts.clear()
+        self.send_after_scan = False
         self.feedback = {}
         self.notification_rows = []
         self.unread_notifications = None

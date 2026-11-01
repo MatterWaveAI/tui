@@ -2,8 +2,8 @@
 prompt and yes/no the conversation actions share, the per-thread custom
 instructions editor, the reply-feedback dialog, the notifications inbox,
 the share-links list, the library of folders and tags, the prompt roles
-library and its editor, the account switcher and the microphone clip
-recorder."""
+library and its editor, the files waiting for the next message, the account
+switcher and the microphone clip recorder."""
 
 from __future__ import annotations
 
@@ -500,6 +500,53 @@ class Roles(ModalScreen[str | None]):
     async def _role_deleted(self, name: str) -> None:
         self.roles = await self._delete(name)
         self._redraw()
+
+    def action_dismiss_none(self) -> None:
+        self.dismiss(None)
+
+
+class PendingAttachments(ModalScreen[str | None]):
+    """The files waiting for the open conversation's next message: Enter
+    or `x` hands the highlighted one's id back to be taken off, Esc hands
+    back None."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss_none", "Cancel"),
+        Binding("x,delete", "remove", "Remove"),
+    ]
+    DEFAULT_CSS = """
+    PendingAttachments { align: center middle; }
+    PendingAttachments > Vertical { width: 70; height: auto; max-height: 85%;
+        border: round $accent; background: $surface; padding: 0 1; }
+    """
+
+    def __init__(self, rows: list[tuple[str, str]]) -> None:
+        super().__init__()
+        # (attachment id, the label the status line gives it)
+        self.rows = rows
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(
+                "Attached to the next message (Enter or x removes the highlighted one, "
+                "Esc cancels)",
+                markup=False,
+            )
+            yield OptionList(
+                *(Option(label, id=f"attachment-{i}") for i, (_, label) in enumerate(self.rows)),
+                id="attachment-rows",
+            )
+
+    def on_mount(self) -> None:
+        self.query_one("#attachment-rows", OptionList).focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.action_remove()
+
+    def action_remove(self) -> None:
+        index = self.query_one("#attachment-rows", OptionList).highlighted
+        if index is not None and index < len(self.rows):
+            self.dismiss(self.rows[index][0])
 
     def action_dismiss_none(self) -> None:
         self.dismiss(None)

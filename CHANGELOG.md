@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A conversation a connector opened (one started from a Slack routing
+  rule) is captioned with where it is answered -- `Slack #support` --
+  and, while open, a notice over the composer says so, with the thread's
+  link. A send, edit or regenerate shows the notice instead of posting,
+  since the server refuses them (409 `connector_conversation`); the fork
+  (`f`) is the way to continue here. The 409 the server answers a stale
+  row's send with locks the conversation the same way. Needs
+  `matterwave-sdk` with `Conversation.source` and
+  `ConnectorConversationError`.
 - Marks a screen reader can say: a symbol that stands alone carries its
   word (`📌 pinned`, `👍 good`, `⛔ critical:`), list rows say "this chat",
   "current" or "unread" in words instead of a bare dot, and `--plain`

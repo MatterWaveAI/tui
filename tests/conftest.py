@@ -52,6 +52,14 @@ def state_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.Mon
     return root
 
 
+@pytest.fixture(autouse=True)
+def no_config_file(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch):
+    """No test reads the developer's own config file or profile."""
+    monkeypatch.setenv("MATTERWAVE_CONFIG", str(tmp_path_factory.mktemp("config") / "none.toml"))
+    monkeypatch.delenv("MATTERWAVE_PROFILE", raising=False)
+    monkeypatch.delenv("MATTERWAVE_MODEL", raising=False)
+
+
 @pytest.fixture
 def recorded():
     def load(name: str) -> str:

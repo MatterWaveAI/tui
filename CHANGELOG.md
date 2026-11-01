@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A config file (`matterwave-tui config` shows where, and where each
+  setting comes from): the server, the model, the theme, the image mode
+  and the shell, and named profiles of them chosen with `--profile` or
+  `MATTERWAVE_PROFILE`. Each profile signs in on its own keyring entry.
+  The command line wins over the environment, which wins over the
+  profile, which wins over the file; a setting the file does not know is
+  an error. `MATTERWAVE_MODEL` sets the model.
 - Every option the platform takes for a turn, a share and an upload:
   `/temp 0.3` sets the open conversation's temperature for its turns
   (`/temp default` goes back to the server's); `s` opens a share dialog

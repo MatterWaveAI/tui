@@ -106,7 +106,12 @@ def test_a_tty_opens_the_app(capsys, monkeypatch):
     opened: list[str] = []
 
     def run_app(
-        base_url: str, credential: object, *, shell_mode: bool = False, model: str | None = None
+        base_url: str,
+        credential: object,
+        *,
+        shell_mode: bool = False,
+        model: str | None = None,
+        **_: object,
     ) -> None:
         opened.append(base_url)
 
@@ -122,7 +127,12 @@ def test_shell_flag_reaches_the_app(monkeypatch):
     opened: list[bool] = []
 
     def run_app(
-        base_url: str, credential: object, *, shell_mode: bool = False, model: str | None = None
+        base_url: str,
+        credential: object,
+        *,
+        shell_mode: bool = False,
+        model: str | None = None,
+        **_: object,
     ) -> None:
         opened.append(shell_mode)
 
@@ -385,7 +395,12 @@ def test_m_reaches_the_app(monkeypatch):
     opened: list[str | None] = []
 
     def run_app(
-        base_url: str, credential: object, *, shell_mode: bool = False, model: str | None = None
+        base_url: str,
+        credential: object,
+        *,
+        shell_mode: bool = False,
+        model: str | None = None,
+        **_: object,
     ) -> None:
         opened.append(model)
 

@@ -178,6 +178,31 @@ Stopping an answer with `Esc` closes the stream; the server keeps what it had se
 turn, which is read back. A stream that drops is resumed once by `Last-Event-ID` (the SDK's own
 resume) before it is reported as cut off.
 
+## Configuration
+
+`matterwave-tui config` prints where the config file is and where each setting comes from. The
+file is `~/.config/matterwave/config.toml` on Linux (`$XDG_CONFIG_HOME`), `%APPDATA%\matterwave\config.toml`
+on Windows and `~/Library/Application Support/matterwave/config.toml` on macOS:
+
+```toml
+base_url = "https://app.example.com"   # the deployment
+model = "grt-nano"                     # the model for one-shot prompts and the app's turns
+theme = "nord"                         # a Textual theme, by name
+images = "auto"                        # as MATTERWAVE_IMAGES
+shell = "pwsh"                         # as MATTERWAVE_SHELL
+default_profile = "work"
+
+[profiles.work]                        # matterwave-tui --profile work
+base_url = "https://work.example.com"
+model = "grt-max"
+```
+
+A setting comes from the first place that has it: the command line, then the environment, then the
+chosen profile, then the file's top level, then the default. A profile is chosen by `--profile`,
+else `MATTERWAVE_PROFILE`, else `default_profile`, and signs in on its own keyring entry (the
+server's origin and the profile's name), so two accounts on one server can sit side by side. A
+setting the file does not know is an error rather than a silent default.
+
 ## Environment
 
 | Variable | Does |
@@ -186,6 +211,9 @@ resume) before it is reported as cut off.
 | `MATTERWAVE_API_KEY` | an `mw_` key for this shell, used instead of the keyring and never stored |
 | `MATTERWAVE_IMAGES` | `off` never draws images; `kitty`, `iterm2` or `sixel` forces a protocol; unset or `auto` detects |
 | `MATTERWAVE_SHELL` | the shell the shell assistant writes and runs commands for (`pwsh`, `cmd`, `/bin/zsh`, …) |
+| `MATTERWAVE_MODEL` | the model, when `-m` is not given |
+| `MATTERWAVE_CONFIG` | another config file than the platform's own (see [Configuration](#configuration)) |
+| `MATTERWAVE_PROFILE` | the profile, when `--profile` is not given |
 | `MATTERWAVE_STATE_DIR` | where the dismissed announcements and the prompt roles are kept, as `<dir>/matterwave-tui`; else the platform's state directory: `$XDG_STATE_HOME` or `~/.local/state` on Linux, `%LOCALAPPDATA%` on Windows, `~/Library/Application Support` on macOS |
 
 ## Development

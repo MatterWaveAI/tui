@@ -7,7 +7,7 @@ import contextlib
 import json
 import os
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -368,9 +368,16 @@ class MatterWaveApp(App[None]):
         relogin: DeviceLoginFn | None = None,
         shell_mode: bool = False,
         model: str | None = None,
+        theme: str | None = None,
+        environ: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__()
         self.api = api
+        # The environment the image and shell settings are read from: the
+        # process's own, with the config file's filling its gaps.
+        environ = os.environ if environ is None else environ
+        # The config file's theme, applied once the app is up.
+        self.configured_theme = theme
         self.relogin_fn = relogin
         self.conversations: list[Conversation] = []
         self.conversation: Conversation | None = None
@@ -449,7 +456,7 @@ class MatterWaveApp(App[None]):
         # Terminal graphics: which protocol this terminal speaks (None is
         # the plain placeholder), what the layer has drawn, and the writes
         # waiting for the next refresh to carry them out.
-        self.image_backend: str | None = images.detect_backend(os.environ)
+        self.image_backend: str | None = images.detect_backend(environ)
         self._image_placements: dict[str, images.Placement] = {}
         self._image_ops: list[str] = []
         self._image_seq = 0
@@ -469,7 +476,7 @@ class MatterWaveApp(App[None]):
         # the person confirms. `--shell` starts with it on; /shell toggles.
         # The runner is an attribute so a test can stand in.
         self.shell_mode = shell_mode
-        self.shell = detect_shell(os.environ)
+        self.shell = detect_shell(environ)
         self._run_shell: Callable[[str], Awaitable[str]] = self._run_in_shell
         # The answer the turn that just ended produced, for the shell gate.
         self._completed_answer: Message | None = None
@@ -508,6 +515,15 @@ class MatterWaveApp(App[None]):
         yield Footer()
 
     async def on_mount(self) -> None:
+        if self.configured_theme:
+            if self.configured_theme in self.available_themes:
+                self.theme = self.configured_theme
+            else:
+                self.notify(
+                    f"No theme named {self.configured_theme}; the palette's "
+                    "“Change theme” lists them.",
+                    severity="warning",
+                )
         self.set_interval(LIVE_REDRAW_S, self._flush_live)
         self.set_interval(1.0, self._tick_rate_limit)
         if self.image_backend is not None:

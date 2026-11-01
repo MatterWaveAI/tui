@@ -6,6 +6,8 @@
     cat notes | matterwave-tui         a piped-in prompt is the prompt
     matterwave-tui login [--key [K]]   store a key, or sign in by device code
     matterwave-tui logout [--local]    revoke the stored device key, then forget it
+    matterwave-tui config              the config file, and where each setting comes from
+    matterwave-tui --profile work      the settings and the sign-in of one profile
 
 stdout carries the answer and nothing else; sign-in prompts and every
 note go to stderr, so `matterwave-tui -p "..." > answer.txt` holds only
@@ -19,7 +21,7 @@ import asyncio
 import getpass
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from matterwave_sdk import frames as fr
 from matterwave_sdk.errors import APIConnectionError, APIError, AuthenticationError
@@ -36,6 +38,7 @@ from .auth import (
     resolve_credential,
     save_token,
 )
+from .config import Settings, config_path, keyring_entry, load_config, resolve
 from .failures import Kind, classify
 from .shell import Shell, detect_shell, run_shell_command, shell_command, shell_request
 
@@ -122,14 +125,15 @@ def _key_arg(value: object) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _login(base_url: str, key: str | None) -> str:
+def _login(base_url: str, key: str | None, entry: str | None = None) -> str:
+    where = entry or base_url
     if key:
-        save_token(base_url, key)
-        _note(f"Key stored in the OS keyring for {base_url}.")
+        save_token(base_url, key, entry)
+        _note(f"Key stored in the OS keyring for {where}.")
         return key
     token = asyncio.run(device_login(base_url, _print_code)).access_token
-    save_token(base_url, token)
-    _note(f"Signed in. The credential is in the OS keyring for {base_url}.")
+    save_token(base_url, token, entry)
+    _note(f"Signed in. The credential is in the OS keyring for {where}.")
     return token
 
 
@@ -142,6 +146,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--base-url", help=f"API origin (or MATTERWAVE_BASE_URL; default {DEFAULT_BASE_URL})"
+    )
+    parser.add_argument(
+        "--profile",
+        help="a [profiles.NAME] of the config file: its settings, and its own sign-in "
+        "(or MATTERWAVE_PROFILE)",
     )
     parser.add_argument(
         "--key",
@@ -165,6 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="shell assistant: an answer is a proposed command, run only after you confirm",
     )
     sub = parser.add_subparsers(dest="command")
+    sub.add_parser("config", help="show the config file and where each setting comes from")
     login = sub.add_parser("login", help="store a key, or sign in by device code")
     login.add_argument("--key", nargs="?", const=_PROMPT, dest="login_key")
     logout = sub.add_parser(
@@ -179,8 +189,8 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _logout(base_url: str, *, local: bool) -> int:
-    stored = load_token(base_url)
+def _logout(base_url: str, *, local: bool, entry: str | None = None) -> int:
+    stored = load_token(base_url, entry)
     if stored is None:
         _note("Nothing was stored for this deployment.")
         return EXIT_OK
@@ -193,14 +203,40 @@ def _logout(base_url: str, *, local: bool) -> int:
                 "Run logout again, or `logout --local` to forget it and leave it live."
             )
             return EXIT_ERROR
-    delete_token(base_url)
+    delete_token(base_url, entry)
     _note("Signed out.")
     return EXIT_OK
 
 
+def _show_config(settings: Settings, base_url: str, entry: str) -> int:
+    """`config`: the file, the profile, and each setting with its source,
+    to stdout -- this command's output is the answer."""
+    path = settings.path
+    state = "" if path is None or path.exists() else " (not there; every setting is a default)"
+    print(f"config file: {path}{state}")
+    print(f"profile: {settings.profile or 'none'}")
+    for name, value in settings.values.items():
+        shown = base_url if name == "base_url" else value
+        print(f"{name}: {shown or '-'} ({settings.sources[name]})")
+    print(f"keyring entry: {entry}")
+    return EXIT_OK
+
+
+def load_settings(args: argparse.Namespace) -> Settings:
+    """The command line over the environment over the profile over the
+    config file."""
+    path = config_path()
+    return resolve(
+        load_config(path),
+        flags={"base_url": args.base_url, "model": args.model},
+        profile=args.profile,
+        path=path,
+    )
+
+
 def _ignored_flags(args: argparse.Namespace) -> list[str]:
     """The flags this command line gives that its command does not use."""
-    if args.command not in ("login", "logout"):
+    if args.command not in ("login", "logout", "config"):
         return []
     ignored = [
         flag
@@ -211,7 +247,7 @@ def _ignored_flags(args: argparse.Namespace) -> list[str]:
         )
         if given
     ]
-    if args.command == "logout" and args.key is not None:
+    if args.command in ("logout", "config") and args.key is not None:
         ignored.append("--key")
     return ignored
 
@@ -307,22 +343,36 @@ def main(argv: list[str] | None = None) -> int:
     for flag in _ignored_flags(args):
         _note(f"{flag} does nothing with {args.command}; it was ignored.")
     try:
-        base_url = resolve_base_url(args.base_url, DEFAULT_BASE_URL)
+        settings = load_settings(args)
+        base_url = resolve_base_url(settings.get("base_url"), DEFAULT_BASE_URL)
     except ValueError as exc:
         _note(str(exc))
         return EXIT_USAGE
+    # The image and shell settings are read from an environment where they
+    # are used; a profile's or the file's fill in what the real one leaves
+    # unsaid, in a copy handed down rather than in the process's own.
+    environ = dict(os.environ)
+    for name in ("images", "shell"):
+        variable = f"MATTERWAVE_{name.upper()}"
+        value = settings.get(name)
+        if value and not environ.get(variable):
+            environ[variable] = value
+    entry = keyring_entry(base_url, settings.profile)
+    model = settings.get("model")
     try:
+        if args.command == "config":
+            return _show_config(settings, base_url, entry)
         if args.command == "logout":
-            return _logout(base_url, local=args.local)
+            return _logout(base_url, local=args.local, entry=entry)
         if args.command == "login":
-            _login(base_url, _key_arg(args.login_key) or _key_arg(args.key))
+            _login(base_url, _key_arg(args.login_key) or _key_arg(args.key), entry)
             return EXIT_OK
         key = _key_arg(args.key)
         if key:
-            save_token(base_url, key)
-        credential = resolve_credential(base_url, key)
+            save_token(base_url, key, entry)
+        credential = resolve_credential(base_url, key, entry)
         if credential is None:
-            credential = Credential(_login(base_url, None), "keyring")
+            credential = Credential(_login(base_url, None, entry), "keyring")
     except LoginError as exc:
         _note(str(exc))
         return EXIT_ERROR
@@ -331,14 +381,29 @@ def main(argv: list[str] | None = None) -> int:
         if not prompt:
             _note("Nothing to send: give -p a prompt or pipe one in.")
             return EXIT_USAGE
-        shell = detect_shell(os.environ) if args.shell else None
-        return asyncio.run(run_oneshot(base_url, credential, prompt, args.model, shell=shell))
-    run_app(base_url, credential, shell_mode=args.shell, model=args.model)
+        shell = detect_shell(environ) if args.shell else None
+        return asyncio.run(run_oneshot(base_url, credential, prompt, model, shell=shell))
+    run_app(
+        base_url,
+        credential,
+        shell_mode=args.shell,
+        model=model,
+        entry=entry,
+        theme=settings.get("theme"),
+        environ=environ,
+    )
     return EXIT_OK
 
 
 def run_app(
-    base_url: str, credential: Credential, *, shell_mode: bool = False, model: str | None = None
+    base_url: str,
+    credential: Credential,
+    *,
+    shell_mode: bool = False,
+    model: str | None = None,
+    entry: str | None = None,
+    theme: str | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> None:
     from .app import MatterWaveApp
 
@@ -350,7 +415,7 @@ def run_app(
         since this one started, else a device sign-in in the app. A key the
         person passed explicitly is theirs to replace, so it is not."""
         try:
-            stored = load_token(base_url)
+            stored = load_token(base_url, entry)
         except LoginError:
             stored = None
         if stored and stored != current["token"]:
@@ -360,7 +425,7 @@ def run_app(
             return None
         token = await holder["app"].relogin()
         if token:
-            save_token(base_url, token)
+            save_token(base_url, token, entry)
             current["token"] = token
         return token
 
@@ -368,7 +433,9 @@ def run_app(
         return (await device_login(base_url, on_code)).access_token
 
     api = HttpChatAPI(base_url=base_url, token=credential.token, refresh=refresh)
-    app = MatterWaveApp(api, relogin=device, shell_mode=shell_mode, model=model)
+    app = MatterWaveApp(
+        api, relogin=device, shell_mode=shell_mode, model=model, theme=theme, environ=environ
+    )
     holder["app"] = app
     app.run()
 

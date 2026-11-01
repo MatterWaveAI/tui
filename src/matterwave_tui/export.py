@@ -1,6 +1,7 @@
 """The open conversation as one Markdown file, byte for byte the web
 exporter's format, so the same conversation downloads the same document
-from either client.
+from either client; and the same path as JSON (its messages as data) or
+as one self-contained HTML page (the Markdown, rendered).
 
 Pure client-side: nothing is fetched and nothing is sent. What is on the
 active path is what exports; summaries and system messages are omitted, as
@@ -9,9 +10,13 @@ the web export omits them.
 
 from __future__ import annotations
 
+import html
+import json
 import unicodedata
 from datetime import UTC, datetime
+from pathlib import Path
 
+from markdown_it import MarkdownIt
 from matterwave_sdk.models import Conversation
 
 from .thread import Message, Thread
@@ -84,8 +89,7 @@ def conversation_markdown(
     stamp = moment.strftime("%Y-%m-%dT%H:%M:%SZ")
     title = conversation.title or "MatterWave conversation"
     out = [
-        f"# {title}\n\n"
-        f"Exported from MatterWave on {stamp}. Conversation `{conversation.id}`.\n\n"
+        f"# {title}\n\nExported from MatterWave on {stamp}. Conversation `{conversation.id}`.\n\n"
     ]
     for item in thread.view():
         # A `Divider` is a summary's fold, and a summary message itself is
@@ -96,11 +100,58 @@ def conversation_markdown(
     return "".join(out)
 
 
+def conversation_json(
+    conversation: Conversation, thread: Thread, *, now: datetime | None = None
+) -> str:
+    """The active path as JSON: the conversation's id and title, the
+    export stamp, and each message the Markdown export would show, with
+    its parts as the server keeps them."""
+    moment = (now or datetime.now(UTC)).astimezone(UTC)
+    messages = [
+        {
+            "id": item.id,
+            "role": item.role,
+            "model": item.model,
+            "created_at": item.created_at,
+            "content": item.content,
+            "parts": item.parts,
+        }
+        for item in thread.view()
+        if isinstance(item, Message) and item.role != "system"
+    ]
+    document = {
+        "id": conversation.id,
+        "title": conversation.title,
+        "exported_at": moment.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "messages": messages,
+    }
+    return json.dumps(document, indent=2, ensure_ascii=False) + "\n"
+
+
+def conversation_html(
+    conversation: Conversation, thread: Thread, *, now: datetime | None = None
+) -> str:
+    """The Markdown export rendered to one HTML page. Raw HTML in a message
+    is shown as text, never run: the model wrote it."""
+    body = MarkdownIt("commonmark", {"html": False}).render(
+        conversation_markdown(conversation, thread, now=now)
+    )
+    title = html.escape(conversation.title or "MatterWave conversation")
+    return (
+        '<!doctype html>\n<html><head><meta charset="utf-8">'
+        f"<title>{title}</title></head>\n<body>\n{body}</body></html>\n"
+    )
+
+
+EXPORTERS = {"md": conversation_markdown, "json": conversation_json, "html": conversation_html}
+
+
 def _filename_stem(title: str) -> str:
     """The title as a safe stem, exactly as the web exporter derives it."""
     text = unicodedata.normalize("NFKC", title)
     text = "".join(
-        " " if (unicodedata.category(character)[0] == "C" or character in UNSAFE_CHARACTERS)
+        " "
+        if (unicodedata.category(character)[0] == "C" or character in UNSAFE_CHARACTERS)
         else character
         for character in text
     )
@@ -116,3 +167,17 @@ def _filename_stem(title: str) -> str:
 
 def export_filename(conversation: Conversation) -> str:
     return _filename_stem(conversation.title or "") + ".md"
+
+
+def free_path(path: Path) -> Path:
+    """`path`, or the first `name (2).md`, `name (3).md`… beside it that is
+    not taken, the way a browser saves a second download: an export never
+    overwrites a file that is already there."""
+    if not path.exists():
+        return path
+    n = 2
+    while True:
+        candidate = path.with_name(f"{path.stem} ({n}){path.suffix}")
+        if not candidate.exists():
+            return candidate
+        n += 1

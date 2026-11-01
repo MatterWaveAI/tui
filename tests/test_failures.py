@@ -14,7 +14,12 @@ from matterwave_tui.failures import Failure, classify
         ("quota", 429, None, "budget"),
         ("Your organisation's monthly token budget is used up", 402, None, "budget"),
         # keys.KEY_RATE_LIMIT_DETAIL: the window, which clears by itself.
-        ("Rate limit of 60 requests per minute exceeded for this API key.", 429, None, "rate_limited"),
+        (
+            "Rate limit of 60 requests per minute exceeded for this API key.",
+            429,
+            None,
+            "rate_limited",
+        ),
         # entitlement_gate.UpgradeRequired: the plan, which does not.
         ("The Free plan does not include the model 'grt-max'.", 402, None, "plan"),
         ("Lost the connection to the model gateway: read timed out", None, None, "timeout"),

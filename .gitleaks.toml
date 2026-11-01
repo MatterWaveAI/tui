@@ -1,0 +1,10 @@
+# Gitleaks' own rules, as CI and the pre-commit hook run them, with one
+# exception: values that name themselves as stand-ins (the tests' keys and
+# tokens, the README's examples) are not secrets.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Stand-in values in tests and examples"
+regexTarget = "secret"
+regexes = ['''(?i)(test|example|dummy|fake|stub)''']

@@ -21,8 +21,9 @@ def test_the_document_matches_the_web_exporter():
     thread = thread_of(
         [
             message("u1", "user", "What is TUI?"),
-            message("a1", "assistant", "A terminal UI.", parent="u1", created_at="2",
-                    model="grt-nano"),
+            message(
+                "a1", "assistant", "A terminal UI.", parent="u1", created_at="2", model="grt-nano"
+            ),
         ]
     )
     text = conversation_markdown(conversation(cid="c1", title="Demo"), thread, now=NOW)
@@ -53,10 +54,15 @@ def test_reasoning_is_dropped_and_tool_parts_take_the_web_shape():
     tree = [
         message("u1", "user", "weather?"),
         message(
-            "a1", "assistant", "It rains.", parent="u1", created_at="2", model="grt-nano",
+            "a1",
+            "assistant",
+            "It rains.",
+            parent="u1",
+            created_at="2",
+            model="grt-nano",
             parts=[
                 {"type": "reasoning", "text": "the user asks about weather"},
-                {"type": "tool_call", "name": "web_search", "arguments": "{\"q\": \"oslo\"}"},
+                {"type": "tool_call", "name": "web_search", "arguments": '{"q": "oslo"}'},
                 {"type": "tool_result", "output": "raining"},
                 {"type": "tool_result", "output": "boom", "is_error": True},
                 {"type": "text", "text": "It rains."},
@@ -78,7 +84,7 @@ def test_reasoning_is_dropped_and_tool_parts_take_the_web_shape():
         "*Called `web_search`*\n"
         "\n"
         "```json\n"
-        "{\"q\": \"oslo\"}\n"
+        '{"q": "oslo"}\n'
         "```\n"
         "\n"
         "*Tool result:*\n"
@@ -102,7 +108,10 @@ def test_reasoning_is_dropped_and_tool_parts_take_the_web_shape():
 def test_attachments_export_as_the_web_placeholders_and_unknown_as_its_type():
     tree = [
         message(
-            "u1", "user", "", created_at="1",
+            "u1",
+            "user",
+            "",
+            created_at="1",
             parts=[
                 {"type": "image", "filename": "picture.png"},
                 {"type": "document", "filename": "notes.pdf"},
@@ -123,9 +132,14 @@ def test_summaries_and_system_messages_are_omitted():
         message("u1", "user", "q"),
         message("a1", "assistant", "one", parent="u1", created_at="2"),
         message(
-            "s1", "system", "", parent="a1", created_at="3",
-            parts=[{"type": "summary", "text": "They talked.", "covers_from": "u1",
-                    "covers_to": "a1"}],
+            "s1",
+            "system",
+            "",
+            parent="a1",
+            created_at="3",
+            parts=[
+                {"type": "summary", "text": "They talked.", "covers_from": "u1", "covers_to": "a1"}
+            ],
         ),
         message("u2", "user", "after", parent="s1", created_at="4"),
     ]
@@ -141,7 +155,7 @@ def test_the_filename_is_the_web_exporters_derivation():
         ("Héllo, World!", "Héllo, World!.md"),
         ("", "conversation.md"),
         ("   ", "conversation.md"),
-        ("a/b:c*d?e\"f<g>h|i\\j*k", "a b c d e f g h i j k.md"),
+        ('a/b:c*d?e"f<g>h|i\\j*k', "a b c d e f g h i j k.md"),
         ("control\x01\x02chars", "control chars.md"),  # controls become spaces, then collapse
         ("full-width ＡＢＣ", "full-width ABC.md"),  # NFKC folds the width
         ("...dots...", "dots.md"),

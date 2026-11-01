@@ -16,6 +16,7 @@ does not know), so each carries the kind the loop gates it by:
 
 from __future__ import annotations
 
+import asyncio
 import html
 import re
 from dataclasses import dataclass
@@ -24,10 +25,11 @@ from typing import Any
 
 import httpx
 
-from .context import definition_dirs, parse_front_matter
+from .context import definition_dirs, parse_front_matter, read_definition
 
 WEB_FETCH_MAX_BYTES = 200_000
 WEB_FETCH_TIMEOUT_S = 20.0
+WEB_FETCH_TOTAL_S = 60.0
 TODO_STATUSES = ("pending", "in_progress", "completed")
 
 
@@ -155,6 +157,21 @@ def check_url(url: str) -> str | None:
     return None
 
 
+def url_detail(url: str) -> str:
+    """The URL as the approval shows it, with the host the request will
+    really go to when the URL spells it some other way: an international
+    name that looks like a familiar one (`аpple.com` with a Cyrillic а),
+    or a `trusted.example@` user part in front of another host."""
+    try:
+        parsed = httpx.URL(url)
+        host = parsed.raw_host.decode("ascii")
+    except (httpx.InvalidURL, TypeError, ValueError, UnicodeDecodeError):
+        return url
+    if parsed.userinfo or host.lower() != (parsed.host or "").lower():
+        return f"{url}\n(the request goes to the host {host})"
+    return url
+
+
 async def web_fetch(url: str, *, client: httpx.AsyncClient | None = None) -> tuple[str, bool]:
     """The page's text and whether it failed. The user's MatterWave
     credential never rides along: this is a client of its own."""
@@ -166,15 +183,22 @@ async def web_fetch(url: str, *, client: httpx.AsyncClient | None = None) -> tup
     # it sends the request next (a local address, a metadata service).
     http = client or httpx.AsyncClient(follow_redirects=False, timeout=WEB_FETCH_TIMEOUT_S)
     try:
-        async with http.stream("GET", url, headers={"User-Agent": "matterwave-tui (web_fetch)"}) as response:
-            data = bytearray()
-            async for chunk in response.aiter_bytes():
-                data.extend(chunk)
-                if len(data) > WEB_FETCH_MAX_BYTES:
-                    break
-            kind = response.headers.get("content-type", "")
-            status = response.status_code
-            location = response.headers.get("location")
+        # The client's timeout is per read; a server that sends a byte now
+        # and then would keep the run waiting without this one.
+        async with asyncio.timeout(WEB_FETCH_TOTAL_S):
+            async with http.stream(
+                "GET", url, headers={"User-Agent": "matterwave-tui (web_fetch)"}
+            ) as response:
+                data = bytearray()
+                async for chunk in response.aiter_bytes():
+                    data.extend(chunk)
+                    if len(data) > WEB_FETCH_MAX_BYTES:
+                        break
+                kind = response.headers.get("content-type", "")
+                status = response.status_code
+                location = response.headers.get("location")
+    except TimeoutError:
+        return f"The fetch was stopped after {WEB_FETCH_TOTAL_S:g}s.", True
     except httpx.HTTPError as exc:
         return f"The fetch failed: {exc}.", True
     finally:
@@ -223,10 +247,10 @@ def load_subagents(root: Path, *, trusted: bool) -> list[SubagentDefinition]:
         if not folder.is_dir():
             continue
         for path in sorted(folder.glob("*.md")):
-            try:
-                meta, body = parse_front_matter(path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError):
+            text = read_definition(root, path, source)
+            if text is None:
                 continue
+            meta, body = parse_front_matter(text)
             name = meta.get("name")
             name = name if isinstance(name, str) and name else path.stem
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name):

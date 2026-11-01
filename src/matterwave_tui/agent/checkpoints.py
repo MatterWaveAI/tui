@@ -29,7 +29,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from matterwave_sdk import agent as contract
+
 from .settings import folder_key, state_dir
+from .tools import confine_path
 
 GIT_TIMEOUT_S = 30
 INDEX_FILE = "checkpoints.json"
@@ -121,7 +124,13 @@ class Checkpoints:
     def _ensure(self) -> None:
         if (self.store / "git" / "HEAD").exists():
             return
-        self.store.mkdir(parents=True, exist_ok=True)
+        # The blobs are the project's file contents: readable by the user
+        # alone, whatever the umask (on Windows the profile folder's own
+        # access list already is).
+        self.store.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name != "nt":
+            os.chmod(self.store.parent, 0o700)
+            os.chmod(self.store, 0o700)
         self._git("init", "--bare", "--quiet", str(self.store / "git"), bare=False)
 
     # --- the index of checkpoints -------------------------------------------------
@@ -184,10 +193,19 @@ class Checkpoints:
         if not chosen or chosen[0].id != checkpoint_id:
             raise CheckpointError(f"there is no checkpoint {checkpoint_id}")
         paths = sorted({p for r in chosen for p in r.files})
+        # Each path is confined again, as a write: since the snapshot a
+        # folder on the way may have become a link out of the root, and the
+        # index is a file anyone with the user's rights can edit.
+        targets: dict[str, Path] = {}
+        for rel in paths:
+            try:
+                targets[rel] = confine_path(self.root, rel, write=True).absolute
+            except contract.PathRefused as exc:
+                raise CheckpointError(f"{rel} cannot be put back: {exc}") from exc
         self.snapshot(paths, f"before /restore {checkpoint_id}")
         for row in reversed(chosen):
             for rel, blob in row.files.items():
-                absolute = self.root / rel
+                absolute = targets[rel]
                 if blob is None:
                     if absolute.is_file():
                         absolute.unlink()

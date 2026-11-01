@@ -7,15 +7,18 @@ from __future__ import annotations
 
 import asyncio
 import html
+import io
 import json
 import time
 from pathlib import Path
 
 import pytest
-from textual.widgets import OptionList, Static, TextArea
+from rich.console import Console
+from textual.widgets import Markdown, OptionList, Static, TextArea
 
+from matterwave_tui.agent import screen as agent_screen
 from matterwave_tui.agent import settings as agent_settings
-from matterwave_tui.agent.screen import AgentScreen, ApprovalScreen, PickScreen, TrustScreen
+from matterwave_tui.agent.screen import AgentScreen, Answer, ApprovalScreen, PickScreen, TrustScreen
 from matterwave_tui.agent.session import SessionOptions
 from matterwave_tui.app import MatterWaveApp
 
@@ -105,7 +108,10 @@ async def test_an_edit_shows_its_diff_and_rejecting_it_leaves_the_file_byte_iden
 
 
 @pytest.mark.asyncio
-async def test_keys_typed_as_the_dialog_opens_do_not_answer_it(root: Path):
+async def test_keys_typed_as_the_dialog_opens_do_not_answer_it(root: Path, monkeypatch):
+    # A grace long enough that a slow machine cannot outlast it by accident;
+    # the test ends it by moving the dialog's clock, not by waiting.
+    monkeypatch.setattr(agent_screen, "ANSWER_GRACE_S", 30.0)
     before = (root / "src" / "app.py").read_bytes()
     fake = FakeV1([call("edit", path="src/app.py", old_string="return 1", new_string="return 2"),
                    say("ok")])
@@ -113,19 +119,103 @@ async def test_keys_typed_as_the_dialog_opens_do_not_answer_it(root: Path):
     async with app.run_test(size=(120, 40)) as pilot:
         screen = await ready(app, pilot)
         await send(app, pilot, "change it")
-        await until(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+        await until(pilot, lambda: isinstance(app.screen, ApprovalScreen) and hasattr(app.screen, "opened_at"))
         await pilot.press("y", "enter", "y")
         assert isinstance(app.screen, ApprovalScreen) and not app.screen.armed
         assert (root / "src" / "app.py").read_bytes() == before
         # The composer takes no keys while the run goes.
         assert screen.query_one("#agent-composer", TextArea).read_only
-        await until(pilot, lambda: app.screen.armed)
+        app.screen.opened_at -= 60
+        assert app.screen.armed
         await pilot.press("enter")
         assert isinstance(app.screen, ApprovalScreen)
         await pilot.press("n")
         await finished(pilot, screen)
         assert (root / "src" / "app.py").read_bytes() == before
         assert not screen.query_one("#agent-composer", TextArea).read_only
+
+
+OSC52 = "\x1b]52;c;aGFja2Vk\x07"
+
+
+def terminal_output(app: MatterWaveApp) -> str:
+    """What the compositor would write to the terminal for the screen."""
+    update = app.screen._compositor.render_update(full=True)
+    buffer = io.StringIO()
+    Console(file=buffer, force_terminal=True, color_system="truecolor", legacy_windows=False).print(
+        update, end=""
+    )
+    return buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_escape_sequences_from_files_commands_and_the_model_never_reach_the_terminal(root: Path):
+    # A file that sets the clipboard (OSC 52) when printed, a command whose
+    # output clears the screen, and a model that answers with both.
+    (root / "src" / "app.py").write_text(f"def main():  # {OSC52}\n    return 1\n", encoding="utf-8")
+    fake = FakeV1([
+        call("read_file", path="src/app.py"),
+        call("edit", path="src/app.py", old_string="return 1", new_string="return 2"),
+        call("run_shell", command=f"echo hi # {OSC52}"),
+        say(f"done \x1b[2J{OSC52}"),
+    ])
+    app = app_for(fake, root)
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await ready(app, pilot)
+        await send(app, pilot, "change it")
+        await until(pilot, lambda: isinstance(app.screen, ApprovalScreen) and hasattr(app.screen, "opened_at"))
+        detail = app.screen.query_one("#approval-detail", Static).content.code
+        assert "\\x1b]52;c;aGFja2Vk\\x07" in detail and "\x1b]52" not in detail
+        assert "\x1b]52" not in terminal_output(app)
+        app.screen.opened_at -= 60
+        await pilot.press("y")
+        await until(pilot, lambda: isinstance(app.screen, ApprovalScreen) and app.screen.request.kind == "shell"
+                    and hasattr(app.screen, "opened_at"))
+        command = app.screen.query_one("#approval-detail", Static).content.code
+        assert command == "echo hi # \\x1b]52;c;aGFja2Vk\\x07"
+        assert "\x1b]52" not in terminal_output(app)
+        app.screen.opened_at -= 60
+        await pilot.press("n")
+        await finished(pilot, screen)
+        output = terminal_output(app)
+        assert "\x1b]52" not in output and "\x1b[2J" not in output
+        texts = "\n".join(screen.log_texts())
+        assert "\\x1b]52" in texts and "\\x1b[2J" in texts
+
+
+@pytest.mark.asyncio
+async def test_only_web_links_open_from_the_agents_answer(root: Path, monkeypatch):
+    # Textual hands a clicked link to the system's opener: a `file:` link to
+    # a script the agent wrote would run it.
+    fake = FakeV1([say("[run me](file:///C:/tmp/x.bat) and [docs](https://example.com/docs)")])
+    app = app_for(fake, root)
+    opened: list[str] = []
+    monkeypatch.setattr(app, "open_url", lambda url, **_: opened.append(url))
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await ready(app, pilot)
+        await send(app, pilot, "links")
+        await finished(pilot, screen)
+        answer = screen.query_one(Answer)
+        for href in ("file:///C:/tmp/x.bat", "https://example.com/docs"):
+            answer.post_message(Markdown.LinkClicked(answer, href))
+            await pilot.pause()
+    assert opened == ["https://example.com/docs"]
+
+
+@pytest.mark.asyncio
+async def test_pick_lists_do_not_read_titles_as_markup(root: Path):
+    agent_settings.record_run(root, "conv-x", "[@click=app.quit]quit[/] [b]bold", "2026-10-31")
+    fake = FakeV1()
+    app = app_for(fake, root)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await ready(app, pilot)
+        await send(app, pilot, "/resume")
+        await until(pilot, lambda: isinstance(app.screen, PickScreen))
+        await pilot.pause()
+        # Shown as typed: markup would have eaten the brackets (and made a
+        # click run app.quit).
+        assert "[@click=app.quit]quit[/] [b]bold" in screenshot_text(app)
+        await pilot.press("escape")
 
 
 @pytest.mark.asyncio

@@ -3,7 +3,9 @@
 Output formats:
 
 - `text`: the answer on stdout as it streams; tool lines and notices on
-  stderr, so a pipe gets only the answer.
+  stderr, so a pipe gets only the answer. Control characters and bidi
+  overrides are spelled out (`\\x1b`), so neither the model nor a file can
+  write escape sequences to the terminal.
 - `json`: one JSON document when the run ends: the result, the usage and
   an error flag (`is_error`), with the status and its message.
 - `stream-json`: one JSON object per line as the run goes (`init`, `text`,
@@ -25,6 +27,7 @@ from matterwave_sdk.models import ToolCall
 
 from .context import expand_mentions, load_commands
 from .loop import ApprovalRequest, Budget, RunEvents, RunOutcome, Status
+from .printable import shown
 from .session import OpenError, SessionOptions, open_session, remember_run
 from .tools import ToolOutcome
 from .wire import AgentWire
@@ -60,6 +63,9 @@ class HeadlessEvents(RunEvents):
         self.notices: list[str] = []
         self.tool_calls = 0
         self.wrote_text = False
+        # A CR that ended one delta waits for the next: CRLF is a line break,
+        # a lone CR is spelled out.
+        self._cr = False
 
     def line(self, record: dict[str, Any]) -> None:
         self.out.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -69,13 +75,27 @@ class HeadlessEvents(RunEvents):
         if agent is not None:
             return
         if self.format == "text":
-            self.out.write(delta)
+            if self._cr:
+                delta, self._cr = "\r" + delta, False
+            if delta.endswith("\r"):
+                delta, self._cr = delta[:-1], True
+            self.out.write(shown(delta))
             self.out.flush()
             self.wrote_text = True
         elif self.format == "stream-json":
             self.line({"type": "text", "text": delta})
 
+    def end_text(self) -> None:
+        if self._cr:
+            self._cr = False
+            self.out.write(shown("\r"))
+
+    def err_line(self, text: str) -> None:
+        self.err.write(shown(text, strict=True) + "\n")
+
     def on_reply(self, content: str | None, calls: list[ToolCall], agent: str | None) -> None:
+        if self.format == "text" and agent is None:
+            self.end_text()
         if self.format == "text" and agent is None and calls and self.wrote_text:
             self.out.write("\n")
             self.wrote_text = False
@@ -92,7 +112,7 @@ class HeadlessEvents(RunEvents):
             self.line(record)
         elif self.format == "text":
             prefix = f"[{agent}] " if agent else ""
-            self.err.write(f"{prefix}⚙ {summary}\n")
+            self.err_line(f"{prefix}⚙ {summary}")
 
     def on_tool_end(self, call: ToolCall, outcome: ToolOutcome, agent: str | None) -> None:
         if self.format == "stream-json":
@@ -104,14 +124,14 @@ class HeadlessEvents(RunEvents):
                 record["agent"] = agent
             self.line(record)
         elif self.format == "text" and outcome.is_error:
-            self.err.write(f"  ✗ {outcome.text.splitlines()[0] if outcome.text else ''}\n")
+            self.err_line(f"  ✗ {outcome.text.splitlines()[0] if outcome.text else ''}")
 
     def on_notice(self, text: str) -> None:
         self.notices.append(text)
         if self.format == "stream-json":
             self.line({"type": "notice", "text": text})
         elif self.format == "text":
-            self.err.write(f"note: {text}\n")
+            self.err_line(f"note: {text}")
 
     def on_todos(self, todos: list[dict[str, str]]) -> None:
         if self.format == "stream-json":
@@ -202,10 +222,11 @@ async def run_headless(
         notices=events.notices, tool_calls=events.tool_calls,
     )
     if output_format == "text":
+        events.end_text()
         if events.wrote_text:
             stdout.write("\n")
         if not outcome.ok and outcome.message:
-            stderr.write(f"{outcome.message}\n")
+            events.err_line(outcome.message)
     elif output_format == "stream-json":
         events.line(record)
     else:

@@ -38,6 +38,9 @@ from .shell import ProcessTree, child_env
 PROTOCOL_VERSION = "2025-06-18"
 CLIENT_INFO = {"name": "matterwave-tui", "version": __version__}
 RESULT_MAX_CHARS = 64_000
+# What one HTTP answer may be before it is refused unread: a server that
+# streams without end must not fill memory.
+HTTP_ANSWER_MAX_BYTES = 16 * 1024 * 1024
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
@@ -124,6 +127,9 @@ class StdioServer:
         self._next = 0
         self._reader: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
+        # Why the server can no longer answer (it exited, or sent a line too
+        # long to read); a request then fails at once instead of timing out.
+        self._gone: str | None = None
 
     async def start(self) -> None:
         command = self.config.command or ""
@@ -171,7 +177,11 @@ class StdioServer:
         stdout = tree.proc.stdout
         try:
             while True:
-                line = await stdout.readline()
+                try:
+                    line = await stdout.readline()
+                except ValueError:
+                    self._gone = "it sent a message too large to read"
+                    break
                 if not line:
                     break
                 try:
@@ -195,12 +205,15 @@ class StdioServer:
                 if future is not None and not future.done():
                     future.set_result(message)
         finally:
+            self._gone = self._gone or "the server exited"
             for future in self._pending.values():
                 if not future.done():
-                    future.set_exception(McpFailure("the server exited"))
+                    future.set_exception(McpFailure(self._gone))
             self._pending.clear()
 
     async def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if self._gone is not None:
+            raise McpFailure(self._gone)
         async with self._lock:
             self._next += 1
             request_id = self._next
@@ -274,21 +287,36 @@ class HttpServer:
         return headers
 
     async def _post(self, body: dict[str, Any]) -> httpx.Response:
+        """One POST, its answer read to at most `HTTP_ANSWER_MAX_BYTES`."""
         if self._client is None:
             raise McpFailure("the server is not connected")
-        response = await self._client.post(_expand(self.config.url or ""), json=body, headers=self._headers())
-        session = response.headers.get("mcp-session-id")
-        if session:
-            self._session = session
-        return response
+        url = _expand(self.config.url or "")
+        async with self._client.stream("POST", url, json=body, headers=self._headers()) as response:
+            data = bytearray()
+            async for chunk in response.aiter_bytes():
+                data.extend(chunk)
+                if len(data) > HTTP_ANSWER_MAX_BYTES:
+                    raise McpFailure(
+                        f"the answer is larger than {HTTP_ANSWER_MAX_BYTES // (1024 * 1024)} MB"
+                    )
+            session = response.headers.get("mcp-session-id")
+            if session:
+                self._session = session
+            kind = response.headers.get("content-type", "")
+            return httpx.Response(response.status_code, headers={"content-type": kind}, content=bytes(data))
 
     async def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         self._next += 1
         request_id = self._next
         try:
-            response = await self._post(
-                {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
+            # The client's timeout is per read: a server that trickles its
+            # answer would otherwise hold the run for as long as it likes.
+            response = await asyncio.wait_for(
+                self._post({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}),
+                self.config.timeout_s,
             )
+        except TimeoutError as exc:
+            raise McpFailure(f"{method} timed out after {self.config.timeout_s:g}s") from exc
         except httpx.HTTPError as exc:
             raise McpFailure(f"{method} failed: {exc}") from exc
         if response.status_code >= 400:
@@ -391,6 +419,7 @@ class McpManager:
         self.factory = factory
         self.servers: dict[str, McpServer] = {}
         self.tools: dict[str, McpToolInfo] = {}
+        self.clashes: set[str] = set()
         self.notices: list[str] = []
         self.started = False
 
@@ -450,9 +479,24 @@ class McpManager:
                     read_only=read_only,
                     trusted=config.trust,
                 )
+                owner = self.tools.get(info.qualified)
+                if owner is not None and (owner.server, owner.name) == (info.server, info.name):
+                    continue
+                if owner is not None:
+                    # Two tools that come out under one name once spelled
+                    # safely (or cut at 64 characters): neither is offered,
+                    # so a call can never reach a server it was not meant for.
+                    self.clashes.add(info.qualified)
+                    self.notices.append(
+                        f"MCP tools {owner.server}.{owner.name} and {info.server}.{info.name} "
+                        f"share the name {info.qualified}; neither is offered."
+                    )
+                    continue
                 self.tools[info.qualified] = info
 
         await asyncio.gather(*(one(s, c) for s, c in plan))
+        for name in self.clashes:
+            self.tools.pop(name, None)
         return list(self.notices)
 
     async def call(self, qualified: str, arguments: dict[str, Any]) -> tuple[str, bool]:

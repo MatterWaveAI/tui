@@ -345,9 +345,16 @@ async def test_compact_summarises_a_stored_run_with_the_conversations_compaction
     await session.run("look")
     note = await session.compact(force=True)
     assert fake.compactions == 1 and "summarised" in note
-    assert session.messages[0]["role"] == "user"
-    assert "The run so far, summarised." in session.messages[0]["content"]
-    assert "look" in session.messages[0]["content"]
+    assert session.summary == "The run so far, summarised."
+    assert session.messages[0] == {"role": "user", "content": "look"}
+    fake.script.append(say("ok"))
+    await session.run("next")
+    # The summary rides in the system prompt; the stored user turn is the
+    # user's own words, not the summary pasted over them.
+    assert "The run so far, summarised." in system_prompt(fake, -1)
+    stored = fake.stored[session.conversation_id]
+    assert [m["content"] for m in stored if m["role"] == "user"] == ["look", "next"]
+    assert fake.branched == 0
 
 
 # --- context files, trust, mentions, commands ----------------------------------------------------------

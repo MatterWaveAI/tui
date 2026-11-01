@@ -739,6 +739,8 @@ class FakeV1:
         self.conversations: dict[str, dict[str, Any]] = {}
         self.stored: dict[str, list[dict[str, Any]]] = {}
         self.compactions = 0
+        # Rounds the API would have stored on a branch (see _store_request).
+        self.branched = 0
         self.calls_made = 0
         self._ids = 0
 
@@ -822,13 +824,31 @@ class FakeV1:
                 "parent_id": stored[-1]["id"] if stored else None,
                 "parts": [{"type": "text", "text": last.get("content") or ""}],
             })
-        elif last.get("role") == "tool" and stored and stored[-1]["role"] == "assistant":
-            parts = stored[-1]["parts"]
+        elif last.get("role") == "tool":
+            start = len(messages)
+            while start > 0 and messages[start - 1].get("role") == "tool":
+                start -= 1
+            ids = {c.get("id") for c in (messages[start - 1].get("tool_calls") or [])} if start else set()
+            holder = next(
+                (m for m in reversed(stored) if m["role"] == "assistant"
+                 and any(p.get("type") == "tool_call" and p.get("id") in ids for p in m["parts"])),
+                None,
+            )
+            if holder is None:
+                return
+            if holder is not stored[-1]:
+                # As the API does: a round closed anywhere but at the end of
+                # the thread is stored on a branch beside its call, the way a
+                # retried request is, and what came after it leaves the path.
+                self.branched += 1
+                holder = {**holder, "id": self._next_id("m"), "parts": [dict(p) for p in holder["parts"]]}
+                stored.append(holder)
+            parts = holder["parts"]
             have = {p.get("id") for p in parts if p.get("type") == "tool_result"}
             called = {p.get("id") for p in parts if p.get("type") == "tool_call"}
-            for m in messages:
+            for m in messages[start:]:
                 ident = m.get("tool_call_id")
-                if m.get("role") == "tool" and ident in called and ident not in have:
+                if ident in called and ident not in have:
                     parts.append({"type": "tool_result", "id": ident, "output": m.get("content")})
 
     def _store_reply(self, cid: str, text: str, tool_calls: list[dict[str, Any]]) -> None:

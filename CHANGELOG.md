@@ -54,8 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/resume`, `/trust`, `/mcp`, `/agents`, `/clear`, `/chat`, and custom
   commands from Markdown files (`commands/` in the config folder or a
   trusted project's `.matterwave/commands/`).
-- Agent compaction: old tool output is folded first (no model call), then
-  a stored run is summarised with the conversation's compaction.
+- Agent compaction: old tool output is folded first (no model call). Mid-run
+  the oldest rounds are then left out of the prompt, and before the next
+  prompt a stored run is summarised with the conversation's compaction; the
+  summary rides in the system prompt, so each round is stored on one path
+  and each stored user turn is the user's own words.
 - MCP client: stdio and Streamable HTTP servers from user and (trusted)
   project settings, each with a tool allow-list and `trust`; MatterWave's
   own `/mcp` pre-wired with the user's credential. MCP writes go through
@@ -71,6 +74,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on macOS. Web fetch does not follow redirects.
 - `FakeV1` in `tests/fake_api.py`: a scripted `/v1` under the real adapter
   and the SDK, with golden files for the headless output formats.
+
+### Security
+
+- Escape sequences from files, diffs, commands, MCP servers and the model
+  are spelled out (`\x1b`) in the agent screen and the headless text
+  output, with bidi overrides and, in approval dialogs, zero-width
+  characters: nothing shown can redraw a dialog or set the clipboard.
+  Pick lists no longer read titles and file names as markup, and only
+  `http`/`https` links in the agent's answers open on a click (Textual
+  hands any link to the system's opener, which runs a `file:` script).
+- A write re-checks after the approval: if the file changed or its path
+  now leads elsewhere (a folder swapped for a link), nothing is written.
+  Overwriting a binary file shows the full text that replaces it.
+- On Windows, NTFS streams (`key.pem::$DATA`), names ending in a dot or a
+  space (`.git `) and device names (`CON`, `NUL.txt`) are refused.
+- Every write asks, in every mode, when the workspace holds the home
+  folder, and so does a write to the user's own MatterWave config or state
+  folder inside the workspace. In `auto-edit`, a command's approval names
+  the files changed without asking since the last approval.
+- Project context files, commands and subagents are read under the tools'
+  confinement (a link out of the root is not loaded); `/restore` confines
+  each path again; the checkpoint store is readable by the user alone.
+- Reads are bounded: a large file is read a window at a time, a line over
+  32 KB is shown cut, pipes and devices are not read, and edits work on
+  files up to 8 MB. An HTTP MCP answer over 16 MB is refused, each MCP
+  request and each web fetch has an overall deadline, a stdio server that
+  sends an unreadable line fails at once, and MCP tools that clash once
+  their names are made safe are both left out.
 
 ### Changed
 

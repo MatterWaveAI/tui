@@ -156,6 +156,11 @@ async def open_session(
     )
     if session.checkpoints is None:
         notices.append("git is not on PATH, so file checkpoints (/restore) are off.")
+    if session.holds_home:
+        notices.append(
+            "This workspace holds your home folder (shell profiles, ~/.ssh, startup items), so "
+            "every file change asks, in every mode. Open the agent on a project folder instead."
+        )
 
     resume_id = options.resume
     if options.continue_last and resume_id is None:
@@ -179,6 +184,8 @@ async def resume(session: AgentSession, conversation_id: str) -> int:
     except (APIError, APIConnectionError) as exc:
         raise OpenError(f"The run {conversation_id} could not be read: {exc}") from exc
     session.messages[:] = stored_run_messages(tree)
+    session.summary = None
+    session.unreviewed.clear()
     session.conversation_id = conversation_id
     session.title = tree.title
     await session.load_account_instructions()

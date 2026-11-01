@@ -46,8 +46,12 @@ the SDK's agent contract defines them (`matterwave_sdk.agent`, contract 1.0.0, s
 VS Code extension). Every path is resolved and must stay under the root after links are followed:
 `..`, an absolute path outside the root and a link out of it are refused before anything happens.
 `.env*`, `*.pem`, `id_*`, `.git/` and anything listed in `.matterwaveignore` are refused for
-reading as well as writing. Search also skips what `.gitignore` ignores. Confinement is not a
-sandbox: `run_shell` can reach anything you can, which is why commands ask.
+reading as well as writing. On Windows, a name the system reads as another one is refused too: an
+NTFS stream (`key.pem::$DATA`), a name ending in a dot or a space (`.git `), a device name (`CON`,
+`NUL.txt`). Search also skips what `.gitignore` ignores. A line longer than 32 KB is shown cut, a
+large file is read a window at a time without loading it whole, a pipe or device is not read, and
+`edit` / `write_file` work on files up to 8 MB. Confinement is not a sandbox: `run_shell` can
+reach anything you can, which is why commands ask.
 
 **Approval modes.** The status line always shows the mode. `Shift+Tab` cycles it, and
 `/approval-mode <mode>` sets it (`--save` keeps it as your default).
@@ -62,14 +66,26 @@ sandbox: `run_shell` can reach anything you can, which is why commands ask.
 `yolo` exists only when the session starts with `--yolo`, and it is never saved as a default (a
 `yolo` default in the settings is ignored). When no sandbox is on, `--yolo` warns. A change to
 the files that steer the agent itself (`.matterwave/`, `MATTERWAVE.md`, `AGENTS.md`,
-`MATTERWAVE.local.md`) is asked about in every mode, `yolo` included, since it outlasts the
-session.
+`MATTERWAVE.local.md`, and your own MatterWave config and state folders when the workspace holds
+them) is asked about in every mode, `yolo` included, since it outlasts the session. So is every
+change when the workspace is your home folder or a folder above it, where a shell profile,
+`~/.ssh/config` or the startup folder would run things later without a command being approved.
 
 Each change in `ask` mode opens its unified diff: `y` applies it and `n` rejects it, leaving the
-file byte for byte as it was. A command shows in full, never shortened; a dialog takes no answer
-in its first half second, so keys typed for something else cannot answer it. `Esc` stops a run:
+file byte for byte as it was. Overwriting a binary file shows every line of the text replacing it.
+If the file changes, or its path comes to lead somewhere else (a folder swapped for a link), while
+the diff is up, nothing is written and the model is told to read it again. A command shows in
+full, never shortened; in `auto-edit` its approval also names the files changed without asking
+since your last approval, which the command may run (a `conftest.py`, a build script). A dialog
+takes no answer in its first half second, so keys typed for something else cannot answer it.
+Control characters in a diff, a command, a file, a command's output or the model's answer are
+spelled out (`\x1b`), as are bidi overrides and, in a dialog, zero-width characters: nothing the
+agent shows can move the cursor, redraw a dialog or write to the clipboard. Only `http` and
+`https` links in its answers open on a click; a `file:` link to a script would run it. `Esc` stops a run:
 the stream closes and a running command is killed with everything it started (the process group
 on POSIX, a job object on Windows). What a command leaves running in the background ends with it.
+A program it hands to another service (a scheduled task, WMI, a system service) is not its child
+and outlives it; only the sandbox contains that.
 
 **Limits.** Each run (one prompt) has a cap on model calls (`--max-turns`, default 40) and on
 tokens (`--max-tokens`, default 400,000). A subagent's calls count against its parent's. A 402
@@ -85,11 +101,13 @@ for every project and your account's custom instructions on top. A repository ca
 instructions, so the root's files and `.matterwave/` settings load only in a folder you trust:
 the first time a folder has any, you are asked, and the answer is remembered (`/trust` changes
 it). `/init` has the agent draft a `MATTERWAVE.md`. `@path` in a prompt attaches that file or
-folder, under the same confinement.
+folder, under the same confinement. The project's context files, commands and subagents are read
+under it as well, so a `MATTERWAVE.md` that is a link to a file outside the root is not loaded.
 
 **Checkpoints.** Before each applied change, the touched files' bytes go into a shadow git
-repository in the state folder, outside the project. `/restore` lists the checkpoints and puts
-the files back as they were before the one you pick; the project's own `.git` is never touched.
+repository in the state folder, outside the project, one per workspace and readable by you alone.
+`/restore` lists the checkpoints and puts the files back as they were before the one you pick,
+each path confined again as a write; the project's own `.git` is never touched.
 
 **Commands** (in the composer):
 
@@ -110,7 +128,10 @@ project, is a custom command: `git/review.md` is `/git:review`, and `$ARGUMENTS`
 by what follows the name.
 
 When the history fills the model's context window, old tool output is folded first, without a
-model call, and a stored run is then summarised by the conversation's compaction.
+model call. In the middle of a run the oldest rounds are then left out of the prompt (the stored
+conversation keeps them); before the next prompt, a stored run is summarised by the
+conversation's compaction, and the summary rides in the system prompt so the stored turns stay
+yours. A summary written mid-round would put the round's results on a branch of the conversation.
 
 ### Headless: `-p` in agent mode
 
@@ -163,24 +184,34 @@ In CI, run it in a container, keep `--max-turns` and `--max-tokens` low, and use
   offered to the model. A tool marks itself read-only, but only a trusted server's word is taken
   (`"trust": true`, and MatterWave's own); every other tool asks in `ask` and `auto-edit` mode
   (not at all on a trusted server) and is never offered in `plan`.
-  MatterWave's own `/mcp` is pre-wired with your credential (`matterwaveMcp`).
+  MatterWave's own `/mcp` is pre-wired with your credential (`matterwaveMcp`). Tools are offered
+  as `mcp__<server>__<tool>`, so none can stand in for a built-in; two that come out under one
+  name are both left out, with a notice. An answer over 16 MB is refused, and `timeout_s`
+  (default 60) bounds each request as a whole, so a server that trickles cannot hold a run.
 - **Subagents**: Markdown files in `agents/` of the config folder or `.matterwave/agents/` of a
   trusted project, with `name`, `description`, `tools` (the allow-list) and `max_turns` in the
   front matter and the prompt as the body. The model hands one a task through the `agent` tool;
   it runs under the same mode, approvals and caps.
 - **Sandbox**: off by default. `podman` or `docker` run each command in a container that sees
   only the root (mounted at `/workspace`), with a read-only filesystem elsewhere and no network
-  unless `"network": true`; `bwrap` does the same on Linux and `seatbelt` on macOS. The root's
-  `.git` and `.matterwave` stay read-only inside it. Stop removes the container. `--sandbox`
-  picks one for a session.
+  unless `"network": true`. `bwrap` (Linux) and `seatbelt` (macOS) keep writes to the root and
+  cut the network the same way, but the rest of your files stay readable to the command (a key
+  it copies into the root is then one `read_file` from the model), so only a container keeps
+  your home folder out of reach. The root's `.git` and `.matterwave` stay read-only inside all
+  of them. Stop removes the container. `--sandbox` picks one for a session.
 - **Web fetch** (`web_fetch`) and the **task list** (`todo_write`) are on unless
   `"agent": {"web_fetch": false}` / `{"todo": false}`. A fetch is asked for in `ask` and
   `auto-edit` mode, never sends your MatterWave credential and does not follow a redirect (the
-  model is told where it leads and asks again).
+  model is told where it leads and asks again). Its approval names the host the request really
+  goes to when the URL spells it otherwise (an international look-alike, a `user@` part), and a
+  fetch stops after 60 s however slowly the server sends.
 
 **What leaves your machine.** Every file the agent reads, every command's output and every page
 it fetches is sent to MatterWave and to the model behind it, and is metered. The deny list is a
 floor, not a guarantee: keep secrets out of the workspace, or list them in `.matterwaveignore`.
+`MATTERWAVE_API_KEY` is taken out of a command's environment, but a command runs as you and can
+read what you can, the system keyring (where the TUI keeps your credential) included. The sandbox
+is what keeps a command away from them.
 
 ## Sign in
 

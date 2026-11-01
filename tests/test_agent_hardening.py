@@ -122,12 +122,34 @@ async def test_compaction_in_the_middle_of_a_run_shortens_the_next_request(root:
     fake = FakeV1([call("read_file", path="big.txt") for _ in range(4)] + [say("ok")], models=models)
     session = await session_for(fake, root, Asked())
     await session.run("read it")
-    assert fake.compactions >= 1
     sizes = [len(r["messages"]) for r in fake.requests]
     # Uncompacted, the fifth request would carry 10 messages.
-    assert len(sizes) == 5 and max(sizes) <= 4
-    assert any("summarised" in m["content"] for m in fake.requests[-1]["messages"] if m["role"] == "user")
-    assert session.messages is not None and len(session.messages) == len(fake.requests[-1]["messages"])
+    assert len(sizes) == 5 and max(sizes) <= 7, sizes
+    assert len(session.messages) == len(fake.requests[-1]["messages"])
+    # Mid-round, nothing is summarised on the server: a summary written
+    # there before the round's results would put them on a branch. The
+    # stored run keeps every call and its result on one path.
+    assert fake.compactions == 0 and fake.branched == 0
+    parts = [p for m in fake.stored[session.conversation_id] for p in m["parts"]]
+    assert sum(p["type"] == "tool_call" for p in parts) == 4
+    assert sum(p["type"] == "tool_result" for p in parts) == 4
+
+
+@pytest.mark.asyncio
+async def test_a_long_history_is_summarised_before_the_next_prompt_not_mid_round(root: Path):
+    (root / "big.txt").write_text("word " * 2000, encoding="utf-8")
+    models = {"data": [{"id": "small", "label": "Small", "included": True, "supports_tools": True,
+                        "context_window": 3000}], "default_model": "small"}
+    fake = FakeV1([call("read_file", path="big.txt"), say("read"), say("ok")], models=models)
+    session = await session_for(fake, root, Asked())
+    await session.run("read it")
+    await session.run("now the next thing")
+    assert fake.compactions == 1 and fake.branched == 0
+    last = fake.requests[-1]["messages"]
+    assert last[-1] == {"role": "user", "content": "now the next thing"}
+    assert "The run so far, summarised." in last[0]["content"]
+    stored = fake.stored[session.conversation_id]
+    assert [m["content"] for m in stored if m["role"] == "user"] == ["read it", "now the next thing"]
 
 
 def test_the_no_store_fallback_drops_rounds_and_keeps_the_users_messages(root: Path):

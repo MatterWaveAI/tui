@@ -72,7 +72,8 @@ def _read_json(path: Path) -> Any:
 
 def _write_json(path: Path, value: Any) -> bool:
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        # The user's alone: which folders they trust, which runs they had.
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         os.replace(tmp, path)

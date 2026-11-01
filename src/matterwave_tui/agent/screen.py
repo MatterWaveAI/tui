@@ -19,6 +19,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from matterwave_sdk import agent as contract
 from matterwave_sdk.errors import APIConnectionError, APIError
@@ -38,6 +39,7 @@ from .checkpoints import CheckpointError
 from .context import expand_mentions, load_commands, load_context
 from .extras import load_subagents, render_todos
 from .loop import AgentSession, ApprovalRequest, Budget, RunEvents, RunOutcome
+from .printable import shown as safe_text
 from .session import OpenedSession, OpenError, SessionOptions, open_session, remember_run, resume
 from .settings import (
     folder_trust,
@@ -98,8 +100,25 @@ class Answer(Markdown):
     widget renders its source only once it is mounted)."""
 
     def __init__(self, text: str) -> None:
-        super().__init__(text)
+        text = safe_text(text)
+        super().__init__(text, open_links=False)
         self.text = text
+
+    def on_markdown_link_clicked(self, event: Markdown.LinkClicked) -> None:
+        """Only a web link opens. Textual hands any link to the system's
+        opener, and a `file:` link to a script the agent just wrote would run
+        it on a click, with no approval."""
+        event.stop()
+        event.prevent_default()
+        if urlsplit(event.href).scheme.lower() in ("http", "https"):
+            self.app.open_url(event.href)
+        else:
+            self.notify(
+                f"Not opened: {safe_text(event.href, strict=True)} (only http and https links "
+                "open from the agent's answers).",
+                severity="warning",
+                markup=False,
+            )
 
 
 class Deliberate(ModalScreen[bool]):
@@ -134,6 +153,7 @@ class ApprovalScreen(Deliberate):
         background: $surface; padding: 0 1; }
     #approval-body { height: 1fr; }
     #approval-mode { color: $text-muted; }
+    #approval-note { color: $warning; }
     """
 
     def __init__(self, request: ApprovalRequest, mode: str) -> None:
@@ -143,19 +163,23 @@ class ApprovalScreen(Deliberate):
 
     def compose(self) -> ComposeResult:
         request = self.request
+        # Spelled out, not passed through: an escape sequence in a diff or a
+        # command could otherwise redraw this dialog or set the clipboard.
+        detail = safe_text(request.detail, strict=True)
         body: Any
         if request.kind in ("edit", "write"):
-            body = Syntax(request.detail or "(no change)", "diff", word_wrap=True, theme="ansi_dark")
+            body = Syntax(detail or "(no change)", "diff", word_wrap=True, theme="ansi_dark")
         elif request.kind == "shell":
-            body = Syntax(request.detail, "bash", word_wrap=True, theme="ansi_dark")
-        elif request.kind == "plan":
-            body = Text(request.detail)
+            body = Syntax(detail, "bash", word_wrap=True, theme="ansi_dark")
         else:
-            body = Text(request.detail)
+            body = Text(detail)
         who = f" (subagent {request.agent})" if request.agent else ""
+        title = safe_text(f"{request.title}{who}?", strict=True)
         with Vertical():
-            yield Static(Text(f"{request.title}{who}?", style="bold"), id="approval-title")
+            yield Static(Text(title, style="bold"), id="approval-title")
             yield Static(f"mode {self.mode} │ y approves · n rejects", id="approval-mode", markup=False)
+            if request.note:
+                yield Static(safe_text(request.note, strict=True), id="approval-note", markup=False)
             with VerticalScroll(id="approval-body"):
                 yield Static(body, id="approval-detail")
 
@@ -185,8 +209,16 @@ class PickScreen(ModalScreen[str | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Static(f"{self.title_text}  (mode {self.mode})", markup=False)
-            yield OptionList(*[Option(label, id=f"pick-{i}") for i, (_, label) in enumerate(self.rows)])
+            yield Static(safe_text(f"{self.title_text}  (mode {self.mode})"), markup=False)
+            # Titles and file names are not markup: a `[@click=...]` in a
+            # conversation's title must not become an action.
+            yield OptionList(
+                *[
+                    Option(safe_text(label, strict=True), id=f"pick-{i}")
+                    for i, (_, label) in enumerate(self.rows)
+                ],
+                markup=False,
+            )
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         index = int((event.option.id or "pick-0").removeprefix("pick-"))
@@ -212,7 +244,7 @@ class TrustScreen(Deliberate):
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Static(
-                f"Trust {self.root}?\n\n"
+                f"Trust {safe_text(str(self.root), strict=True)}?\n\n"
                 "This folder has its own MATTERWAVE.md / AGENTS.md or .matterwave settings. In a "
                 "trusted folder they are loaded as instructions, and its settings can start MCP "
                 "servers (programs). Trust only folders whose contents you know.\n\n"
@@ -239,7 +271,7 @@ class ScreenEvents(RunEvents):
 
     def on_tool_start(self, call: ToolCall, summary: str, agent: str | None) -> None:
         prefix = f"[{agent}] " if agent else ""
-        self.screen.add_line(f"{prefix}⚙ {summary}", "tool")
+        self.screen.add_line(f"{prefix}⚙ {summary}", "tool", strict=True)
 
     def on_tool_end(self, call: ToolCall, outcome: ToolOutcome, agent: str | None) -> None:
         lines = outcome.text.splitlines() or [""]
@@ -388,12 +420,12 @@ class AgentScreen(Screen[None]):
         except NoMatches:
             return None
 
-    def add_line(self, text: str, classes: str = "") -> None:
+    def add_line(self, text: str, classes: str = "", *, strict: bool = False) -> None:
         self.end_text()
         log = self._log()
         if log is None:
             return
-        log.mount(LogLine(text, classes=classes, markup=False))
+        log.mount(LogLine(safe_text(text, strict=strict), classes=classes, markup=False))
         log.scroll_end(animate=False)
 
     def log_texts(self) -> list[str]:
@@ -422,7 +454,7 @@ class AgentScreen(Screen[None]):
     def _flush_live(self) -> None:
         if self._live is not None and self._live_dirty:
             self._live_dirty = False
-            self._live.update(self._live_text)
+            self._live.update(safe_text(self._live_text))
             log = self._log()
             if log is not None:
                 log.scroll_end(animate=False)
@@ -443,7 +475,7 @@ class AgentScreen(Screen[None]):
             panel = self.query_one("#agent-todos", Static)
         except NoMatches:
             return
-        panel.update(render_todos(todos))
+        panel.update(safe_text(render_todos(todos)))
         panel.set_class(bool(todos), "shown")
 
     # --- the status line -------------------------------------------------------------------
@@ -898,6 +930,8 @@ class AgentScreen(Screen[None]):
             return
         session.messages.clear()
         session.todos = []
+        session.summary = None
+        session.unreviewed.clear()
         session.conversation_id = None
         self.show_todos([])
         self.add_line("Cleared. The next prompt starts a new run.", "notice")

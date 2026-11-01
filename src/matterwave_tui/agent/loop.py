@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,10 +42,11 @@ from .extras import (
     check_url,
     parse_todos,
     render_todos,
+    url_detail,
     web_fetch,
 )
 from .mcp import McpManager
-from .settings import SandboxConfig
+from .settings import SandboxConfig, config_dir, state_dir
 from .shell import sandbox_platform
 from .tools import ArgumentError, LocalTools, PendingWrite, ToolOutcome, parse_arguments
 from .wire import AgentWire, Completed, TextDelta
@@ -140,6 +142,10 @@ class ApprovalRequest:
     detail: str
     call_id: str = ""
     agent: str | None = None
+    # What the user should weigh beside it: the files changed without
+    # asking (auto-edit) since they last approved something, which a command
+    # may now run.
+    note: str = ""
 
 
 @dataclass(frozen=True)
@@ -200,11 +206,36 @@ class _CapReached(Exception):
 AGENT_FILES = ("MATTERWAVE.md", "AGENTS.md", "MATTERWAVE.local.md")
 
 
-def steers_the_agent(relative: str) -> bool:
+def _under(path: str, folder: Path) -> bool:
+    try:
+        real = os.path.normcase(os.path.realpath(folder))
+    except (OSError, ValueError):
+        return False
+    child = os.path.normcase(path)
+    return child == real or child.startswith(real.rstrip(os.sep) + os.sep)
+
+
+def holds_home(root: Path) -> bool:
+    """Whether the workspace is the home folder or a folder above it."""
+    try:
+        home = os.path.normcase(os.path.realpath(Path.home()))
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return _under(home, root)
+
+
+def steers_the_agent(relative: str, absolute: Path | None = None) -> bool:
     """Whether a path is one the agent reads as configuration or
-    instructions in a later session: `.matterwave/` and the context files."""
+    instructions in a later session: the project's `.matterwave/` and
+    context files, and, when the workspace holds them (a root at the home
+    folder), the user's own settings, commands, subagents and context file
+    and the state folder that remembers trusted folders and checkpoints."""
     first = relative.split("/", 1)[0].lower()
-    return first == ".matterwave" or relative.lower() in (f.lower() for f in AGENT_FILES)
+    if first == ".matterwave" or relative.lower() in (f.lower() for f in AGENT_FILES):
+        return True
+    if absolute is None:
+        return False
+    return _under(str(absolute), config_dir()) or _under(str(absolute), state_dir())
 
 
 def call_summary(name: str, raw: str) -> str:
@@ -280,6 +311,16 @@ class AgentSession:
         self.last_outcome: RunOutcome | None = None
         self.title: str | None = None
         self._checkpoint_warned = False
+        # A summary of the run's earlier part once it is compacted; it rides
+        # in the system prompt, so the stored user turns stay the user's.
+        self.summary: str | None = None
+        # A workspace that holds the home folder holds the shell's profile,
+        # ~/.ssh/config, the startup folder: files that run things later
+        # without anyone approving a command. Every write there asks.
+        self.holds_home = holds_home(self.root)
+        # Files written without asking (auto-edit) since the user last
+        # approved something; the next command's approval names them.
+        self.unreviewed: list[str] = []
 
     # --- mode ----------------------------------------------------------------------
 
@@ -375,6 +416,8 @@ class AgentSession:
         context = self.context.render(self.account_instructions)
         if context:
             text += "\n\n" + context
+        if self.summary and extra is None:
+            text += "\n\nThe earlier part of this run was compacted. Summary:\n" + self.summary
         if extra:
             text += "\n\n" + extra
         return text
@@ -382,7 +425,10 @@ class AgentSession:
     # --- context management --------------------------------------------------------------
 
     def context_estimate(self, messages: list[dict[str, Any]] | None = None) -> int:
-        return sum(estimate_tokens(m) for m in (messages if messages is not None else self.messages))
+        if messages is not None:
+            return sum(estimate_tokens(m) for m in messages)
+        summary = estimate_tokens(self.summary) if self.summary else 0
+        return summary + sum(estimate_tokens(m) for m in self.messages)
 
     def window(self) -> int:
         return self.context_window or DEFAULT_CONTEXT_WINDOW
@@ -409,10 +455,17 @@ class AgentSession:
             saved += len(content) - len(message["content"])
         return saved
 
-    async def compact(self, *, force: bool = False) -> str:
+    async def compact(self, *, force: bool = False, mid_round: bool = False) -> str:
         """Fold old tool output, then, if the history is still too long (or
         `force`), summarise it with the conversation's compaction call when
-        the run is stored. What was done, for the user."""
+        the run is stored. What was done, for the user.
+
+        `mid_round`: the history ends on tool results not yet sent. The
+        server writes a summary as the conversation's newest message, and
+        the results that follow would then be stored on a branch beside the
+        call they answer; so mid-round the oldest rounds are left out of the
+        prompt instead (the stored conversation keeps them), and the summary
+        waits for the next prompt."""
         window = self.window()
         before = self.context_estimate()
         saved = self.fold_tool_output(self.messages, 1 if force else FOLD_KEEP_ROUNDS)
@@ -421,10 +474,14 @@ class AgentSession:
             notes.append(f"folded {saved:,} characters of old tool output")
         if self.context_estimate() <= SUMMARISE_AT * window and not force:
             return "; ".join(notes) or "nothing to compact"
-        if self.conversation_id is None:
+        if self.conversation_id is None or mid_round:
             dropped = self._drop_oldest_rounds(int(SUMMARISE_AT * window))
             if dropped:
-                notes.append(f"left out {dropped} of the oldest rounds (the run is not stored)")
+                why = (
+                    "the run is not stored" if self.conversation_id is None
+                    else "the stored conversation keeps them"
+                )
+                notes.append(f"left out {dropped} of the oldest rounds ({why})")
             return "; ".join(notes) or "nothing to compact"
         try:
             summary = await self.wire.compact(self.conversation_id)
@@ -449,22 +506,19 @@ class AgentSession:
         return None
 
     def _rebuild_from_summary(self, summary: str) -> None:
+        """The history after a summary: the latest user message as it was
+        (the next request stores it, so it stays the user's own words) and
+        the round after it, if any; the summary goes in the system prompt."""
         task_index = self._last_user_index()
-        task = str(self.messages[task_index].get("content") or "") if task_index is not None else ""
         rounds = [
             i for i, m in enumerate(self.messages) if m.get("role") == "assistant" and m.get("tool_calls")
         ]
         tail: list[dict[str, Any]] = []
         if rounds and (task_index is None or rounds[-1] > task_index):
             tail = self.messages[rounds[-1] :]
-        head = {
-            "role": "user",
-            "content": (
-                "(The earlier part of this run was compacted. Summary:)\n"
-                f"{summary}\n\n(The task in progress:)\n{task}"
-            ),
-        }
-        self.messages[:] = [head, *tail]
+        head = [self.messages[task_index]] if task_index is not None else []
+        self.summary = summary
+        self.messages[:] = [*head, *tail]
 
     def _drop_oldest_rounds(self, target: int) -> int:
         """Leave out the oldest tool rounds (a call and its results) until
@@ -489,7 +543,8 @@ class AgentSession:
     async def _fit_context(self) -> None:
         if self.context_estimate() <= FOLD_AT * self.window():
             return
-        note = await self.compact()
+        mid_round = bool(self.messages) and self.messages[-1].get("role") == "tool"
+        note = await self.compact(mid_round=mid_round)
         if note and note != "nothing to compact":
             self.events.on_notice(f"Context: {note}.")
 
@@ -688,7 +743,10 @@ class AgentSession:
     async def _approve(self, request: ApprovalRequest) -> bool:
         if not self.interactive:
             raise _Refused(request, self.mode)
-        return await self.events.approve(request)
+        approved = await self.events.approve(request)
+        if approved and request.note:
+            self.unreviewed.clear()
+        return approved
 
     @staticmethod
     def _rejected(what: str) -> ToolOutcome:
@@ -728,7 +786,8 @@ class AgentSession:
             except ArgumentError as exc:
                 return ToolOutcome(str(exc), is_error=True)
             if ask and not await self._approve(
-                ApprovalRequest(name, "shell", "Run a command", command, call.id, who)
+                ApprovalRequest(name, "shell", "Run a command", command, call.id, who,
+                                note=self._unreviewed_note())
             ):
                 return self._rejected("command")
             return await self.local.run_shell(command, timeout)
@@ -759,7 +818,10 @@ class AgentSession:
             reason = check_url(url)
             if reason:
                 return ToolOutcome(reason, is_error=True)
-            if ask and not await self._approve(ApprovalRequest(name, "web", "Fetch a URL", url, call.id, who)):
+            if ask and not await self._approve(
+                ApprovalRequest(name, "web", "Fetch a URL", url_detail(url), call.id, who,
+                                note=self._unreviewed_note())
+            ):
                 return self._rejected("fetch")
             text, failed = await web_fetch(url)
             return ToolOutcome(text, is_error=failed)
@@ -771,6 +833,7 @@ class AgentSession:
                 ApprovalRequest(
                     name, "mcp", f"Call {info.name} on MCP server {info.server}",
                     json.dumps(args, indent=2, ensure_ascii=False), call.id, who,
+                    note=self._unreviewed_note(),
                 )
             ):
                 return self._rejected("tool call")
@@ -785,9 +848,10 @@ class AgentSession:
         if isinstance(prepared, ToolOutcome):
             return prepared
         pending: PendingWrite = prepared
-        if steers_the_agent(pending.relative):
+        if steers_the_agent(pending.relative, pending.path.absolute) or self.holds_home:
             # The agent's own settings, commands, subagents and context
-            # files: a change there outlasts the session (a setting can
+            # files, and anything at all when the workspace holds the home
+            # folder: a change there outlasts the session (a setting can
             # start a program next time), so it is asked about in every
             # mode, yolo included, and refused headless.
             ask = True
@@ -797,8 +861,22 @@ class AgentSession:
                                       f"{verb} {pending.relative}", pending.diff, call.id, agent)
             if not await self._approve(request):
                 return self._rejected("change")
+        stale = await asyncio.to_thread(self.local.stale, pending)
+        if stale is not None:
+            return stale
         await self._checkpoint([pending.relative], f"{name} {pending.relative}")
-        return await asyncio.to_thread(self.local.apply_write, pending)
+        result = await asyncio.to_thread(self.local.apply_write, pending)
+        if not ask and not result.is_error and pending.relative not in self.unreviewed:
+            self.unreviewed.append(pending.relative)
+        return result
+
+    def _unreviewed_note(self) -> str:
+        if not self.unreviewed:
+            return ""
+        return (
+            "Changed without asking since your last approval (a command may run them): "
+            + ", ".join(self.unreviewed)
+        )
 
     async def _checkpoint(self, paths: list[str], label: str) -> None:
         if self.checkpoints is None:

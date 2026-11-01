@@ -25,7 +25,9 @@ from matterwave_sdk import agent as contract
 
 from .ignore import GitIgnore
 from .settings import PROJECT_DIR, config_dir
-from .tools import read_text
+from .tools import confine_path, read_text_head
+
+DEFINITION_MAX_CHARS = 64_000
 
 PROJECT_FILES = ("MATTERWAVE.md", "AGENTS.md")
 PERSONAL_FILE = "MATTERWAVE.local.md"
@@ -71,15 +73,27 @@ def project_context_present(root: Path) -> bool:
     ).is_dir()
 
 
+def _read_clipped(path: Path, limit: int) -> str:
+    text, _ = read_text_head(path, limit * 4)
+    return _clip(text, limit)
+
+
+def project_file(root: Path, relative: str) -> Path:
+    """Where a file the project supplies (a context file, a command, a
+    subagent) really is, under the same confinement as the tools: a link
+    that leads out of the root, or to a key or a `.env`, is refused
+    (`PathRefused`), so a trusted folder's MATTERWAVE.md cannot be a link
+    that uploads ~/.aws/credentials."""
+    return confine_path(root, relative).absolute
+
+
 def load_context(root: Path, *, trusted: bool) -> ContextFiles:
     found = ContextFiles()
     user_file = config_dir() / "MATTERWAVE.md"
     if user_file.is_file():
         try:
-            found.loaded.append(
-                ("your MATTERWAVE.md", _clip(user_file.read_text(encoding="utf-8"), CONTEXT_FILE_MAX_CHARS))
-            )
-        except (OSError, UnicodeDecodeError):
+            found.loaded.append(("your MATTERWAVE.md", _read_clipped(user_file, CONTEXT_FILE_MAX_CHARS)))
+        except (OSError, ValueError):
             found.notices.append(f"{user_file} could not be read.")
     for name in (*PROJECT_FILES, PERSONAL_FILE):
         path = root / name
@@ -89,11 +103,14 @@ def load_context(root: Path, *, trusted: bool) -> ContextFiles:
             found.skipped.append(name)
             continue
         try:
-            text = read_text(path)
+            text = _read_clipped(project_file(root, name), CONTEXT_FILE_MAX_CHARS)
+        except contract.PathRefused as exc:
+            found.notices.append(f"{name} was not loaded: {exc}")
+            continue
         except (OSError, ValueError):
             found.notices.append(f"{name} could not be read as UTF-8 text.")
             continue
-        found.loaded.append((name, _clip(text, CONTEXT_FILE_MAX_CHARS)))
+        found.loaded.append((name, text))
         if name == PERSONAL_FILE and not GitIgnore(root).ignored(PERSONAL_FILE, False):
             found.notices.append(
                 f"{PERSONAL_FILE} is not in .gitignore; add it so your personal notes stay yours."
@@ -133,7 +150,7 @@ def expand_mentions(prompt: str, root: Path) -> Mentions:
             continue
         seen.add(raw)
         try:
-            target = contract.confine(root, raw)
+            target = confine_path(root, raw)
         except contract.PathRefused as exc:
             if (root / raw).exists() or contract.is_absolute(raw) or ".." in raw:
                 out.notices.append(f"@{raw} was not attached: {exc}")
@@ -155,13 +172,11 @@ def expand_mentions(prompt: str, root: Path) -> Mentions:
             blocks.append(f'<folder path="{target.relative}">\n' + "\n".join(names) + "\n</folder>")
         else:
             try:
-                text = read_text(target.absolute)
+                text = _read_clipped(target.absolute, MENTION_MAX_CHARS)
             except (OSError, ValueError):
                 out.notices.append(f"@{raw} was not attached: it is not UTF-8 text.")
                 continue
-            blocks.append(
-                f'<file path="{target.relative}">\n{_clip(text, MENTION_MAX_CHARS)}\n</file>'
-            )
+            blocks.append(f'<file path="{target.relative}">\n{text}\n</file>')
         out.included.append(target.relative)
     if blocks:
         out.text = (
@@ -220,6 +235,17 @@ def definition_dirs(root: Path, kind: str, *, trusted: bool) -> list[tuple[Path,
     return dirs
 
 
+def read_definition(root: Path, path: Path, source: str) -> str | None:
+    """A Markdown definition's text, or None when it cannot be used: one
+    the project supplies is confined like a context file."""
+    try:
+        if source == "project":
+            path = project_file(root, path.relative_to(root).as_posix())
+        return _read_clipped(path, DEFINITION_MAX_CHARS)
+    except (OSError, ValueError):
+        return None
+
+
 @dataclass(frozen=True)
 class CustomCommand:
     name: str
@@ -243,9 +269,8 @@ def load_commands(root: Path, *, trusted: bool) -> dict[str, CustomCommand]:
             continue
         for path in sorted(folder.rglob("*.md")):
             name = ":".join(path.relative_to(folder).with_suffix("").parts)
-            try:
-                text = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
+            text = read_definition(root, path, source)
+            if text is None:
                 continue
             meta, body = parse_front_matter(text)
             description = meta.get("description")

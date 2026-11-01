@@ -34,9 +34,10 @@ def test_every_action_is_pinned_to_a_commit(name):
 def test_the_token_is_read_only_unless_a_job_says_otherwise(name):
     text = read(name)
     assert "\npermissions:\n  contents: read\n" in text
-    # The only widenings: the publish job's OIDC token.
+    # The only widenings: the publish job's OIDC token and the release
+    # job's right to create the release.
     widened = re.findall(r"(?m)^ {6}([\w-]+): write$", text)
-    assert widened == (["id-token"] if name == "publish-pypi.yml" else [])
+    assert widened == (["id-token", "contents"] if name == "publish-pypi.yml" else [])
 
 
 def test_ci_scans_the_whole_history_for_secrets():
@@ -49,3 +50,11 @@ def test_ci_scans_the_whole_history_for_secrets():
 def test_ci_runs_on_every_branch_and_pull_request():
     ci = read("ci.yml")
     assert 'push:\n    branches: ["**"]\n  pull_request:' in ci
+
+
+def test_a_tag_publishes_only_its_own_version_with_notes_and_an_sbom():
+    publish = read("publish-pypi.yml")
+    assert 'python scripts/release.py check-tag "$TAG"' in publish
+    assert "--format cyclonedx1.5" in publish
+    assert "python scripts/release.py notes > notes.md" in publish
+    assert "gh release create" in publish and "release/sbom.cdx.json" in publish

@@ -1,7 +1,9 @@
 # Publish matterwave-tui to PyPI. Tag a release (`v0.4.0`) or run it by
 # hand; the build job tests and builds, the publish job uploads with OIDC
 # trusted publishing -- no token in the repo, the environment holds the
-# trust on PyPI's side.
+# trust on PyPI's side. A tag must name the version in __init__.py, and a
+# tag's run ends with a GitHub release carrying its CHANGELOG section, the
+# built files and a CycloneDX SBOM.
 name: publish-pypi
 
 on:
@@ -9,8 +11,8 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
-# Read-only by default; the publish job alone widens it, to mint the
-# OIDC token PyPI trusts.
+# Read-only by default; the publish job widens it to mint the OIDC token
+# PyPI trusts, the release job to create the release.
 permissions:
   contents: read
 
@@ -22,6 +24,13 @@ jobs:
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           enable-cache: true
+          # The SBOM export is uv's; a fixed uv keeps its format fixed.
+          version: "0.11.3"
+      - name: The tag names the package version
+        if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: python scripts/release.py check-tag "$TAG"
       - run: uv sync --locked --extra dev --extra images
       # The same gate as CI's: nothing is published that CI would refuse.
       - run: uv run ruff check .
@@ -29,10 +38,23 @@ jobs:
       - run: uv run mypy --strict
       - run: uv run pytest -q --ignore=tests/e2e
       - run: uv build
+      - name: CycloneDX SBOM of what the package installs
+        run: >-
+          uv export --frozen --no-dev --format cyclonedx1.5
+          --preview-features sbom-export --output-file sbom.cdx.json
+      - name: Release notes from the CHANGELOG
+        run: python scripts/release.py notes > notes.md
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist
           path: dist/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release
+          path: |
+            dist/
+            sbom.cdx.json
+            notes.md
 
   publish:
     needs: build
@@ -46,3 +68,25 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+
+  # The tag's GitHub release: its CHANGELOG section as the notes, with the
+  # built files and the SBOM attached. Only a tag has a release; a manual
+  # run publishes nothing here.
+  release:
+    needs: publish
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release
+          path: release/
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" \
+            --notes-file release/notes.md release/dist/* release/sbom.cdx.json

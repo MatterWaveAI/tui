@@ -1,8 +1,11 @@
+# CI on every push to any branch and on every pull request: the work lives
+# on develop and on feature branches, not only on main. The publish
+# workflow (publish-pypi.yml) stays tag-only and runs the same gate.
 name: CI
 
 on:
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request:
 
 jobs:

@@ -1523,6 +1523,26 @@ async def test_a_launch_model_the_plan_lacks_is_refused_up_front():
 
 
 @pytest.mark.asyncio
+async def test_each_answer_refreshes_usage_budget_and_the_unread_badge():
+    api = FakeAPI(happy_script())
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert (api.usage_reads, api.budget_reads) == (1, 1)
+        assert "unread" not in status(app)
+        # The turn crosses a budget line: the server files a notification
+        # and the period's usage moves.
+        api.notification_rows = [notification("n1")]
+        api.balance = replace(api.balance, used=90000, percent=90.0, warn=True)
+        app.query_one("#composer", TextArea).text = "hi"
+        app.action_send()
+        await settle(app, pilot)
+        assert (api.usage_reads, api.budget_reads) == (2, 2)
+        assert "✉ 1 unread" in status(app)
+        assert "⚠ usage 90,000/100,000 (90%)" in status(app)
+
+
+@pytest.mark.asyncio
 async def test_the_feedback_dialog_carries_the_selected_replys_id():
     api = FakeAPI()
     api.tree_messages = [

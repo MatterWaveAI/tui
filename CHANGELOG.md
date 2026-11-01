@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The status line's unread badge, usage and overage are read again after
+  every answer, not only at start-up and after an account switch.
 - Defaults that lost data or left a key live: Enter in the new-chat dialog
   now makes a regular chat (`t` makes a temporary one, Esc none); a
   Markdown or account export never overwrites an existing file, taking

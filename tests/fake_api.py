@@ -227,6 +227,8 @@ class FakeAPI:
             "member_exhausted": False,
         }
         self.tree_reads = 0
+        self.usage_reads = 0
+        self.budget_reads = 0
         self.streams_closed = 0
 
     async def me(self) -> Me:
@@ -371,6 +373,7 @@ class FakeAPI:
         return [dict(row) for row in self.feedback_rows]
 
     async def usage(self) -> UsageBalance:
+        self.usage_reads += 1
         return self.balance
 
     async def upload_attachment(
@@ -611,6 +614,7 @@ class FakeAPI:
         return self.transcript_text
 
     async def budget(self) -> dict[str, Any]:
+        self.budget_reads += 1
         return dict(self.budget_payload)
 
     def _replace(self, conversation_id: str, **fields: Any) -> Conversation:

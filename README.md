@@ -105,8 +105,8 @@ with `//` to send it with a single leading slash (`//etc/hosts is empty` sends `
 
 Letter keys apply when focus is not in the composer or the search box; `Esc` gets you there.
 
-The status line also carries the org's balance for the period (`usage used/included (%)`, read
-once at start-up from `/api/me/usage`) and any files attached but not sent yet. On a deployment
+The status line also carries the org's balance for the period (`usage used/included (%)`, from
+`/api/me/usage`, read again after every answer along with the overage and the unread count) and any files attached but not sent yet. On a deployment
 that scans uploads, a file shows `(scanning…)` until the scan is clean; a message sent before then
 waits for it, and a file the scan rejects is dropped with its name said. An attached
 image or document renders in the transcript as an `[image: filename]` placeholder line — the

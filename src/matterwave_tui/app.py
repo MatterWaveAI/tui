@@ -637,9 +637,7 @@ class MatterWaveApp(App[None]):
             )
             self.model = self.model_override = None
         await self.refresh_conversations()
-        self.load_usage()
-        self.load_budget()
-        self.load_notifications()
+        self.refresh_account_lines()
         self.load_announcements()
         self.load_library()
         if self.conversations:
@@ -674,6 +672,13 @@ class MatterWaveApp(App[None]):
         await view.extend(
             [ConversationItem(c, library=self._library_suffix(c)) for c in found]
         )
+
+    def refresh_account_lines(self) -> None:
+        """The status line's account bits as the server now holds them: the
+        period's usage, the overage against its cap, the unread count."""
+        self.load_usage()
+        self.load_budget()
+        self.load_notifications()
 
     @work(group="usage", exclusive=True)
     async def load_usage(self) -> None:
@@ -1722,9 +1727,7 @@ class MatterWaveApp(App[None]):
         self.live = None
         await self.render_thread()
         await self.refresh_conversations()
-        self.load_usage()
-        self.load_budget()
-        self.load_notifications()
+        self.refresh_account_lines()
         self.load_announcements()
         if self.conversations:
             await self.open_conversation(self.conversations[0].id)
@@ -2453,6 +2456,10 @@ class MatterWaveApp(App[None]):
         partial = self.live
         self.live = None
         queued, self.queued_prompt = self.queued_prompt, None
+        # A turn, finished or stopped, spent tokens and may have crossed a
+        # budget line, which the server says with a notification: the
+        # status line's usage, overage and unread badge are read again.
+        self.refresh_account_lines()
         if stopped:
             await self._resync()
             # Esc cancels the stream and the queue with it; the queued

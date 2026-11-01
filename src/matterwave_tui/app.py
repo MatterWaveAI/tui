@@ -34,7 +34,13 @@ from .api import NOTIFICATIONS_PAGE, ChatAPI, Cut, Opened, StreamItem
 from .dictation import MEDIA_TYPES, MicRecorder, media_type_for, mic_available
 from .export import conversation_markdown, export_filename, free_path
 from .failures import Failure, classify, retry_in
-from .models import is_image_filename, model_accepts_images, model_window, vision_capable_model_ids
+from .models import (
+    answer_usage,
+    is_image_filename,
+    model_accepts_images,
+    model_window,
+    vision_capable_model_ids,
+)
 from .paths import migrate_legacy_state, state_dir
 from .roles import load_roles, roles_path, save_roles
 from .screens import (
@@ -423,9 +429,15 @@ class MatterWaveApp(App[None]):
         environ: Mapping[str, str] | None = None,
         keymap: Mapping[str, str] | None = None,
         update_check: bool = False,
+        show_answer_usage: bool = True,
     ) -> None:
         super().__init__()
         self.api = api
+        # Tokens and cost under each answer this session streamed, by
+        # message id; the config file's `answer_usage = "hide"` hides them.
+        self.show_answer_usage = show_answer_usage
+        self.answer_tokens: dict[str, tuple[int | None, int | None]] = {}
+        self._turn_tokens: tuple[int | None, int | None] | None = None
         # The once-a-day look for a newer release; the CLI turns it on.
         self.update_check = update_check
         # The config file's [keys]: binding id -> key, over the defaults.
@@ -1073,6 +1085,7 @@ class MatterWaveApp(App[None]):
                 widgets.append(
                     MessageView(
                         item,
+                        usage=self._usage_line(item),
                         position=self.thread.position(item),
                         feedback=self.feedback.get(item.id),
                         image_backend=self.image_backend,
@@ -1186,6 +1199,14 @@ class MatterWaveApp(App[None]):
         if views and self.live is not None:
             await views[-1].update_message(self.live)
             transcript.scroll_end(animate=False)
+
+    def _usage_line(self, message: Message) -> str | None:
+        """Under an answer: what it took and cost, when this session saw
+        its turn (the server keeps no per-answer usage on the message)."""
+        tokens = self.answer_tokens.get(message.id)
+        if not self.show_answer_usage or tokens is None or message.role != "assistant":
+            return None
+        return answer_usage(self.models_list, message.model or self.model, *tokens)
 
     def selected_message(self) -> Message | None:
         widget = self.query_one("#transcript", Transcript).selected_widget()
@@ -3022,6 +3043,7 @@ class MatterWaveApp(App[None]):
         self._turn = turn
         self.streaming = True
         self._completed_answer = None
+        self._turn_tokens = None
         self.show_failure(None)
         self.live = self._new_live()
         await self.render_thread()
@@ -3174,6 +3196,7 @@ class MatterWaveApp(App[None]):
         elif isinstance(item, fr.TitleFrame) and self.conversation is not None:
             self._retitle(self.conversation.id, item.title)
         elif isinstance(item, fr.ContextFrame):
+            self._turn_tokens = (item.prompt_tokens, item.completion_tokens)
             self.context_used = (item.prompt_tokens or 0) + (item.completion_tokens or 0)
             if item.context_window:
                 self.context_window = item.context_window
@@ -3183,6 +3206,8 @@ class MatterWaveApp(App[None]):
                 self.notify(item.detail)
         elif isinstance(item, fr.DoneFrame):
             self.live = None
+            if self._turn_tokens is not None:
+                self.answer_tokens[item.message.id] = self._turn_tokens
             self.thread.add(item.message)
             self.thread.leaf = item.message.id
             self._completed_answer = item.message

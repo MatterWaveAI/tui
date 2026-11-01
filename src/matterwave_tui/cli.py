@@ -555,6 +555,7 @@ def main(argv: list[str] | None = None) -> int:
         keymap=settings.keys,
         debug_log=debug_log,
         update_check=not args.no_update_check and not environ.get(DISABLE_ENV),
+        show_answer_usage=(settings.get("answer_usage") or "show") not in ("hide", "off"),
     )
     return EXIT_OK
 
@@ -583,6 +584,7 @@ def run_app(
     keymap: Mapping[str, str] | None = None,
     debug_log: Path | None = None,
     update_check: bool = False,
+    show_answer_usage: bool = True,
 ) -> None:
     from .app import MatterWaveApp
 
@@ -623,6 +625,7 @@ def run_app(
         environ=environ,
         keymap=keymap,
         update_check=update_check,
+        show_answer_usage=show_answer_usage,
     )
     holder["app"] = app
     app.run()

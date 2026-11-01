@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Each answer streamed in the session shows the tokens it took in and
+  out and what they come to at the model's list price (from the `context`
+  frame and `/api/models`); `answer_usage = "hide"` in the config file
+  turns the line off.
 - The command line's basics: `--version`; `--list-models`; one-shot
   `--continue`, `--conversation ID` and `--temporary`; a piped stdin
   after `-p` is the context the prompt is about; `export ID` prints a

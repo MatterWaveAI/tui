@@ -82,6 +82,7 @@ class MessageView(Vertical):
     MessageView.user .role { color: $accent; }
     MessageView .tool { color: $text-muted; }
     MessageView .truncated { color: $warning; text-style: italic; }
+    MessageView .usage { color: $text-muted; }
     MessageView .thumbs { height: auto; }
     MessageView .thumbs Static { width: auto; margin-right: 1; color: $text-muted; }
     MessageView .thumbs Static.active { color: $text; text-style: bold; }
@@ -96,6 +97,7 @@ class MessageView(Vertical):
         streaming: bool = False,
         feedback: dict[str, Any] | None = None,
         image_backend: str | None = None,
+        usage: str | None = None,
     ) -> None:
         super().__init__(classes=message.role)
         self.message = message
@@ -103,6 +105,8 @@ class MessageView(Vertical):
         self.streaming = streaming
         self.feedback = feedback
         self.image_backend = image_backend
+        # What the answer took and cost, under it; None shows nothing.
+        self.usage = usage
 
     def compose(self) -> ComposeResult:
         yield Static(role_label(self.message, self.position), classes="role", markup=False)
@@ -154,6 +158,8 @@ class MessageView(Vertical):
             yield Static(
                 "⚠ Cut off — this is not the whole answer.", classes="truncated", markup=False
             )
+        if self.usage and not self.streaming:
+            yield Static(self.usage, classes="usage", markup=False)
 
     async def update_message(self, message: Message, *, streaming: bool | None = None) -> None:
         self.message = message

@@ -1876,6 +1876,39 @@ async def test_account_writes_reach_their_routes_and_this_terminals_key_is_left_
 
 
 @pytest.mark.asyncio
+async def test_each_answer_shows_its_tokens_and_cost():
+    api = FakeAPI(happy_script("Hello there"))
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        app.query_one("#composer", TextArea).text = "hi"
+        app.action_send()
+        await settle(app, pilot)
+        view = [v for v in app.query(MessageView) if v.message.role == "assistant"][-1]
+        line = str(view.query_one(".usage", Static).render())
+        # ContextFrame(150, 20): 150 x $0.50 + 20 x $1.50 per million.
+        assert line == "150 tokens in · 20 out · $0.0001 at list price"
+    hidden = MatterWaveApp(FakeAPI(happy_script()), show_answer_usage=False)
+    async with hidden.run_test() as pilot:
+        await settle(hidden, pilot)
+        hidden.query_one("#composer", TextArea).text = "hi"
+        hidden.action_send()
+        await settle(hidden, pilot)
+        assert not hidden.query(".usage")
+
+
+def test_the_usage_line_without_a_price_or_tokens():
+    from matterwave_tui.models import answer_usage
+
+    assert answer_usage([], "m", None, None) is None
+    assert answer_usage([], "m", 1200, 30) == "1,200 tokens in · 30 out"
+    priced = [{"id": "m", "input_usd_per_m": 3.0, "output_usd_per_m": 15.0}]
+    assert answer_usage(priced, "m", 1_000_000, 100_000) == (
+        "1,000,000 tokens in · 100,000 out · $4.5000 at list price"
+    )
+
+
+@pytest.mark.asyncio
 async def test_the_feedback_dialog_carries_the_selected_replys_id():
     api = FakeAPI()
     api.tree_messages = [

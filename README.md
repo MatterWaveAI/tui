@@ -182,6 +182,10 @@ after every answer. A failure shows the same copy as the web app and always the 
 to quote; a key's per-minute limit (429) and a model the plan does not include (402) are states of
 their own, since neither is the budget.
 
+Each answer streamed in this session carries a line under it with the tokens it took in and out
+and what they come to at the model's list price (`answer_usage = "hide"` in the config file turns
+it off; an answer read back from history has no such line, as the server keeps none per message).
+
 On a deployment that scans uploads, a file shows `(scanning…)` until the scan is clean; a message
 sent before then waits for it, and a file the scan rejects is dropped with its name said.
 
@@ -213,6 +217,7 @@ model = "grt-nano"                     # the model for one-shot prompts and the 
 theme = "nord"                         # a Textual theme, by name
 images = "auto"                        # as MATTERWAVE_IMAGES
 shell = "pwsh"                         # as MATTERWAVE_SHELL
+answer_usage = "hide"                  # no tokens-and-cost line under each answer
 default_profile = "work"
 
 [profiles.work]                        # matterwave-tui --profile work

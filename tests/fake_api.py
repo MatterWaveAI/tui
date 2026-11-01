@@ -35,6 +35,8 @@ MODELS: list[dict[str, Any]] = [
         "included": True,
         "upgrade_to": None,
         "context_window": 8192,
+        "input_usd_per_m": 0.5,
+        "output_usd_per_m": 1.5,
     },
     {
         "id": "grt-max",

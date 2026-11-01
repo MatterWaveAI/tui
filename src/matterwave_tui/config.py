@@ -44,6 +44,7 @@ SETTINGS: dict[str, str | None] = {
     "theme": None,
     "images": "MATTERWAVE_IMAGES",
     "shell": "MATTERWAVE_SHELL",
+    "answer_usage": None,
 }
 TOP_LEVEL = frozenset({*SETTINGS, "default_profile", "profiles", "keys"})
 

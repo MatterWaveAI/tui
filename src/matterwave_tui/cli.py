@@ -214,6 +214,11 @@ def build_parser() -> argparse.ArgumentParser:
         "(default: debug.log in the state directory)",
     )
     parser.add_argument(
+        "--plain",
+        action="store_true",
+        help="words for every mark instead of symbols, and no colour (NO_COLOR)",
+    )
+    parser.add_argument(
         "--no-update-check",
         action="store_true",
         help=f"skip the once-a-day look for a newer release (or {DISABLE_ENV}=1)",
@@ -556,6 +561,7 @@ def main(argv: list[str] | None = None) -> int:
         debug_log=debug_log,
         update_check=not args.no_update_check and not environ.get(DISABLE_ENV),
         show_answer_usage=(settings.get("answer_usage") or "show") not in ("hide", "off"),
+        plain=args.plain,
     )
     return EXIT_OK
 
@@ -585,8 +591,14 @@ def run_app(
     debug_log: Path | None = None,
     update_check: bool = False,
     show_answer_usage: bool = True,
+    plain: bool = False,
 ) -> None:
     from .app import MatterWaveApp
+
+    if plain:
+        # Textual reads NO_COLOR as it starts, and draws in monochrome; the
+        # editor and the shell commands this session starts see it too.
+        os.environ["NO_COLOR"] = "1"
 
     holder: dict[str, MatterWaveApp] = {}
     current = {"token": credential.token}
@@ -626,6 +638,7 @@ def run_app(
         keymap=keymap,
         update_check=update_check,
         show_answer_usage=show_answer_usage,
+        plain=plain,
     )
     holder["app"] = app
     app.run()

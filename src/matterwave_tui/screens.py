@@ -25,6 +25,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Collapsible, DirectoryTree, Input, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
+from . import markers
 from .api import NOTIFICATIONS_LIMIT_MAX, NOTIFICATIONS_PAGE
 from .auth import DeviceCode, LoginError
 from .dictation import MAX_RECORDING_S, MicRecorder
@@ -64,10 +65,10 @@ class ModelPicker(ModalScreen[str | None]):
             if row.is_heading:
                 options.append(Option(f"— {row.label} —", id=f"heading-{i}", disabled=True))
             else:
-                mark = "● " if row.model_id == self.current else "  "
-                options.append(
-                    Option(mark + row.label, id=f"model-{i}", disabled=not row.selectable)
+                label = row.label + (
+                    f"  ({markers.badge('current')})" if row.model_id == self.current else ""
                 )
+                options.append(Option(label, id=f"model-{i}", disabled=not row.selectable))
         with Vertical():
             yield Static("Choose a model (Enter selects, Esc cancels)", markup=False)
             yield OptionList(*options, id="models")
@@ -622,7 +623,11 @@ class Accounts(ModalScreen[dict[str, Any] | None]):
             # no-op, so it is marked and disabled rather than offered.
             current = row.get("current") is True or row.get("slot") == 0
             options.append(
-                Option(("● " if current else "  ") + who, id=f"account-{i}", disabled=current)
+                Option(
+                    who + (f"  ({markers.badge('current')})" if current else ""),
+                    id=f"account-{i}",
+                    disabled=current,
+                )
             )
         return options
 
@@ -1222,7 +1227,7 @@ class Notifications(ModalScreen[None]):
     def _options(self) -> list[Option]:
         options: list[Option] = []
         for i, row in enumerate(self._slice()):
-            mark = "● " if not row.get("read_at") else "  "
+            mark = f"{markers.badge('unread')} · " if not row.get("read_at") else ""
             label = mark + str(row.get("title") or "(no title)")
             body = str(row.get("body") or "")
             if body:
@@ -1584,13 +1589,15 @@ class Library(ModalScreen[tuple[str, str] | None]):
     def _options(self) -> list[Option]:
         options: list[Option] = [Option("— Folders —", id="head-folders", disabled=True)]
         for i, folder in enumerate(self.folders):
-            mark = "● " if folder.get("id") == self.folder_id else "  "
-            options.append(Option(mark + str(folder.get("name") or "(unnamed)"), id=f"folder-{i}"))
+            here = folder.get("id") == self.folder_id
+            name = str(folder.get("name") or "(unnamed)")
+            options.append(Option(name + ("  (this chat)" if here else ""), id=f"folder-{i}"))
         options.append(Option("— Tags —", id="head-tags", disabled=True))
         mine = self.assignments.get(self.conversation_id, [])
         for i, tag in enumerate(self.tags):
-            mark = "● " if tag.get("id") in mine else "  "
-            options.append(Option(mark + str(tag.get("name") or "(unnamed)"), id=f"tag-{i}"))
+            on = tag.get("id") in mine
+            name = str(tag.get("name") or "(unnamed)")
+            options.append(Option(name + ("  (on this chat)" if on else ""), id=f"tag-{i}"))
         return options
 
     def _redraw(self) -> None:

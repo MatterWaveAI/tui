@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Marks a screen reader can say: a symbol that stands alone carries its
+  word (`📌 pinned`, `👍 good`, `⛔ critical:`), list rows say "this chat",
+  "current" or "unread" in words instead of a bare dot, and `--plain`
+  draws every mark as its word with no colour. `NO_COLOR` is honoured.
 - Each answer streamed in the session shows the tokens it took in and
   out and what they come to at the model's list price (from the `context`
   frame and `/api/models`); `answer_usage = "hide"` in the config file

@@ -8,6 +8,8 @@ import pytest
 from keyring.backend import KeyringBackend
 from keyring.errors import PasswordDeleteError
 
+from matterwave_tui import markers
+
 STREAMS = Path(__file__).parent / "streams"
 
 
@@ -60,6 +62,14 @@ def no_config_file(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest
     monkeypatch.delenv("MATTERWAVE_MODEL", raising=False)
     # Nor asks PyPI for a newer release.
     monkeypatch.setenv("MATTERWAVE_NO_UPDATE_CHECK", "1")
+
+
+@pytest.fixture(autouse=True)
+def symbols_with_words() -> Iterator[None]:
+    """Each test starts with the default marks, whatever one before chose."""
+    markers.configure(False)
+    yield
+    markers.configure(False)
 
 
 @pytest.fixture

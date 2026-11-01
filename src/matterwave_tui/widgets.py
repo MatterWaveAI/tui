@@ -16,6 +16,7 @@ from textual.containers import Horizontal, Vertical
 from textual.message import Message as MessageBase
 from textual.widgets import Collapsible, Markdown, Static
 
+from . import markers
 from .thread import Divider, Message
 
 TOOL_LINE_MAX = 100
@@ -42,12 +43,12 @@ def tool_call_line(part: dict[str, Any]) -> str:
             args = ", ".join(f"{k}={json.dumps(v)}" for k, v in decoded.items())
     except ValueError:
         pass
-    return _one_line(f"⚙ {part.get('name') or 'tool'}({args})")
+    return _one_line(f"{markers.lead('tool')}{part.get('name') or 'tool'}({args})")
 
 
 def tool_result_line(part: dict[str, Any]) -> str:
-    mark = "✗" if part.get("is_error") else "↳"
-    return _one_line(f"{mark} {part.get('output') or ''}")
+    mark = markers.lead("error") if part.get("is_error") else markers.lead("result")
+    return _one_line(f"{mark}{part.get('output') or ''}")
 
 
 def role_label(message: Message, position: tuple[int, int] | None) -> str:
@@ -114,13 +115,13 @@ class MessageView(Vertical):
             rating = (self.feedback or {}).get("rating")
             with Horizontal(classes="thumbs"):
                 yield Static(
-                    "👍",
+                    markers.badge("good"),
                     id="thumb-up",
                     classes="thumb" + (" active" if rating == 1 else ""),
                     markup=False,
                 )
                 yield Static(
-                    "👎",
+                    markers.badge("bad"),
                     id="thumb-down",
                     classes="thumb" + (" active" if rating == -1 else ""),
                     markup=False,
@@ -156,7 +157,9 @@ class MessageView(Vertical):
             yield Static("…", classes="tool")
         elif self.message.truncated:
             yield Static(
-                "⚠ Cut off — this is not the whole answer.", classes="truncated", markup=False
+                markers.icon("warning") + "Cut off — this is not the whole answer.",
+                classes="truncated",
+                markup=False,
             )
         if self.usage and not self.streaming:
             yield Static(self.usage, classes="usage", markup=False)

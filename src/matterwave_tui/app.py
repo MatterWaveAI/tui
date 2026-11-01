@@ -29,7 +29,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widget import Widget
 from textual.widgets import Footer, Input, Label, ListItem, ListView, Static, TextArea
 
-from . import __version__, images
+from . import __version__, images, markers
 from .api import NOTIFICATIONS_PAGE, ChatAPI, Cut, Opened, StreamItem
 from .dictation import MEDIA_TYPES, MicRecorder, media_type_for, mic_available
 from .export import conversation_markdown, export_filename, free_path
@@ -245,8 +245,12 @@ class ConversationItem(ListItem):
 
     def caption(self) -> str:
         c = self.conversation
-        marks = ("📌 " if c.pinned_at else "") + ("🗄 " if c.archived_at else "")
-        return marks + (c.title or "New chat") + self.library
+        marks = [
+            markers.badge(name)
+            for name, on in (("pinned", c.pinned_at), ("archived", c.archived_at))
+            if on
+        ]
+        return " · ".join([*marks, c.title or "New chat"]) + self.library
 
     def retitle(self, title: str) -> None:
         self.conversation = replace(self.conversation, title=title)
@@ -430,9 +434,12 @@ class MatterWaveApp(App[None]):
         keymap: Mapping[str, str] | None = None,
         update_check: bool = False,
         show_answer_usage: bool = True,
+        plain: bool = False,
     ) -> None:
         super().__init__()
         self.api = api
+        # `--plain`: every mark drawn as its word, no symbols.
+        markers.configure(plain)
         # Tokens and cost under each answer this session streamed, by
         # message id; the config file's `answer_usage = "hide"` hides them.
         self.show_answer_usage = show_answer_usage
@@ -715,7 +722,7 @@ class MatterWaveApp(App[None]):
             if balance.exhausted:
                 bits.append("budget used up")
             else:
-                warn = "⚠ " if balance.warn else ""
+                warn = markers.lead("warning") if balance.warn else ""
                 bits.append(
                     f"{warn}usage {balance.used:,}/{balance.included:,} ({round(balance.percent)}%)"
                 )
@@ -724,10 +731,10 @@ class MatterWaveApp(App[None]):
             overage = int(budget.get("overage_micros") or 0)
             cap = int(budget.get("overage_cap_micros") or 0)
             if cap:
-                warn = "⚠ " if overage >= cap else ""
+                warn = markers.lead("warning") if overage >= cap else ""
                 bits.append(f"{warn}overage ${overage / 1e6:,.2f} of ${cap / 1e6:,.2f}")
         if self.unread_notifications:
-            bits.append(f"✉ {self.unread_notifications} unread")
+            bits.append(f"{markers.icon('unread')}{self.unread_notifications} unread")
         if self.pending_attachments:
             names = ", ".join(attachment_label(a) for a in self.pending_attachments)
             bits.append(f"attached: {names}")
@@ -1939,8 +1946,9 @@ class MatterWaveApp(App[None]):
             return
         lines = []
         for row in self.announcements:
-            prefix = {"critical": "⛔ ", "warning": "⚠ "}.get(str(row.get("severity")), "ℹ ")
-            lines.append(prefix + str(row.get("message") or ""))
+            severity = str(row.get("severity"))
+            name = severity if severity in ("critical", "warning") else "notice"
+            lines.append(f"{markers.badge(name)}: {row.get('message') or ''}")
         lines.append("A dismisses these; a critical notice stays until the operator ends it.")
         banner.update("\n".join(lines))
         banner.add_class("shown")
@@ -2471,7 +2479,7 @@ class MatterWaveApp(App[None]):
         bits: list[str] = []
         folder = folder_names.get(conversation.folder_id or "")
         if folder:
-            bits.append(f"📁 {folder}")
+            bits.append(f"{markers.lead('folder')}{folder}")
         bits.extend(
             f"#{tag_names.get(tag_id, tag_id)}"
             for tag_id in self.library_assignments.get(conversation.id, [])
@@ -2588,7 +2596,7 @@ class MatterWaveApp(App[None]):
         kind, row_id = self.library_filter
         rows = self.library_folders if kind == "folder" else self.library_tags
         name = next((str(r.get("name") or "") for r in rows if r.get("id") == row_id), row_id)
-        return f"📁 {name}" if kind == "folder" else f"#{name}"
+        return f"{markers.lead('folder')}{name}" if kind == "folder" else f"#{name}"
 
     async def apply_folder_rename(self, folder_id: str, name: str) -> LibraryState | None:
         """A folder's new name; one another folder has is the server's 409,

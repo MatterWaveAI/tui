@@ -624,7 +624,7 @@ async def test_pin_archive_and_the_list_filters_make_them_actions():
         await pilot.press("escape", "p")
         await settle(app, pilot)
         assert api.pins == [("c1", True)]
-        assert sidebar_captions(app) == ["📌 New chat"]
+        assert sidebar_captions(app) == ["📌 pinned · New chat"]
         await pilot.press("p")
         await settle(app, pilot)
         assert api.pins[-1] == ("c1", False)
@@ -637,7 +637,7 @@ async def test_pin_archive_and_the_list_filters_make_them_actions():
         await pilot.press("o", "o")  # pinned, then archived
         await settle(app, pilot)
         assert app.list_filter == "archived"
-        assert sidebar_captions(app) == ["🗄 New chat"]
+        assert sidebar_captions(app) == ["🗄 archived · New chat"]
         await pilot.press("a")
         await settle(app, pilot)
         assert api.archives[-1] == ("c1", False)
@@ -990,7 +990,7 @@ async def test_the_library_screen_files_and_tags_and_the_captions_follow():
         def labels() -> list[str]:
             return [str(rows.get_option_at_index(i).prompt) for i in range(rows.option_count)]
 
-        assert labels() == ["— Folders —", "  Work", "— Tags —", "  draft"]
+        assert labels() == ["— Folders —", "Work", "— Tags —", "draft"]
 
         # Onto the folder row and `m`: the chat is filed, the caption
         # names the folder.
@@ -1001,7 +1001,7 @@ async def test_the_library_screen_files_and_tags_and_the_captions_follow():
         assert app.conversation is not None and app.conversation.folder_id == "f1"
         assert sidebar_captions(app) == ["New chat — 📁 Work"]
         assert "Filed." in shown
-        assert labels()[1] == "● Work"
+        assert labels()[1] == "Work  (this chat)"
 
         # Onto the tag row and Space: the tag is set, the caption carries it.
         rows.highlighted = 3
@@ -1009,7 +1009,7 @@ async def test_the_library_screen_files_and_tags_and_the_captions_follow():
         await settle(app, pilot)
         assert api.tag_sets == [("c1", ["t1"])]
         assert sidebar_captions(app) == ["New chat — 📁 Work · #draft"]
-        assert labels()[3] == "● draft"
+        assert labels()[3] == "draft  (on this chat)"
         await pilot.press("space")
         await settle(app, pilot)
         assert api.tag_sets[-1] == ("c1", [])
@@ -1027,10 +1027,10 @@ async def test_the_library_screen_files_and_tags_and_the_captions_follow():
         assert isinstance(app.screen, Library)
         assert labels() == [
             "— Folders —",
-            "● Work",
-            "  Archive",
+            "Work  (this chat)",
+            "Archive",
             "— Tags —",
-            "  draft",
+            "draft",
         ]
 
         # A folder of a taken name is the server's 409, said, not a banner.
@@ -1050,7 +1050,7 @@ async def test_the_library_screen_files_and_tags_and_the_captions_follow():
         await pilot.press("enter")
         await settle(app, pilot)
         assert api.tags_created == ["spam"]
-        assert labels()[-1] == "  spam"
+        assert labels()[-1] == "spam"
 
         # `m` on the folder the chat is already in takes it back out.
         rows.highlighted = 1

@@ -72,6 +72,7 @@ The rest of the command line:
 | `matterwave-tui completion bash\|zsh\|fish\|powershell` | the completion script, to source from the shell's profile |
 | `matterwave-tui config` | the config file, and where each setting comes from |
 | `matterwave-tui --debug [FILE]` | log each request's method, path, status and request id (never what was said) to FILE, or `debug.log` in the state directory |
+| `matterwave-tui --plain` | every mark as its word instead of a symbol (`pinned`, not 📌), and no colour |
 | `matterwave-tui --no-update-check` | skip the once-a-day look at PyPI for a newer release (or `MATTERWAVE_NO_UPDATE_CHECK=1`) |
 
 stdout carries the answer and nothing else: a device sign-in's URL and code, and every note, go to
@@ -137,7 +138,9 @@ PowerShell or cmd.exe on Windows (whichever started the TUI) and `$SHELL` elsewh
 | `Ctrl+Q` | anywhere | quit |
 
 Letter keys apply when focus is not in the composer or the search box; `Esc` gets you there. Each
-answer also carries two thumbs: a click rates it, a second click on the same thumb takes it back.
+answer also carries two thumbs (`👍 good`, `👎 bad`): a click rates it, a second click on the same
+thumb takes it back. Every symbol the screen draws alone carries its word beside it (`📌 pinned`),
+so a screen reader says what it means; `--plain` draws the words alone.
 
 Inside the dialogs:
 
@@ -247,6 +250,7 @@ palette is remembered for the next start, unless the file names one.
 | `MATTERWAVE_CONFIG` | another config file than the platform's own (see [Configuration](#configuration)) |
 | `MATTERWAVE_PROFILE` | the profile, when `--profile` is not given |
 | `MATTERWAVE_NO_UPDATE_CHECK` | `1` skips the once-a-day look for a newer release |
+| `NO_COLOR` | any value: the app draws without colour (`--plain` sets it) |
 | `MATTERWAVE_STATE_DIR` | where the dismissed announcements and the prompt roles are kept, as `<dir>/matterwave-tui`; else the platform's state directory: `$XDG_STATE_HOME` or `~/.local/state` on Linux, `%LOCALAPPDATA%` on Windows, `~/Library/Application Support` on macOS |
 
 ## Development

@@ -5,6 +5,74 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Coding-agent mode: `matterwave-tui code [path]` opens the agent on a
+  folder as a screen of the app (also on the command palette). It runs
+  its own loop against `/v1/chat/completions` with the SDK's agent
+  contract (`matterwave_sdk.agent` 1.0.0): the seven tools (`read_file`,
+  `list_dir`, `glob`, `grep`, `edit`, `write_file`, `run_shell`), path
+  confinement through the SDK's `confine` (no `..`, nothing outside the
+  root, no link out of it), the deny list (`.env*`, `*.pem`, `id_*`,
+  `.git/`, `.matterwaveignore`) for reads and writes, `.gitignore` for
+  search, and the versioned agent prompt. The server never runs a tool.
+- Approval modes `plan`, `ask` (the default), `auto-edit` and `yolo`;
+  Shift+Tab cycles them and the status line always shows the mode. `yolo`
+  needs `--yolo` each session and is never saved; `--yolo` without a
+  sandbox warns. In `ask` mode each change opens its unified diff and is
+  written only on `y`; `n` leaves the file byte for byte as it was.
+- Stop (`Esc`) closes the stream and kills a running command with
+  everything it started (process group on POSIX, job object on Windows).
+  Each run has a turn cap and a token cap; a 402 or 429 ends it with the
+  chat's own copy. The agent says it is unavailable when the org has
+  switched local agent tools off (`local_agent_tools` on `/api/me`) or the
+  model cannot call tools (`supports_tools`); a missing field allows it.
+- Runs are stored with `metadata.conversation_id` (tool rounds included,
+  so they open in the web); `--continue`, `--resume <id>` and `/resume`
+  pick one up with its earlier tool rounds in context.
+- Context files: `MATTERWAVE.md` / `AGENTS.md` at the root and a personal
+  `MATTERWAVE.local.md`, loaded only in a folder the user trusted (asked
+  once per folder, remembered), with the account's custom instructions on
+  top; `/init` drafts one. `@path` attaches a file or folder.
+- File checkpoints in a shadow git repository outside the project before
+  each applied change; `/restore` puts the files back and leaves the
+  project's own `.git` alone.
+- Headless agent: `-p` with `code` or any agent option, with
+  `--output-format text|json|stream-json`, `--approval-mode`,
+  `--max-turns`, `--max-tokens`, `--continue`, `--resume`, `--trust`,
+  `--sandbox` and `--no-store`. It never prompts; exit codes 0 done,
+  1 error, 2 usage, 3 budget / rate limit, 4 approval refused, 5 cap.
+  Plain `-p` is still the chat one-shot.
+- Slash commands in the agent's composer: `/help`, `/model`,
+  `/approval-mode [--save]`, `/compact`, `/context`, `/restore`, `/init`,
+  `/resume`, `/trust`, `/mcp`, `/agents`, `/clear`, `/chat`, and custom
+  commands from Markdown files (`commands/` in the config folder or a
+  trusted project's `.matterwave/commands/`).
+- Agent compaction: old tool output is folded first (no model call), then
+  a stored run is summarised with the conversation's compaction.
+- MCP client: stdio and Streamable HTTP servers from user and (trusted)
+  project settings, each with a tool allow-list and `trust`; MatterWave's
+  own `/mcp` pre-wired with the user's credential. MCP writes go through
+  the same approvals.
+- A task list tool (`todo_write`), the plan-mode exit (`exit_plan_mode`),
+  client web fetch behind approval (`web_fetch`), and subagents from
+  Markdown definitions with their own prompt and tool allow-list, nested
+  under the parent's mode, approvals and caps.
+- An optional shell sandbox, off by default: podman or docker (only the
+  root mounted, read-only elsewhere, no network), bubblewrap on Linux,
+  seatbelt on macOS.
+- `FakeV1` in `tests/fake_api.py`: a scripted `/v1` under the real adapter
+  and the SDK, with golden files for the headless output formats.
+
+### Changed
+
+- The SDK floor rises to `matterwave-sdk>=0.5.0`, and uv resolves the SDK
+  from the sibling `python-sdk` checkout until the release that carries
+  `matterwave_sdk.agent` is published.
+- CI runs on Linux, Windows and macOS, and runs mypy.
+
 ## [0.4.0] - 2026-10-31
 
 ### Added

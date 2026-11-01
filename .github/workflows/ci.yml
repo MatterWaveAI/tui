@@ -7,7 +7,13 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # The agent's shell tool kills process trees differently on each
+    # platform, so the suite runs on all three.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     env:
       PYTHONPATH: src
     steps:
@@ -19,5 +25,7 @@ jobs:
         run: pip install -e .[dev]
       - name: Lint
         run: ruff check .
+      - name: Types
+        run: mypy
       - name: Test
         run: pytest tests -q --ignore=tests/e2e

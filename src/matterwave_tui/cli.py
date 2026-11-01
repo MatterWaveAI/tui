@@ -3,8 +3,15 @@
     matterwave-tui                     open (signs in by device code if needed)
     matterwave-tui -p "prompt" [-m M]  one-shot: the answer, then exit
     cat notes | matterwave-tui         a piped-in prompt is the prompt
+    matterwave-tui code [path]         the coding agent in a folder (the cwd by default)
+    matterwave-tui -p "task" --output-format json   the agent, headless (any agent flag)
     matterwave-tui login [--key [K]]   store a key, or sign in by device code
     matterwave-tui logout              forget the stored credential
+
+`-p` alone is the chat one-shot it has always been. With `code`, or with any
+agent option (`--output-format`, `--approval-mode`, `--max-turns`,
+`--max-tokens`, `--continue`, `--resume`, `--yolo`, `--trust`, `--sandbox`,
+`--no-store`), it is a headless agent run in the folder instead.
 """
 
 from __future__ import annotations
@@ -15,9 +22,13 @@ import getpass
 import sys
 from collections.abc import Callable
 
+from matterwave_sdk import agent as contract
 from matterwave_sdk import frames as fr
 from matterwave_sdk.errors import APIConnectionError, APIError
 
+from .agent.headless import EXIT_CODES, EXIT_USAGE, OUTPUT_FORMATS, run_headless
+from .agent.session import OpenError, SessionOptions, resolve_root
+from .agent.shell import SANDBOX_ENGINES
 from .api import DEFAULT_BASE_URL, Cut, HttpChatAPI
 from .auth import (
     Credential,
@@ -59,6 +70,52 @@ def _login(base_url: str, key: str | None) -> str:
     return token
 
 
+def _positive(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number") from exc
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return value
+
+
+AGENT_FLAGS = (
+    "output_format", "approval_mode", "max_turns", "max_tokens", "continue_last", "resume",
+    "yolo", "trust", "sandbox", "no_store",
+)
+
+
+def _add_agent_options(parser: argparse.ArgumentParser, *, again: bool) -> None:
+    """The agent's options. `again` is the `code` subcommand's copy, which
+    leaves an option it was not given to the main parser's value."""
+
+    def default(value: object) -> object:
+        return argparse.SUPPRESS if again else value
+
+    group = parser.add_argument_group("agent mode")
+    group.add_argument("--output-format", choices=OUTPUT_FORMATS, default=default(None),
+                       help="headless agent output (default text)")
+    group.add_argument("--approval-mode", choices=contract.MODE_NAMES, default=default(None),
+                       help="plan, ask (default), auto-edit; yolo needs --yolo too")
+    group.add_argument("--max-turns", type=_positive, default=default(None),
+                       help="the run's cap on model calls")
+    group.add_argument("--max-tokens", type=_positive, default=default(None),
+                       help="the run's cap on tokens")
+    group.add_argument("--continue", dest="continue_last", action="store_true",
+                       default=default(False), help="continue the last run in this folder")
+    group.add_argument("--resume", metavar="ID", default=default(None),
+                       help="continue the stored run (conversation) ID")
+    group.add_argument("--yolo", action="store_true", default=default(False),
+                       help="allow the yolo mode this session (never saved)")
+    group.add_argument("--trust", action="store_true", default=default(False),
+                       help="trust this folder for this run (its context files and settings)")
+    group.add_argument("--sandbox", choices=SANDBOX_ENGINES, default=default(None),
+                       help="run commands in a sandbox (default: the settings', else none)")
+    group.add_argument("--no-store", dest="no_store", action="store_true", default=default(False),
+                       help="do not store the run as a conversation")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="matterwave-tui", description="MatterWave in a terminal.")
     parser.add_argument(
@@ -81,7 +138,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="shell assistant: an answer is a proposed command, run only after you confirm",
     )
+    _add_agent_options(parser, again=False)
     sub = parser.add_subparsers(dest="command")
+    code = sub.add_parser("code", help="the coding agent in a folder")
+    code.add_argument("path", nargs="?", default=None, help="the workspace root (default: cwd)")
+    code.add_argument("-p", "--prompt", default=argparse.SUPPRESS, help="run headless")
+    code.add_argument("-m", "--model", default=argparse.SUPPRESS)
+    _add_agent_options(code, again=True)
     login = sub.add_parser("login", help="store a key, or sign in by device code")
     login.add_argument("--key", nargs="?", const=_PROMPT, dest="login_key")
     sub.add_parser("logout", help="forget the stored credential for this deployment")
@@ -137,8 +200,29 @@ async def run_oneshot(
     return 0
 
 
+def agent_options(args: argparse.Namespace, *, interactive: bool) -> SessionOptions:
+    return SessionOptions(
+        root=resolve_root(getattr(args, "path", None)),
+        mode=args.approval_mode,
+        yolo=bool(args.yolo),
+        model=args.model,
+        max_turns=args.max_turns,
+        max_tokens=args.max_tokens,
+        trust=True if args.trust else None,
+        resume=args.resume,
+        continue_last=bool(args.continue_last),
+        sandbox=args.sandbox,
+        store=not args.no_store,
+        interactive=interactive,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    wants_agent = args.command == "code" or any(getattr(args, f, None) for f in AGENT_FLAGS)
+    if wants_agent and args.command != "code" and args.prompt is None:
+        parser.error("the agent options need `code` (interactive) or -p (headless)")
     try:
         base_url = resolve_base_url(args.base_url, DEFAULT_BASE_URL)
     except ValueError as exc:
@@ -162,6 +246,27 @@ def main(argv: list[str] | None = None) -> int:
         print(exc, file=sys.stderr)
         return 1
     prompt = _oneshot_prompt(args)
+    if wants_agent:
+        try:
+            options = agent_options(args, interactive=prompt is None)
+        except OpenError as exc:
+            print(exc, file=sys.stderr)
+            return EXIT_USAGE
+        if prompt is not None:
+            if not prompt:
+                print("Nothing to send: give -p a prompt or pipe one in.", file=sys.stderr)
+                return EXIT_USAGE
+            try:
+                return asyncio.run(
+                    run_agent_headless(
+                        base_url, credential, options, prompt, args.output_format or "text"
+                    )
+                )
+            except KeyboardInterrupt:
+                print("Stopped.", file=sys.stderr)
+                return EXIT_CODES["stopped"]
+        run_app(base_url, credential, agent=options)
+        return 0
     if prompt is not None:
         if not prompt:
             print("Nothing to send: give -p a prompt or pipe one in.", file=sys.stderr)
@@ -171,7 +276,24 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def run_app(base_url: str, credential: Credential, *, shell_mode: bool = False) -> None:
+async def run_agent_headless(
+    base_url: str, credential: Credential, options: SessionOptions, prompt: str, output_format: str
+) -> int:
+    """`-p` in agent mode: one run in the folder, then exit with its code."""
+    api = HttpChatAPI(base_url=base_url, token=credential.token)
+    try:
+        return await run_headless(api, options, prompt, output_format=output_format)
+    finally:
+        await api.aclose()
+
+
+def run_app(
+    base_url: str,
+    credential: Credential,
+    *,
+    shell_mode: bool = False,
+    agent: SessionOptions | None = None,
+) -> None:
     from .app import MatterWaveApp
 
     holder: dict[str, MatterWaveApp] = {}
@@ -200,7 +322,7 @@ def run_app(base_url: str, credential: Credential, *, shell_mode: bool = False) 
         return (await device_login(base_url, on_code)).access_token
 
     api = HttpChatAPI(base_url=base_url, token=credential.token, refresh=refresh)
-    app = MatterWaveApp(api, relogin=device, shell_mode=shell_mode)
+    app = MatterWaveApp(api, relogin=device, shell_mode=shell_mode, agent=agent)
     holder["app"] = app
     app.run()
 

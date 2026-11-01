@@ -25,6 +25,7 @@ from textual.widget import Widget
 from textual.widgets import Footer, Input, Label, ListItem, ListView, Static, TextArea
 
 from . import images
+from .agent.session import SessionOptions
 from .api import NOTIFICATIONS_PAGE, ChatAPI, Cut, Opened, StreamItem
 from .dictation import MEDIA_TYPES, MicRecorder, media_type_for, mic_available
 from .export import conversation_markdown, export_filename
@@ -244,6 +245,8 @@ class TuiCommands(Provider):
          "action_dictate"),
         ("Prompt roles…", "named system prompts to apply to this conversation",
          "action_roles"),
+        ("Coding agent in this folder…", "read, edit and run commands here, with approvals",
+         "action_open_agent"),
     )
 
     async def discover(self) -> Hits:
@@ -256,6 +259,18 @@ class TuiCommands(Provider):
             if (match := matcher.match(name)) > 0:
                 yield Hit(match, matcher.highlight(name), getattr(self.app, action),
                           help=help_text)
+
+
+# The chat's own key actions, switched off while the agent screen is in front
+# (its composer takes the letters; elsewhere they would act on the chat
+# hidden behind it).
+CHAT_ACTIONS = frozenset({
+    "new", "search", "pick_model", "edit", "regenerate", "branch", "toggle_originals",
+    "compact", "instructions", "feedback", "rename", "toggle_pin", "toggle_archive",
+    "delete_conversation", "fork", "share", "my_shares", "library", "roles", "report",
+    "notifications", "dismiss_announcements", "export_markdown", "attach", "dictate",
+    "cycle_filter", "copy", "copy_code", "leave_composer",
+})
 
 
 class MatterWaveApp(App[None]):
@@ -314,10 +329,19 @@ class MatterWaveApp(App[None]):
     ]
 
     def __init__(
-        self, api: ChatAPI, *, relogin: DeviceLoginFn | None = None, shell_mode: bool = False
+        self,
+        api: ChatAPI,
+        *,
+        relogin: DeviceLoginFn | None = None,
+        shell_mode: bool = False,
+        agent: SessionOptions | None = None,
     ) -> None:
         super().__init__()
         self.api = api
+        # `matterwave-tui code [path]`: the agent screen opens over the chat,
+        # and the chat's own loading waits until the person goes to it.
+        self.agent_options = agent
+        self._chat_loaded = False
         self.relogin_fn = relogin
         self.conversations: list[Conversation] = []
         self.conversation: Conversation | None = None
@@ -425,7 +449,34 @@ class MatterWaveApp(App[None]):
             self.set_interval(IMAGE_REFRESH_S, self._refresh_images)
         self.render_status()
         self.query_one("#composer", TextArea).focus()
-        self.load_initial()
+        if self.agent_options is not None:
+            self.open_agent(self.agent_options)
+        else:
+            self._load_chat()
+
+    def _load_chat(self) -> None:
+        if not self._chat_loaded:
+            self._chat_loaded = True
+            self.load_initial()
+
+    # --- the coding agent ------------------------------------------------------------
+
+    def open_agent(self, options: SessionOptions) -> None:
+        """The agent screen over the chat. The API adapter is the wire: its
+        `/v1` and `/mcp` methods are the agent's."""
+        from typing import cast
+
+        from .agent.screen import AgentScreen
+        from .agent.wire import AgentWire
+
+        def leave() -> None:
+            self.pop_screen()
+            self._load_chat()
+
+        self.push_screen(AgentScreen(cast(AgentWire, self.api), options, leave=leave))
+
+    def action_open_agent(self) -> None:
+        self.open_agent(SessionOptions(root=Path.cwd()))
 
     async def on_unmount(self) -> None:
         await self.api.aclose()
@@ -556,7 +607,15 @@ class MatterWaveApp(App[None]):
         announcements banner offers its dismiss key only while it stands."""
         if action == "dismiss_announcements":
             return bool(self.announcements)
+        if action in CHAT_ACTIONS and self._agent_screen() is not None:
+            # The agent screen is in front: the chat's keys wait behind it.
+            return False
         return not (self.temporary_chat and action in ("share", "fork"))
+
+    def _agent_screen(self) -> Any:
+        from .agent.screen import AgentScreen
+
+        return self.screen if isinstance(self.screen, AgentScreen) else None
 
     def go_offline(self) -> None:
         if self.connection != "offline":
@@ -984,6 +1043,12 @@ class MatterWaveApp(App[None]):
         self.render_status()
 
     def action_send(self) -> None:
+        agent = self._agent_screen()
+        if agent is not None:
+            # Ctrl+Enter is the app's priority key; in code mode it sends
+            # to the agent.
+            agent.action_send()
+            return
         composer = self.query_one("#composer", TextArea)
         text = composer.text.strip()
         if not text:

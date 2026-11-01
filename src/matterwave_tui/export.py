@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import unicodedata
 from datetime import UTC, datetime
+from pathlib import Path
 
 from matterwave_sdk.models import Conversation
 
@@ -116,3 +117,17 @@ def _filename_stem(title: str) -> str:
 
 def export_filename(conversation: Conversation) -> str:
     return _filename_stem(conversation.title or "") + ".md"
+
+
+def free_path(path: Path) -> Path:
+    """`path`, or the first `name (2).md`, `name (3).md`… beside it that is
+    not taken, the way a browser saves a second download: an export never
+    overwrites a file that is already there."""
+    if not path.exists():
+        return path
+    n = 2
+    while True:
+        candidate = path.with_name(f"{path.stem} ({n}){path.suffix}")
+        if not candidate.exists():
+            return candidate
+        n += 1

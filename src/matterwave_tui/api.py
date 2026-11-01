@@ -160,6 +160,10 @@ class ChatAPI(Protocol):
 
     async def revoke_share(self, share_id: str) -> dict[str, Any]: ...
 
+    async def api_keys(self) -> list[dict[str, Any]]: ...
+
+    async def revoke_key(self, key_id: str) -> None: ...
+
     async def accounts(self) -> dict[str, Any]: ...
 
     async def switch_account(self, slot: int) -> dict[str, Any]: ...
@@ -556,6 +560,18 @@ class HttpChatAPI:
         retries."""
         await self._writes.shares.revoke(share_id)
         return {}
+
+    async def api_keys(self) -> list[dict[str, Any]]:
+        """`GET /api/keys` by way of the SDK: the org's keys, never their
+        secrets, revoked ones included. A key without `keys:manage` (a
+        device key) is shown its own row and nothing else."""
+        page = await self._reads.keys.list()
+        return [_row_dict(key) for key in page.data]
+
+    async def revoke_key(self, key_id: str) -> None:
+        """`DELETE /api/keys/{id}` by way of the SDK: the key stops working
+        at once; a key may always revoke itself. A write: no retries."""
+        await self._writes.keys.revoke(key_id)
 
     async def accounts(self) -> dict[str, Any]:
         """`GET /api/accounts`: who is signed in, the acting account first,

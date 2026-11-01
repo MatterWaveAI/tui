@@ -105,7 +105,9 @@ def test_an_empty_prompt_is_a_usage_error(capsys, monkeypatch):
 def test_a_tty_opens_the_app(capsys, monkeypatch):
     opened: list[str] = []
 
-    def run_app(base_url: str, credential: object, *, shell_mode: bool = False) -> None:
+    def run_app(
+        base_url: str, credential: object, *, shell_mode: bool = False, model: str | None = None
+    ) -> None:
         opened.append(base_url)
 
     monkeypatch.setattr(cli, "run_app", run_app)
@@ -119,7 +121,9 @@ def test_a_tty_opens_the_app(capsys, monkeypatch):
 def test_shell_flag_reaches_the_app(monkeypatch):
     opened: list[bool] = []
 
-    def run_app(base_url: str, credential: object, *, shell_mode: bool = False) -> None:
+    def run_app(
+        base_url: str, credential: object, *, shell_mode: bool = False, model: str | None = None
+    ) -> None:
         opened.append(shell_mode)
 
     monkeypatch.setattr(cli, "run_app", run_app)
@@ -288,5 +292,103 @@ def test_a_key_is_stored_in_the_test_keyring_never_the_os_one(memory_keyring, mo
     monkeypatch.setattr("matterwave_tui.api.httpx.AsyncClient", mock_api(seen))
     assert cli.main(["--base-url", BASE, "--key", "mw_k", "-p", "hi"]) == 0
     assert memory_keyring.entries == {("matterwave", BASE): "mw_k"}
+    assert cli.main(["--base-url", BASE, "logout", "--local"]) == 0
+    assert memory_keyring.entries == {}
+
+
+DEVICE_KEY = "mw_abcd1234_secretsecret"
+
+
+def keys_api(
+    seen: list[tuple[str, str]], rows: list[dict[str, Any]] | None, status: int = 200
+) -> Callable[[], httpx.AsyncClient]:
+    """`GET /api/keys` answering `rows` (with `status`), `DELETE` a 204."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        if request.method == "GET" and request.url.path == "/api/keys":
+            if rows is None:
+                return httpx.Response(status, json={"detail": "no"})
+            return httpx.Response(200, json={"data": rows})
+        if request.method == "DELETE" and request.url.path.startswith("/api/keys/"):
+            return httpx.Response(204)
+        return httpx.Response(404, json={"detail": request.url.path})
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient
+    return lambda: real_client(transport=transport)
+
+
+def key_row(**fields: Any) -> dict[str, Any]:
+    return {
+        "id": "k1",
+        "prefix": "mw_abcd1234",
+        "name": "matterwave-tui on laptop",
+        "kind": "device",
+        "scopes": ["chat"],
+        "created_at": "2026-10-30T00:00:00Z",
+        "revoked_at": None,
+        **fields,
+    }
+
+
+def test_logout_revokes_the_device_key_then_forgets_it(memory_keyring, capsys, monkeypatch):
+    memory_keyring.entries[("matterwave", BASE)] = DEVICE_KEY
+    seen: list[tuple[str, str]] = []
+    rows = [key_row(id="k0", prefix="mw_other000"), key_row()]
+    monkeypatch.setattr("matterwave_tui.api.httpx.AsyncClient", keys_api(seen, rows))
+    assert cli.main(["--base-url", BASE, "logout"]) == 0
+    assert seen == [("GET", "/api/keys"), ("DELETE", "/api/keys/k1")]
+    assert memory_keyring.entries == {}
+    assert "revoked on the server" in capsys.readouterr().err
+
+
+def test_logout_leaves_a_web_app_key_live_and_says_so(memory_keyring, capsys, monkeypatch):
+    memory_keyring.entries[("matterwave", BASE)] = DEVICE_KEY
+    seen: list[tuple[str, str]] = []
+    rows = [key_row(kind="user", name="CI key")]
+    monkeypatch.setattr("matterwave_tui.api.httpx.AsyncClient", keys_api(seen, rows))
+    assert cli.main(["--base-url", BASE, "logout"]) == 0
+    assert seen == [("GET", "/api/keys")]
+    assert memory_keyring.entries == {}
+    assert "“CI key” was made in the web app" in capsys.readouterr().err
+
+
+def test_logout_of_a_dead_key_just_forgets_it(memory_keyring, monkeypatch):
+    memory_keyring.entries[("matterwave", BASE)] = DEVICE_KEY
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr("matterwave_tui.api.httpx.AsyncClient", keys_api(seen, None, 401))
     assert cli.main(["--base-url", BASE, "logout"]) == 0
     assert memory_keyring.entries == {}
+
+
+def test_logout_keeps_the_key_when_the_server_cannot_revoke_it(
+    memory_keyring, capsys, monkeypatch
+):
+    memory_keyring.entries[("matterwave", BASE)] = DEVICE_KEY
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr("matterwave_tui.api.httpx.AsyncClient", keys_api(seen, None, 500))
+    assert cli.main(["--base-url", BASE, "logout"]) == cli.EXIT_ERROR
+    assert memory_keyring.entries == {("matterwave", BASE): DEVICE_KEY}
+    assert "logout --local" in capsys.readouterr().err
+
+
+def test_flags_a_command_does_not_use_are_named(memory_keyring, capsys):
+    assert cli.main(["--base-url", BASE, "-m", "grt-nano", "--shell", "logout", "--local"]) == 0
+    err = capsys.readouterr().err
+    assert "-m does nothing with logout" in err
+    assert "--shell does nothing with logout" in err
+
+
+def test_m_reaches_the_app(monkeypatch):
+    opened: list[str | None] = []
+
+    def run_app(
+        base_url: str, credential: object, *, shell_mode: bool = False, model: str | None = None
+    ) -> None:
+        opened.append(model)
+
+    monkeypatch.setattr(cli, "run_app", run_app)
+    monkeypatch.setattr(cli.sys, "stdin", argparse.Namespace(isatty=lambda: True))
+    assert cli.main(["--base-url", BASE, "--key", "mw_k", "-m", "lab-x"]) == 0
+    assert opened == ["lab-x"]

@@ -5,7 +5,7 @@
     matterwave-tui --shell -p "..."    one-shot shell assistant: a command, run on y
     cat notes | matterwave-tui         a piped-in prompt is the prompt
     matterwave-tui login [--key [K]]   store a key, or sign in by device code
-    matterwave-tui logout              forget the stored credential
+    matterwave-tui logout [--local]    revoke the stored device key, then forget it
 
 stdout carries the answer and nothing else; sign-in prompts and every
 note go to stderr, so `matterwave-tui -p "..." > answer.txt` holds only
@@ -22,7 +22,7 @@ import sys
 from collections.abc import Callable
 
 from matterwave_sdk import frames as fr
-from matterwave_sdk.errors import APIConnectionError, APIError
+from matterwave_sdk.errors import APIConnectionError, APIError, AuthenticationError
 
 from .api import DEFAULT_BASE_URL, Cut, HttpChatAPI
 from .auth import (
@@ -80,6 +80,50 @@ def _print_code(code: DeviceCode) -> None:
     _note("Waiting for approval…")
 
 
+def key_prefix(token: str) -> str | None:
+    """The part of an `mw_` key the server lists it by (`mw_` and eight
+    characters, then `_`), as the platform's own `prefix_of` cuts it."""
+    if token.startswith("mw_") and len(token) > 12 and token[11] == "_":
+        return token[:11]
+    return None
+
+
+async def revoke_stored(base_url: str, token: str) -> str:
+    """Withdraw the stored credential on the server before it is forgotten
+    here. A device key -- the one a sign-in minted -- is revoked; a key made
+    in the web app and stored with `login --key` is the person's to keep,
+    so it is only named. What happened, in a sentence; an error means
+    nothing was withdrawn, and the caller keeps the local copy."""
+    api = HttpChatAPI(base_url=base_url, token=token)
+    try:
+        try:
+            keys = await api.api_keys()
+        except AuthenticationError:
+            return "The stored key no longer worked on the server."
+        prefix = key_prefix(token)
+        row = next(
+            (
+                key
+                for key in keys
+                if prefix and prefix in (key.get("prefix"), key.get("previous_prefix"))
+            ),
+            None,
+        )
+        if row is None:
+            return "The server lists no key for this credential."
+        if row.get("revoked_at"):
+            return "The device key was already revoked."
+        if row.get("kind") != "device":
+            return (
+                f"The key “{row.get('name') or prefix}” was made in the web app; it is "
+                "forgotten here but stays live. Revoke it there if it should stop working."
+            )
+        await api.revoke_key(str(row.get("id")))
+        return "The device key was revoked on the server."
+    finally:
+        await api.aclose()
+
+
 def _key_arg(value: object) -> str | None:
     if value is _PROMPT:
         return getpass.getpass("MatterWave API key: ").strip() or None
@@ -118,7 +162,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--prompt",
         help="one-shot mode: send this prompt, print the answer to stdout, exit",
     )
-    parser.add_argument("-m", "--model", help="the model for a one-shot prompt")
+    parser.add_argument(
+        "-m",
+        "--model",
+        help="the model for a one-shot prompt; in the app, for every turn until you pick another",
+    )
     parser.add_argument(
         "--shell",
         action="store_true",
@@ -127,8 +175,53 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
     login = sub.add_parser("login", help="store a key, or sign in by device code")
     login.add_argument("--key", nargs="?", const=_PROMPT, dest="login_key")
-    sub.add_parser("logout", help="forget the stored credential for this deployment")
+    logout = sub.add_parser(
+        "logout",
+        help="revoke the stored device key on the server, then forget it here",
+    )
+    logout.add_argument(
+        "--local",
+        action="store_true",
+        help="only forget it here, leaving the key live on the server",
+    )
     return parser
+
+
+def _logout(base_url: str, *, local: bool) -> int:
+    stored = load_token(base_url)
+    if stored is None:
+        _note("Nothing was stored for this deployment.")
+        return EXIT_OK
+    if not local:
+        try:
+            _note(asyncio.run(revoke_stored(base_url, stored)))
+        except (APIConnectionError, APIError) as exc:
+            _note(
+                f"Could not revoke the key on the server ({exc}); it is still stored here. "
+                "Run logout again, or `logout --local` to forget it and leave it live."
+            )
+            return EXIT_ERROR
+    delete_token(base_url)
+    _note("Signed out.")
+    return EXIT_OK
+
+
+def _ignored_flags(args: argparse.Namespace) -> list[str]:
+    """The flags this command line gives that its command does not use."""
+    if args.command not in ("login", "logout"):
+        return []
+    ignored = [
+        flag
+        for flag, given in (
+            ("-p", args.prompt is not None),
+            ("-m", args.model is not None),
+            ("--shell", args.shell),
+        )
+        if given
+    ]
+    if args.command == "logout" and args.key is not None:
+        ignored.append("--key")
+    return ignored
 
 
 def _oneshot_prompt(args: argparse.Namespace) -> str | None:
@@ -219,6 +312,8 @@ async def _confirm_and_run(command: str, shell: Shell) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    for flag in _ignored_flags(args):
+        _note(f"{flag} does nothing with {args.command}; it was ignored.")
     try:
         base_url = resolve_base_url(args.base_url, DEFAULT_BASE_URL)
     except ValueError as exc:
@@ -226,9 +321,7 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE
     try:
         if args.command == "logout":
-            removed = delete_token(base_url)
-            _note("Signed out." if removed else "Nothing was stored for this deployment.")
-            return EXIT_OK
+            return _logout(base_url, local=args.local)
         if args.command == "login":
             _login(base_url, _key_arg(args.login_key) or _key_arg(args.key))
             return EXIT_OK
@@ -248,11 +341,13 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_USAGE
         shell = detect_shell(os.environ) if args.shell else None
         return asyncio.run(run_oneshot(base_url, credential, prompt, args.model, shell=shell))
-    run_app(base_url, credential, shell_mode=args.shell)
+    run_app(base_url, credential, shell_mode=args.shell, model=args.model)
     return EXIT_OK
 
 
-def run_app(base_url: str, credential: Credential, *, shell_mode: bool = False) -> None:
+def run_app(
+    base_url: str, credential: Credential, *, shell_mode: bool = False, model: str | None = None
+) -> None:
     from .app import MatterWaveApp
 
     holder: dict[str, MatterWaveApp] = {}
@@ -281,7 +376,7 @@ def run_app(base_url: str, credential: Credential, *, shell_mode: bool = False) 
         return (await device_login(base_url, on_code)).access_token
 
     api = HttpChatAPI(base_url=base_url, token=credential.token, refresh=refresh)
-    app = MatterWaveApp(api, relogin=device, shell_mode=shell_mode)
+    app = MatterWaveApp(api, relogin=device, shell_mode=shell_mode, model=model)
     holder["app"] = app
     app.run()
 

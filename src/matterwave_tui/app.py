@@ -27,7 +27,7 @@ from textual.widgets import Footer, Input, Label, ListItem, ListView, Static, Te
 from . import images
 from .api import NOTIFICATIONS_PAGE, ChatAPI, Cut, Opened, StreamItem
 from .dictation import MEDIA_TYPES, MicRecorder, media_type_for, mic_available
-from .export import conversation_markdown, export_filename
+from .export import conversation_markdown, export_filename, free_path
 from .failures import Failure, classify, retry_in
 from .models import is_image_filename, model_accepts_images, model_window, vision_capable_model_ids
 from .roles import load_roles, roles_path, save_roles
@@ -42,6 +42,7 @@ from .screens import (
     Library,
     LibraryState,
     ModelPicker,
+    NewChat,
     Notifications,
     PendingAttachments,
     Prompt,
@@ -327,7 +328,12 @@ class MatterWaveApp(App[None]):
     ]
 
     def __init__(
-        self, api: ChatAPI, *, relogin: DeviceLoginFn | None = None, shell_mode: bool = False
+        self,
+        api: ChatAPI,
+        *,
+        relogin: DeviceLoginFn | None = None,
+        shell_mode: bool = False,
+        model: str | None = None,
     ) -> None:
         super().__init__()
         self.api = api
@@ -338,7 +344,10 @@ class MatterWaveApp(App[None]):
         self.drafts: dict[str, str] = {}
         self.models_list: list[dict[str, Any]] = []
         self.default_model: str | None = None
-        self.model: str | None = None
+        self.model: str | None = model
+        # `-m` at launch: the model for every turn, whatever a conversation
+        # was last on, until the picker chooses another.
+        self.model_override = model
         self.editing: str | None = None
         self.streaming = False
         # Typed while an answer streams: it sends itself when the turn
@@ -619,7 +628,14 @@ class MatterWaveApp(App[None]):
 
     @work(group="load")
     async def load_initial(self) -> None:
-        await self.load_models()
+        loaded = await self.load_models()
+        override = self.model_override
+        if loaded and override and self.models_list and not self.model_allowed(override):
+            self.notify(
+                f"{override} is not a model you can use here; each conversation keeps its own.",
+                severity="warning",
+            )
+            self.model = self.model_override = None
         await self.refresh_conversations()
         self.load_usage()
         self.load_budget()
@@ -760,7 +776,7 @@ class MatterWaveApp(App[None]):
         # left; its text and files stay there, and nothing goes by itself.
         self.send_after_scan = False
         self.thread = Thread.from_tree(tree.messages, tree.current_leaf_message_id)
-        self.model = tree.default_model or self.model
+        self.model = self.model_override or tree.default_model or self.model
         self.editing = None
         self.feedback = {}
         # A conversation read from the list is never the temporary one that
@@ -956,20 +972,14 @@ class MatterWaveApp(App[None]):
 
     def action_new(self) -> None:
         """A new chat. Temporary is decided here or not at all: the flag is
-        fixed at creation and no route flips it afterwards."""
+        fixed at creation and no route flips it afterwards. Enter keeps the
+        chat; only `t` makes the kind that deletes itself."""
 
-        def chosen(temporary: bool | None) -> None:
-            self._new_conversation(bool(temporary))
+        def chosen(kind: str | None) -> None:
+            if kind is not None:
+                self._new_conversation(kind == "temporary")
 
-        self.push_screen(
-            Confirm(
-                "Start a temporary chat? It won't appear in your history or search, can't be "
-                "shared, and is deleted 24 hours after the last message.",
-                danger=False,
-                hint="Enter = temporary, Esc = a regular chat.",
-            ),
-            chosen,
-        )
+        self.push_screen(NewChat(), chosen)
 
     @work(group="action")
     async def _new_conversation(self, temporary: bool) -> None:
@@ -1022,6 +1032,7 @@ class MatterWaveApp(App[None]):
                 return
             self.conversation = replace(self.conversation, default_model=updated.default_model)
         self.model = model_id
+        self.model_override = None
         self.render_status()
 
     def action_send(self) -> None:
@@ -1309,16 +1320,20 @@ class MatterWaveApp(App[None]):
         if self.conversation is None:
             return
         conversation, thread = self.conversation, self.thread
-        path = Path.cwd() / export_filename(conversation)
         document = conversation_markdown(conversation, thread)
 
-        def write() -> None:
-            path.write_text(document, encoding="utf-8")
+        def write() -> Path:
+            # Exclusive creation: a file that appeared since the free name
+            # was picked is not overwritten either.
+            path = free_path(Path.cwd() / export_filename(conversation))
+            with path.open("x", encoding="utf-8") as out:
+                out.write(document)
+            return path
 
         try:
-            await asyncio.to_thread(write)
+            path = await asyncio.to_thread(write)
         except OSError as exc:
-            self.notify(f"Could not write {path.name}: {exc}", severity="error")
+            self.notify(f"Could not write the export: {exc}", severity="error")
             return
         self.notify(f"Exported to {path}")
 
@@ -1851,15 +1866,18 @@ class MatterWaveApp(App[None]):
             self.fail_from_exception(exc)
             return
         created = str(row.get("created_at") or "")
-        path = Path.cwd() / f"matterwave-export-{created[:10] or 'account'}.json"
+        name = f"matterwave-export-{created[:10] or 'account'}.json"
 
-        def write() -> None:
-            path.write_bytes(data)
+        def write() -> Path:
+            path = free_path(Path.cwd() / name)
+            with path.open("xb") as out:
+                out.write(data)
+            return path
 
         try:
-            await asyncio.to_thread(write)
+            path = await asyncio.to_thread(write)
         except OSError as exc:
-            self.notify(f"Could not write {path.name}: {exc}", severity="error")
+            self.notify(f"Could not write {name}: {exc}", severity="error")
             return
         self.notify(f"Account export saved to {path} ({len(data)} bytes).")
 

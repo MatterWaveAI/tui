@@ -17,7 +17,8 @@ From a checkout of this repo: `uv sync && uv run matterwave-tui`.
 ## One-shot and scripting
 
 Without the interface: `matterwave-tui -p "two plus two?"` prints the answer to stdout and exits
-(`-m` picks the model). A piped-in stdin is the prompt, so scripts work the usual way:
+(`-m` picks the model; in the app, `-m` is the model for every turn until you pick another). A flag
+the command does not use (`-m` with `logout`, say) is named on stderr rather than ignored silently. A piped-in stdin is the prompt, so scripts work the usual way:
 
 ```sh
 cat notes.md | matterwave-tui -m grt-nano
@@ -56,7 +57,10 @@ Point it at a deployment with `--base-url` or `MATTERWAVE_BASE_URL` (default
 
 The credential is stored in the OS keyring (service `matterwave`, one entry per base URL), never in
 a dotfile. If no keyring backend is available, sign-in fails rather than writing a file; use
-`MATTERWAVE_API_KEY` instead. `matterwave-tui logout` forgets it.
+`MATTERWAVE_API_KEY` instead. `matterwave-tui logout` revokes the stored device key on the server
+and then forgets it; a key you made in the web app and stored with `login --key` is only forgotten,
+and stays live until you revoke it there. If the server cannot be reached the key stays stored, so
+nothing is left live by accident; `logout --local` forgets it anyway.
 
 On a 401 the client tries once more with a fresh credential (one another terminal stored, or a
 device sign-in shown in the app), then reports the session as expired. A key passed with `--key`
@@ -75,7 +79,7 @@ or the environment is never replaced behind your back.
 | `x` | transcript | show / hide the messages a summary replaced |
 | `c` | transcript | compact the conversation now |
 | `m` | transcript | model picker |
-| `n` | transcript | new conversation |
+| `n` | transcript | new conversation: Enter a regular one, `t` a temporary one (deleted 24 h after its last message), Esc none |
 | `/` | transcript | search conversations |
 | `F2` | anywhere | rename the open conversation |
 | `p` | anywhere | pin / unpin the open conversation |
@@ -83,7 +87,7 @@ or the environment is never replaced behind your back.
 | `d` | anywhere | delete the open conversation (asks first) |
 | `f` | transcript | fork the conversation from the selected message |
 | `s` | anywhere | create a share link for the conversation |
-| `w` | anywhere | export the conversation to a Markdown file (the working directory) |
+| `w` | anywhere | export the conversation to a Markdown file in the working directory; an existing file is never overwritten (`name (2).md`) |
 | `i` | anywhere | attach a file (its path, quoted or not, `~` allowed); it goes with this conversation's next message |
 | `I` | anywhere | take a pending file off the next message (and delete the upload) |
 | `o` | anywhere | cycle the sidebar list: default → pinned → archived → all |

@@ -30,6 +30,7 @@ from matterwave_tui.screens import (
     InstructionsEditor,
     Library,
     ModelPicker,
+    NewChat,
     Notifications,
     PendingAttachments,
     Prompt,
@@ -721,6 +722,13 @@ async def test_export_writes_the_active_path_as_markdown(tmp_path, monkeypatch):
         assert "Exported from MatterWave on " in text
         assert "## You" in text and "What is TUI?" in text
         assert "## Assistant (grt-nano)" in text and "A terminal UI." in text
+        # A second export never overwrites the first: it takes the next
+        # free name, as a browser's second download does.
+        files[0].write_text("my notes", encoding="utf-8")
+        await pilot.press("w")
+        await settle(app, pilot)
+        assert files[0].read_text(encoding="utf-8") == "my notes"
+        assert (tmp_path / "New chat (2).md").read_text(encoding="utf-8").startswith("# New chat")
 
 
 @pytest.mark.asyncio
@@ -1076,21 +1084,28 @@ async def test_a_new_chat_offers_the_temporary_toggle_before_anything_is_sent():
     shown = capture_notify(app)
     async with app.run_test() as pilot:
         await settle(app, pilot)
-        # Esc first: a regular chat, as before.
+        # Esc makes nothing at all.
         await pilot.press("escape", "n")
         await settle(app, pilot)
-        assert isinstance(app.screen, Confirm)
+        assert isinstance(app.screen, NewChat)
+        await pilot.press("escape")
+        await settle(app, pilot)
+        assert api.creates == []
+        assert not isinstance(app.screen, NewChat)
+
+        # Enter, the natural key, makes a regular chat that is kept.
         await pilot.press("n")
+        await settle(app, pilot)
+        await pilot.press("enter")
         await settle(app, pilot)
         assert api.creates == [(None, None, False)]
         assert app.conversation is not None and app.conversation.id == "c2"
         assert not app.temporary_chat
-        assert not isinstance(app.screen, Confirm)
 
-        # Enter this time: a temporary chat, created with the flag on.
+        # Only `t` makes a temporary chat, created with the flag on.
         await pilot.press("escape", "n")
         await settle(app, pilot)
-        await pilot.press("enter")
+        await pilot.press("t")
         await settle(app, pilot)
         assert api.creates[-1] == (None, None, True)
         assert app.temporary_chat
@@ -1473,6 +1488,38 @@ async def test_creating_a_tag_that_exists_leaves_one_row():
         state = await app.apply_tag_create("later")
         assert state is not None
         assert [tag["name"] for tag in state[1]] == ["draft", "later"]
+
+
+@pytest.mark.asyncio
+async def test_a_launch_model_is_used_until_another_is_picked():
+    api = FakeAPI(happy_script())
+    app = MatterWaveApp(api, model="other-7b")
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        # c1 was last on grt-nano; `-m` wins for this session's turns.
+        assert app.model == "other-7b"
+        app.query_one("#composer", TextArea).text = "hi"
+        app.action_send()
+        await settle(app, pilot)
+        assert api.sent == [("c1", "hi", "other-7b")]
+        app.apply_model("lab-x")
+        await settle(app, pilot)
+        assert app.model_override is None
+        app.query_one("#composer", TextArea).text = "again"
+        app.action_send()
+        await settle(app, pilot)
+        assert api.sent[-1] == ("c1", "again", "lab-x")
+
+
+@pytest.mark.asyncio
+async def test_a_launch_model_the_plan_lacks_is_refused_up_front():
+    api = FakeAPI(happy_script())
+    app = MatterWaveApp(api, model="grt-max")
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert any("grt-max is not a model you can use here" in s for s in shown)
+        assert app.model == "grt-nano"
 
 
 @pytest.mark.asyncio

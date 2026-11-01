@@ -153,6 +153,38 @@ class Confirm(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class NewChat(ModalScreen[str | None]):
+    """What kind of chat `n` starts: Enter a regular one, `t` a temporary
+    one, Esc none. The temporary kind is the one that deletes itself, so it
+    takes the deliberate key and the natural one keeps what is written."""
+
+    BINDINGS = [
+        Binding("enter", "choose('saved')", "Regular chat"),
+        Binding("t", "choose('temporary')", "Temporary chat"),
+        Binding("escape", "choose('')", "Cancel"),
+    ]
+    DEFAULT_CSS = """
+    NewChat { align: center middle; }
+    NewChat > Vertical { width: 64; height: auto; border: round $accent;
+        background: $surface; padding: 1 2; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static("Start a new chat.", markup=False)
+            yield Static(
+                "Enter: a regular chat, kept in your history.\n"
+                "t: a temporary chat. It won't appear in your history or search, can't be "
+                "shared, and is deleted 24 hours after the last message.\n"
+                "Esc: cancel.",
+                classes="hint",
+                markup=False,
+            )
+
+    def action_choose(self, kind: str) -> None:
+        self.dismiss(kind or None)
+
+
 class DeviceLogin(ModalScreen[str | None]):
     """Sign in again without leaving the TUI: the URL and code, then wait."""
 

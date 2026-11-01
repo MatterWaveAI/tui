@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Defaults that lost data or left a key live: Enter in the new-chat dialog
+  now makes a regular chat (`t` makes a temporary one, Esc none); a
+  Markdown or account export never overwrites an existing file, taking
+  `name (2).md` instead; `logout` revokes the stored device key on the
+  server before forgetting it (a key made in the web app is only
+  forgotten, and the note says it stays live; `logout --local` skips the
+  server); `-m` in the app is the model for every turn until another is
+  picked, and a flag a command does not use is named on stderr.
 - Shell assistant mode tells the model it is one: each message names the
   OS and the shell (PowerShell or cmd.exe on Windows, `$SHELL` elsewhere;
   `MATTERWAVE_SHELL` overrides), and a confirmed command runs in that

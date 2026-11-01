@@ -80,6 +80,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SDK's typed methods instead of hand-built requests; only the routes the
   SDK has no method for (an upload's scan status, accounts, imports,
   speech, the account export) are still built here.
+- Licensed under Apache-2.0 instead of MIT: `LICENSE` is the Apache
+  License 2.0, `NOTICE` names the copyright holder, and the package
+  metadata declares `Apache-2.0` and ships both files.
 
 ### Fixed
 

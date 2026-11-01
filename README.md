@@ -269,3 +269,7 @@ announcements, budget, usage, keys, feedback). The few routes the SDK has no met
 upload's scan status, accounts, imports, speech, the account export) go through the same client.
 This package keeps what is terminal-specific: the tree in memory, the failure copy, and the one
 re-login a 401 gets before it stands.
+
+## Licence
+
+Apache License 2.0: see [LICENSE](LICENSE) and [NOTICE](NOTICE).

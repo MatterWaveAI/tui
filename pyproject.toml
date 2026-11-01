@@ -4,7 +4,8 @@ dynamic = ["version"]
 description = "A terminal client for MatterWave chat: the same conversations as the web app"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "MIT"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 dependencies = [
     "matterwave-sdk>=0.5.0",
     "httpx>=0.27",

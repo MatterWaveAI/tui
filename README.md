@@ -81,7 +81,8 @@ or the environment is never replaced behind your back.
 Typing while an answer streams queues the prompt; it sends itself when the answer finishes, and
 `Esc` stops the stream and puts it back in the composer. A leading `/` in the composer is a
 command, not a message: `/role name` applies a saved prompt role, `/role --add name` makes one,
-`/shell` toggles the shell assistant.
+`/shell` toggles the shell assistant. An unknown command stays in the composer; start a message
+with `//` to send it with a single leading slash (`//etc/hosts is empty` sends `/etc/hosts is empty`).
 
 Letter keys apply when focus is not in the composer or the search box; `Esc` gets you there.
 

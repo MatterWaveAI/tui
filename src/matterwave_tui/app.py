@@ -1056,7 +1056,9 @@ class MatterWaveApp(App[None]):
         text = composer.text.strip()
         if not text:
             return
-        if text.startswith("/"):
+        if text.startswith("/") and not text.startswith("//"):
+            # A command, not a message; an unknown one leaves the text where
+            # it is, to be fixed or escaped.
             if self._composer_command(text):
                 composer.text = ""
                 self.drafts.pop(self.conversation.id if self.conversation else "", None)
@@ -1079,6 +1081,11 @@ class MatterWaveApp(App[None]):
             self.notify(f"Waiting for the scan of {', '.join(scanning)}; the message sends then.")
             self.render_status()
             return
+        # `//` is a leading slash escaped: "//etc/hosts" sends "/etc/hosts".
+        # The queue above keeps the escape, since the queued text comes back
+        # through here.
+        if text.startswith("//"):
+            text = text[1:]
         attachment_ids = [a.id for a in self.pending_attachments] or None
         if self.conversation is None:
             self.run_worker(self._create_then_send(text, attachment_ids), group="stream",
@@ -2168,15 +2175,17 @@ class MatterWaveApp(App[None]):
 
     def _composer_command(self, text: str) -> bool:
         """A leading slash is a command, not a message. True when the text
-        was one (handled or not) and must not be sent as a turn."""
+        was a command and is done with (handled, or refused with a reason);
+        False for an unknown one, whose text stays in the composer."""
         body = text[1:]
         first = body.split(" ", 1)[0]
         if first not in ("role", "shell"):
             self.notify(
-                f"Unknown command /{first} — /role and /shell are the ones.",
+                f"Unknown command /{first}: /role and /shell are the commands. "
+                "Start with // to send a message that begins with /.",
                 severity="warning",
             )
-            return True
+            return False
         if first == "shell":
             if body.strip() != "shell":
                 self.notify("/shell takes no arguments; it only toggles.", severity="warning")

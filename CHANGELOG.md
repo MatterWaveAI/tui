@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is open; `I` takes one off the message and deletes the upload; a path
   pasted with quotes round it (Windows' "Copy as path") or starting with
   `~` attaches.
+- An unknown `/command` no longer wipes the composer: the text stays and
+  the warning says how to send it. `//` escapes a leading slash, so
+  `//etc/hosts` sends `/etc/hosts`.
 - The test suite signs in against an in-memory keyring, so a run no longer
   writes to the developer's OS keyring and passes on a runner without one.
 

@@ -8,8 +8,8 @@ by `Last-Event-ID`), its errors with the request id on them, and the typed
 What stays here is the TUI's own policy: a 401 is answered once with a fresh
 credential before it stands, a write is never retried, and the routes the SDK
 has no usable method for yet (`/api/models`, the conversation delete, pin and
-archive routes, the per-conversation feedback list, and the account, import,
-speech and export routes) go through the same client. The typed rows the app
+archive routes, the per-conversation feedback list, an upload's scan status,
+and the account, import, speech and export routes) go through the same client. The typed rows the app
 reads as plain dicts (notifications, announcements, shares, library, budget)
 are flattened here, at the edge.
 """
@@ -191,6 +191,8 @@ class ChatAPI(Protocol):
     async def upload_attachment(
         self, data: bytes, filename: str, conversation_id: str | None = None
     ) -> Attachment: ...
+
+    async def attachment_scan_status(self, attachment_id: str) -> str: ...
 
     async def context(self, conversation_id: str) -> ConversationContext: ...
 
@@ -675,6 +677,15 @@ class HttpChatAPI:
         names in `attachment_ids`. An upload that lands twice would store
         the file twice, so it is a write: no retries."""
         return await self._writes.attachments.upload(data, filename, conversation_id=conversation_id)
+
+    async def attachment_scan_status(self, attachment_id: str) -> str:
+        """`GET /api/attachments/{id}/scan`: where the malware scan of one of
+        the caller's own uploads stands -- `scanning`, `clean`, `infected`
+        or `scan_failed`. A deployment that scans after the upload answers
+        the upload `scanning`, and a turn naming the file is refused until
+        it is `clean`. The SDK has no method for the route; a read."""
+        body = await self._app_json(self._reads, "GET", _path("attachments", attachment_id, "scan"))
+        return str(body.get("scan_status") or "")
 
     async def context(self, conversation_id: str) -> ConversationContext:
         return await self._reads.conversations.context(conversation_id)

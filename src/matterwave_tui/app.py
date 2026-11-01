@@ -87,6 +87,15 @@ IMPORT_SOURCE_NAMES = {"chatgpt": "ChatGPT", "claude": "Claude"}
 # own content-disposition names them.
 EXPORT_POLL_S = 1.5
 EXPORT_POLLS_MAX = 400
+# An upload's malware scan, waited on the way the web composer waits on it
+# (web/src/apps/chat/attachments.ts): a deployment that scans after the
+# upload answers `scanning`, and a turn naming the file is refused until it
+# is `clean`. Ninety seconds of polls, then the person is asked to attach
+# it again; the server keeps scanning, and sweeps a row nothing names.
+SCAN_CLEAN = "clean"
+SCAN_REJECTED = frozenset({"infected", "scan_failed", "failed"})
+SCAN_POLL_S = 1.5
+SCAN_POLLS_MAX = 60
 
 
 # --- per-device state (dismissed announcement ids) ----------------------------
@@ -150,6 +159,22 @@ async def run_shell_command(command: str) -> str:
         return "(stopped: the command ran past its thirty seconds)"
     text = out.decode(errors="replace").strip()
     return text or f"(no output; exit {proc.returncode})"
+
+
+def scan_pending(scan_status: str) -> bool:
+    """Whether an upload is still waiting on its scan. An empty status is an
+    API that predates scanning, which never refuses a turn over it."""
+    return bool(scan_status) and scan_status != SCAN_CLEAN and scan_status not in SCAN_REJECTED
+
+
+def scan_refusal(filename: str, scan_status: str) -> str:
+    """Why an upload left the message, naming the file. The scanner's
+    signature name is never said: it is a hint about what got through."""
+    if scan_status == "infected":
+        return f"{filename} was removed by the malware scan."
+    if scan_status in SCAN_REJECTED:
+        return f"{filename} could not be scanned; attach it again."
+    return f"Scanning {filename} is taking longer than expected; attach it again."
 
 
 def _read_attachment(path_text: str) -> tuple[bytes, str]:
@@ -346,6 +371,9 @@ class MatterWaveApp(App[None]):
         self.usage_balance: UsageBalance | None = None
         # Files uploaded but not sent yet; their ids go with the next turn.
         self.pending_attachments: list[Attachment] = []
+        # A send asked for while an upload was still being scanned: it goes
+        # by itself once every scan is clean, and not at all if one fails.
+        self.send_after_scan = False
         # The open conversation is temporary: created so in this session, so
         # no share or fork, and a notice standing in for the usual history.
         self.temporary_chat = False
@@ -471,8 +499,13 @@ class MatterWaveApp(App[None]):
         if self.unread_notifications:
             bits.append(f"✉ {self.unread_notifications} unread")
         if self.pending_attachments:
-            names = ", ".join(a.filename for a in self.pending_attachments)
+            names = ", ".join(
+                a.filename + (" (scanning…)" if scan_pending(a.scan_status) else "")
+                for a in self.pending_attachments
+            )
             bits.append(f"attached: {names}")
+        if self.send_after_scan:
+            bits.append("sends when the scan is done")
         if self.streaming:
             bits.append("streaming… (Esc stops)")
         if self.queued_prompt:
@@ -1003,6 +1036,14 @@ class MatterWaveApp(App[None]):
             self.notify("Queued — it sends when this answer finishes.")
             self.render_status()
             return
+        scanning = [a.filename for a in self.pending_attachments if scan_pending(a.scan_status)]
+        if scanning and not self.editing:
+            # A turn naming an upload the scanner has not cleared is refused,
+            # so the message waits in the composer for the verdict.
+            self.send_after_scan = True
+            self.notify(f"Waiting for the scan of {', '.join(scanning)}; the message sends then.")
+            self.render_status()
+            return
         attachment_ids = [a.id for a in self.pending_attachments] or None
         if self.conversation is None:
             self.run_worker(self._create_then_send(text, attachment_ids), group="stream",
@@ -1295,9 +1336,61 @@ class MatterWaveApp(App[None]):
         except Exception as exc:
             self.fail_from_exception(exc)
             return
+        if attachment.scan_status in SCAN_REJECTED:
+            # A scanner that decides inside the upload, and said no.
+            self.notify(scan_refusal(attachment.filename, attachment.scan_status), severity="error")
+            return
         self.pending_attachments.append(attachment)
-        self.notify(f"Attached {attachment.filename}.")
+        if scan_pending(attachment.scan_status):
+            self.notify(f"Attached {attachment.filename}; it is being scanned.")
+            self.run_worker(self._watch_scan(attachment.id), group="scan")
+        else:
+            self.notify(f"Attached {attachment.filename}.")
         self.render_status()
+
+    async def _watch_scan(self, attachment_id: str) -> None:
+        """Poll one upload's scan until it has a verdict, or the limit
+        runs out."""
+        scan_status = ""
+        for _ in range(SCAN_POLLS_MAX):
+            await asyncio.sleep(SCAN_POLL_S)
+            if not any(a.id == attachment_id for a in self.pending_attachments):
+                return
+            try:
+                scan_status = await self.api.attachment_scan_status(attachment_id)
+            except Exception:
+                # A failed poll is asked again, as the web composer does;
+                # only the limit ends the wait.
+                scan_status = ""
+            if scan_status and not scan_pending(scan_status):
+                break
+        self._scan_settled(attachment_id, scan_status)
+
+    def _scan_settled(self, attachment_id: str, scan_status: str) -> None:
+        """A verdict, or none in time: a clean file stays attached; any
+        other leaves the message with the file named, and a send that was
+        waiting stays in the composer for the person to decide. When the
+        last scan comes back clean, the waiting send goes."""
+        attachment = next((a for a in self.pending_attachments if a.id == attachment_id), None)
+        if attachment is None:
+            return
+        if scan_status == SCAN_CLEAN:
+            self.pending_attachments = [
+                replace(a, scan_status=SCAN_CLEAN) if a.id == attachment_id else a
+                for a in self.pending_attachments
+            ]
+        else:
+            self.pending_attachments = [
+                a for a in self.pending_attachments if a.id != attachment_id
+            ]
+            self.send_after_scan = False
+            self.notify(scan_refusal(attachment.filename, scan_status), severity="error")
+        self.render_status()
+        if self.send_after_scan and not any(
+            scan_pending(a.scan_status) for a in self.pending_attachments
+        ):
+            self.send_after_scan = False
+            self.action_send()
 
     @work(group="action")
     async def action_cycle_filter(self) -> None:

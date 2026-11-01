@@ -1259,6 +1259,123 @@ async def test_an_image_is_refused_when_the_model_cannot_see_and_a_document_is_n
 
 
 @pytest.mark.asyncio
+async def test_a_send_right_after_attaching_waits_for_the_scan(tmp_path, monkeypatch):
+    monkeypatch.setattr("matterwave_tui.app.SCAN_POLL_S", 0)
+    notes = tmp_path / "notes.txt"
+    notes.write_bytes(b"notes")
+    api = FakeAPI(happy_script("Seen."))
+    api.upload_scan_status = "scanning"
+    api.scan_answers = ["scanning", "clean"]
+    api.scan_gate = asyncio.Event()
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        app.apply_attach(str(notes))
+        for _ in range(5):
+            await pilot.pause()
+        assert "attached: notes.txt (scanning…)" in status(app)
+        composer = app.query_one("#composer", TextArea)
+        composer.text = "look"
+        app.action_send()
+        await pilot.pause()
+        # Refused by the server until the scan is clean: nothing goes yet,
+        # and the message is still the person's.
+        assert api.sent == []
+        assert composer.text == "look"
+        assert "sends when the scan is done" in status(app)
+        api.scan_gate.set()
+        await settle(app, pilot)
+        assert api.scan_polls == ["att1", "att1"]
+        assert api.sent == [("c1", "look", "grt-nano")]
+        assert api.sent_attachment_ids == [["att1"]]
+        assert "attached" not in status(app)
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_scan_names_the_file_and_keeps_the_message(tmp_path, monkeypatch):
+    monkeypatch.setattr("matterwave_tui.app.SCAN_POLL_S", 0)
+    report = tmp_path / "report.pdf"
+    report.write_bytes(b"%PDF")
+    api = FakeAPI(happy_script("Seen."))
+    api.upload_scan_status = "scanning"
+    api.scan_answers = ["infected"]
+    api.scan_gate = asyncio.Event()
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        app.apply_attach(str(report))
+        for _ in range(5):
+            await pilot.pause()
+        composer = app.query_one("#composer", TextArea)
+        composer.text = "summarise this"
+        app.action_send()
+        api.scan_gate.set()
+        await settle(app, pilot)
+        assert "report.pdf was removed by the malware scan." in shown
+        assert api.sent == []
+        assert composer.text == "summarise this"
+        assert app.pending_attachments == []
+        assert "attached" not in status(app)
+
+
+@pytest.mark.asyncio
+async def test_the_scan_is_polled_on_its_route_before_the_turn_goes(tmp_path, monkeypatch):
+    monkeypatch.setattr("matterwave_tui.app.SCAN_POLL_S", 0)
+    notes = tmp_path / "notes.txt"
+    notes.write_bytes(b"notes")
+    seen: list[tuple[str, str]] = []
+    scans = iter(["scanning", "clean"])
+    # The verdict is held back until the send has been asked for.
+    verdict = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        if (known := json_routes(request)) is not None:
+            return known
+        if (request.method, request.url.path) == ("POST", "/api/attachments"):
+            return httpx.Response(
+                201,
+                json={"id": "att1", "filename": "notes.txt", "content_type": "text/plain",
+                      "size_bytes": 5, "scan_status": "scanning", "created_at": "1"},
+            )
+        if (request.method, request.url.path) == ("GET", "/api/attachments/att1/scan"):
+            answer = next(scans)
+            if answer == "clean":
+                await verdict.wait()
+            return httpx.Response(200, json={"id": "att1", "scan_status": answer})
+        if (request.method, request.url.path) == ("POST", "/api/conversations/c1/messages"):
+            assert json.loads(request.content)["attachment_ids"] == ["att1"]
+            return httpx.Response(
+                200,
+                text='event: done\ndata: {"id": "a1", "role": "assistant", "truncated": false}\n\n',
+                headers={"x-request-id": "req-live", "content-type": "text/event-stream"},
+            )
+        return httpx.Response(404, json={"detail": request.url.path})
+
+    app = MatterWaveApp(http_api(handler))
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        app.apply_attach(str(notes))
+        composer = app.query_one("#composer", TextArea)
+        composer.text = "look"
+        for _ in range(5):
+            await pilot.pause()
+        app.action_send()
+        await pilot.pause()
+        assert ("POST", "/api/conversations/c1/messages") not in seen
+        verdict.set()
+        await settle(app, pilot)
+        writes = [hit for hit in seen if hit[0] != "GET" or hit[1].endswith("/scan")]
+        assert writes == [
+            ("POST", "/api/attachments"),
+            ("GET", "/api/attachments/att1/scan"),
+            ("GET", "/api/attachments/att1/scan"),
+            ("POST", "/api/conversations/c1/messages"),
+        ]
+
+
+@pytest.mark.asyncio
 async def test_the_feedback_dialog_carries_the_selected_replys_id():
     api = FakeAPI()
     api.tree_messages = [

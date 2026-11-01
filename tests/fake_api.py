@@ -156,6 +156,13 @@ class FakeAPI:
         self.forks: list[tuple[str, str]] = []
         self.shares: list[str] = []
         self.uploads: list[tuple[str, bytes]] = []
+        # The malware scan: what an upload answers, then what each poll of
+        # its scan answers in turn (the last one repeats); `scan_gate`, when
+        # set, holds every poll until the test sets the event.
+        self.upload_scan_status = "clean"
+        self.scan_answers: list[str] = []
+        self.scan_polls: list[str] = []
+        self.scan_gate: asyncio.Event | None = None
         # Temporary chats are fixed at creation; the server keeps them out
         # of every list and every search, and refuses pin, fork and share.
         self.creates: list[tuple[str | None, str | None, bool]] = []
@@ -372,8 +379,16 @@ class FakeAPI:
         return Attachment.from_dict(
             {"id": f"att{len(self.uploads)}", "filename": filename,
              "content_type": "application/octet-stream", "size_bytes": len(data),
-             "scan_status": "clean", "created_at": "1"}
+             "scan_status": self.upload_scan_status, "created_at": "1"}
         )
+
+    async def attachment_scan_status(self, attachment_id: str) -> str:
+        if self.scan_gate is not None:
+            await self.scan_gate.wait()
+        self.scan_polls.append(attachment_id)
+        if len(self.scan_answers) > 1:
+            return self.scan_answers.pop(0)
+        return self.scan_answers[0] if self.scan_answers else "clean"
 
     async def library(self) -> dict[str, Any]:
         return {

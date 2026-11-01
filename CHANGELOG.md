@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- A message sent right after attaching a file waits for the deployment's
+  malware scan (`GET /api/attachments/{id}/scan`) instead of being refused
+  with "One of those attachments is not available": the status line shows
+  the file as `(scanning…)`, the message goes once the scan is clean, and
+  a file the scan rejects leaves the message with its name said.
+- The test suite signs in against an in-memory keyring, so a run no longer
+  writes to the developer's OS keyring and passes on a runner without one.
+
 ## [0.4.0] - 2026-10-31
 
 ### Added

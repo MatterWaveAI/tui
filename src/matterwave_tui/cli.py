@@ -391,6 +391,7 @@ def main(argv: list[str] | None = None) -> int:
         entry=entry,
         theme=settings.get("theme"),
         environ=environ,
+        keymap=settings.keys,
     )
     return EXIT_OK
 
@@ -404,6 +405,7 @@ def run_app(
     entry: str | None = None,
     theme: str | None = None,
     environ: Mapping[str, str] | None = None,
+    keymap: Mapping[str, str] | None = None,
 ) -> None:
     from .app import MatterWaveApp
 
@@ -434,7 +436,13 @@ def run_app(
 
     api = HttpChatAPI(base_url=base_url, token=credential.token, refresh=refresh)
     app = MatterWaveApp(
-        api, relogin=device, shell_mode=shell_mode, model=model, theme=theme, environ=environ
+        api,
+        relogin=device,
+        shell_mode=shell_mode,
+        model=model,
+        theme=theme,
+        environ=environ,
+        keymap=keymap,
     )
     holder["app"] = app
     app.run()

@@ -11,6 +11,9 @@ as flags or exported in every shell.
     base_url = "https://work.example.com"
     model = "grt-max"
 
+    [keys]
+    new = "ctrl+n"
+
 A setting is taken from the first place that has it: the command line,
 then the environment, then the chosen profile, then the file's top level,
 then the built-in default. A profile is chosen by `--profile`, else
@@ -24,7 +27,7 @@ from __future__ import annotations
 import os
 import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +45,7 @@ SETTINGS: dict[str, str | None] = {
     "images": "MATTERWAVE_IMAGES",
     "shell": "MATTERWAVE_SHELL",
 }
-TOP_LEVEL = frozenset({*SETTINGS, "default_profile", "profiles"})
+TOP_LEVEL = frozenset({*SETTINGS, "default_profile", "profiles", "keys"})
 
 
 class ConfigError(ValueError):
@@ -57,6 +60,8 @@ class Settings:
     sources: dict[str, str]
     profile: str | None = None
     path: Path | None = None
+    # [keys]: a binding's name (as the help lists it) -> the key for it.
+    keys: dict[str, str] = field(default_factory=dict)
 
     def get(self, name: str) -> str | None:
         return self.values.get(name)
@@ -94,6 +99,9 @@ def load_config(path: Path) -> dict[str, Any]:
         if not isinstance(profile, dict):
             raise ConfigError(f"{path}: [profiles.{name}] must be a table")
         _check(path, profile, frozenset(SETTINGS), f"[profiles.{name}]")
+    keys = data.get("keys", {})
+    if not isinstance(keys, dict) or not all(isinstance(v, str) for v in keys.values()):
+        raise ConfigError(f'{path}: [keys] maps a key\'s name to a key, as new = "ctrl+n"')
     return data
 
 
@@ -139,7 +147,7 @@ def resolve(
             if isinstance(value, str) and value.strip():
                 values[name], sources[name] = value.strip(), source
                 break
-    return Settings(values, sources, chosen, path)
+    return Settings(values, sources, chosen, path, dict(config.get("keys", {})))
 
 
 def keyring_entry(base_url: str, profile: str | None) -> str:

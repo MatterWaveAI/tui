@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import glob
 import json
 import os
+import shlex
+import subprocess
+import tempfile
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import replace
@@ -42,6 +46,8 @@ from .screens import (
     DeviceLoginFn,
     Dictation,
     FeedbackDialog,
+    FilePicker,
+    HelpScreen,
     InstructionsEditor,
     Library,
     LibraryState,
@@ -101,6 +107,8 @@ SCAN_CLEAN = "clean"
 SCAN_REJECTED = frozenset({"infected", "scan_failed", "failed"})
 SCAN_POLL_S = 1.5
 SCAN_POLLS_MAX = 60
+# What the app remembers between runs beside the roles: the theme.
+SETTINGS_FILE = "settings.json"
 
 
 # --- per-device state (dismissed announcement ids) ----------------------------
@@ -158,6 +166,43 @@ def typed_path(path_text: str) -> Path:
     if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
         text = text[1:-1].strip()
     return Path(text).expanduser()
+
+
+def expand_paths(path_text: str) -> list[str] | None:
+    """The files a glob matches, sorted; None when the text is a plain
+    path rather than a pattern."""
+    path = typed_path(path_text)
+    if not glob.has_magic(str(path)):
+        return None
+    return sorted(p for p in glob.glob(str(path)) if Path(p).is_file())
+
+
+def editor_command(env: Mapping[str, str]) -> list[str]:
+    """`$VISUAL`, else `$EDITOR`, else the platform's plain editor, as an
+    argument list (Windows paths keep their backslashes)."""
+    named = env.get("VISUAL") or env.get("EDITOR")
+    if not named:
+        return ["notepad"] if os.name == "nt" else ["vi"]
+    return shlex.split(named, posix=os.name != "nt")
+
+
+def load_saved_theme() -> str | None:
+    """The theme last chosen in the app, from the state directory."""
+    try:
+        saved = json.loads((state_dir() / SETTINGS_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    theme = saved.get("theme") if isinstance(saved, dict) else None
+    return theme if isinstance(theme, str) and theme else None
+
+
+def save_theme(theme: str) -> None:
+    path = state_dir() / SETTINGS_FILE
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"theme": theme}), encoding="utf-8")
+    except OSError:
+        return
 
 
 def human_size(size: int) -> str:
@@ -325,40 +370,43 @@ class MatterWaveApp(App[None]):
     #status { height: 1; background: $panel; color: $text-muted; padding: 0 1; }
     """
     BINDINGS = [
-        Binding("ctrl+enter,ctrl+j,ctrl+s", "send", "Send", priority=True),
-        Binding("n", "new", "New"),
-        Binding("slash", "search", "Search"),
-        Binding("m", "pick_model", "Model"),
-        Binding("e", "edit", "Edit"),
-        Binding("r", "regenerate", "Regenerate"),
-        Binding("left_square_bracket", "branch(-1)", "Prev branch"),
-        Binding("right_square_bracket", "branch(1)", "Next branch"),
-        Binding("x", "toggle_originals", "Originals"),
-        Binding("c", "compact", "Compact"),
-        Binding("t", "instructions", "Instructions"),
-        Binding("b", "feedback", "Feedback"),
-        Binding("f2", "rename", "Rename"),
-        Binding("p", "toggle_pin", "Pin"),
-        Binding("a", "toggle_archive", "Archive"),
-        Binding("d", "delete_conversation", "Delete"),
-        Binding("f", "fork", "Fork"),
-        Binding("s", "share", "Share"),
-        Binding("S", "my_shares", "Shares"),
-        Binding("l", "library", "Library"),
-        Binding("L", "roles", "Roles"),
-        Binding("R", "report", "Report"),
-        Binding("N", "notifications", "Inbox"),
-        Binding("A", "dismiss_announcements", "Dismiss"),
-        Binding("U", "account", "Account"),
-        Binding("w", "export_markdown", "Export"),
-        Binding("i", "attach", "Attach"),
-        Binding("I", "detach", "Detach"),
-        Binding("v", "dictate", "Dictate"),
-        Binding("o", "cycle_filter", "List"),
-        Binding("y", "copy", "Copy"),
-        Binding("Y", "copy_code", "Copy code"),
-        Binding("escape", "leave_composer", "Transcript", show=False),
-        Binding("ctrl+q", "quit", "Quit", priority=True),
+        Binding("ctrl+enter,ctrl+j,ctrl+s", "send", "Send", priority=True, id="send"),
+        Binding("n", "new", "New", id="new"),
+        Binding("slash", "search", "Search", id="search"),
+        Binding("m", "pick_model", "Model", id="pick_model"),
+        Binding("e", "edit", "Edit", id="edit"),
+        Binding("r", "regenerate", "Regenerate", id="regenerate"),
+        Binding("left_square_bracket", "branch(-1)", "Prev branch", id="prev_branch"),
+        Binding("right_square_bracket", "branch(1)", "Next branch", id="next_branch"),
+        Binding("x", "toggle_originals", "Originals", id="toggle_originals"),
+        Binding("c", "compact", "Compact", id="compact"),
+        Binding("t", "instructions", "Instructions", id="instructions"),
+        Binding("b", "feedback", "Feedback", id="feedback"),
+        Binding("f2", "rename", "Rename", id="rename"),
+        Binding("p", "toggle_pin", "Pin", id="toggle_pin"),
+        Binding("a", "toggle_archive", "Archive", id="toggle_archive"),
+        Binding("d", "delete_conversation", "Delete", id="delete_conversation"),
+        Binding("f", "fork", "Fork", id="fork"),
+        Binding("s", "share", "Share", id="share"),
+        Binding("S", "my_shares", "Shares", id="my_shares"),
+        Binding("l", "library", "Library", id="library"),
+        Binding("L", "roles", "Roles", id="roles"),
+        Binding("R", "report", "Report", id="report"),
+        Binding("N", "notifications", "Inbox", id="notifications"),
+        Binding("A", "dismiss_announcements", "Dismiss", id="dismiss_announcements"),
+        Binding("U", "account", "Account", id="account"),
+        Binding("w", "export_markdown", "Export", id="export_markdown"),
+        Binding("i", "attach", "Attach", id="attach"),
+        Binding("ctrl+o", "pick_files", "Pick files", id="pick_files"),
+        Binding("I", "detach", "Detach", id="detach"),
+        Binding("v", "dictate", "Dictate", id="dictate"),
+        Binding("o", "cycle_filter", "List", id="cycle_filter"),
+        Binding("y", "copy", "Copy", id="copy"),
+        Binding("Y", "copy_code", "Copy code", id="copy_code"),
+        Binding("ctrl+e", "edit_in_editor", "Editor", priority=True, id="editor"),
+        Binding("question_mark,f1", "help", "Help", id="help"),
+        Binding("escape", "leave_composer", "Transcript", show=False, id="leave_composer"),
+        Binding("ctrl+q", "quit", "Quit", priority=True, id="quit"),
     ]
 
     def __init__(
@@ -370,9 +418,14 @@ class MatterWaveApp(App[None]):
         model: str | None = None,
         theme: str | None = None,
         environ: Mapping[str, str] | None = None,
+        keymap: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__()
         self.api = api
+        # The config file's [keys]: binding id -> key, over the defaults.
+        self.keymap_overrides = dict(keymap or {})
+        # Hands the composer's file to the editor; a test stands in.
+        self._run_editor: Callable[[list[str]], int] = self._suspend_for_editor
         # The environment the image and shell settings are read from: the
         # process's own, with the config file's filling its gaps.
         environ = os.environ if environ is None else environ
@@ -498,6 +551,71 @@ class MatterWaveApp(App[None]):
     def _draft_key(self) -> str:
         return self.conversation.id if self.conversation is not None else ""
 
+    # --- keys, help, theme, editor --------------------------------------------
+
+    def _apply_keymap(self) -> None:
+        """The config file's key overrides, by binding id; an id no binding
+        has is said rather than ignored."""
+        known = {b.id for b in self.BINDINGS if isinstance(b, Binding) and b.id}
+        unknown = sorted(set(self.keymap_overrides) - known)
+        if unknown:
+            self.notify(
+                f"[keys] names {', '.join(unknown)}, which no key does; "
+                "the help (?) lists the names.",
+                severity="warning",
+            )
+        self.set_keymap({k: v for k, v in self.keymap_overrides.items() if k in known})
+
+    def _remember_theme(self, theme: Any) -> None:
+        save_theme(str(getattr(theme, "name", theme)))
+
+    def help_rows(self) -> list[tuple[str, str, str]]:
+        """(keys, what it does, its name for [keys]) for every binding, the
+        config file's overrides in place."""
+        rows: list[tuple[str, str, str]] = []
+        for binding in [*self.BINDINGS, *Transcript.BINDINGS]:
+            if not isinstance(binding, Binding):
+                continue
+            keys = self.keymap_overrides.get(binding.id or "", binding.key)
+            shown = " / ".join(
+                self.get_key_display(replace(binding, key=k)) for k in keys.split(",")
+            )
+            rows.append((shown, binding.description or binding.action, binding.id or ""))
+        return rows
+
+    def action_help(self) -> None:
+        """`?` / F1: every key, generated from the bindings."""
+        self.push_screen(HelpScreen(self.help_rows()))
+
+    def action_edit_in_editor(self) -> None:
+        """Ctrl+E: the composer's text in `$VISUAL` / `$EDITOR`, the app
+        suspended while it runs; what the editor saves comes back."""
+        composer = self.query_one("#composer", TextArea)
+        command = editor_command(os.environ)
+        handle, name = tempfile.mkstemp(suffix=".md", prefix="matterwave-")
+        path = Path(name)
+        try:
+            with os.fdopen(handle, "w", encoding="utf-8") as draft:
+                draft.write(composer.text)
+            status = self._run_editor([*command, str(path)])
+            text = path.read_text(encoding="utf-8")
+        except Exception as exc:
+            self.notify(f"The editor ({command[0]}) could not run: {exc}", severity="warning")
+            return
+        finally:
+            path.unlink(missing_ok=True)
+        if status != 0:
+            self.notify(f"The editor exited {status}; the composer is as it was.")
+            return
+        composer.text = text.rstrip("\n")
+        composer.focus()
+        self.render_status()
+
+    def _suspend_for_editor(self, argv: list[str]) -> int:
+        with self.suspend():
+            # The person's own editor, named by their own environment.
+            return subprocess.call(argv)  # noqa: S603
+
     # --- layout ----------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
@@ -515,15 +633,19 @@ class MatterWaveApp(App[None]):
         yield Footer()
 
     async def on_mount(self) -> None:
-        if self.configured_theme:
-            if self.configured_theme in self.available_themes:
-                self.theme = self.configured_theme
+        # The config file's theme, else the one last chosen here; a theme
+        # chosen from the palette is remembered for the next start.
+        theme = self.configured_theme or load_saved_theme()
+        if theme:
+            if theme in self.available_themes:
+                self.theme = theme
             else:
                 self.notify(
-                    f"No theme named {self.configured_theme}; the palette's "
-                    "“Change theme” lists them.",
+                    f"No theme named {theme}; the palette's “Change theme” lists them.",
                     severity="warning",
                 )
+        self.theme_changed_signal.subscribe(self, self._remember_theme)
+        self._apply_keymap()
         self.set_interval(LIVE_REDRAW_S, self._flush_live)
         self.set_interval(1.0, self._tick_rate_limit)
         if self.image_backend is not None:
@@ -1527,6 +1649,31 @@ class MatterWaveApp(App[None]):
 
     @work(group="action")
     async def apply_attach(self, path_text: str) -> None:
+        """A path, or a glob (`~/shots/*.png`) for every file it matches."""
+        paths = expand_paths(path_text)
+        if paths is None:
+            await self._attach_one(path_text)
+            return
+        if not paths:
+            self.notify(f"No file matches {path_text}.", severity="warning")
+            return
+        for path in paths:
+            await self._attach_one(path)
+
+    def action_pick_files(self) -> None:
+        """Ctrl+O: files picked from a tree of the working directory."""
+
+        def chosen(paths: list[str] | None) -> None:
+            if paths:
+                self.run_worker(self._attach_all(paths), group="action")
+
+        self.push_screen(FilePicker(Path.cwd()), chosen)
+
+    async def _attach_all(self, paths: list[str]) -> None:
+        for path in paths:
+            await self._attach_one(path)
+
+    async def _attach_one(self, path_text: str) -> None:
         try:
             data, filename = await asyncio.to_thread(_read_attachment, path_text)
         except OSError as exc:

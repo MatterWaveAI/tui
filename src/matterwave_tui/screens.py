@@ -13,6 +13,7 @@ import contextlib
 import copy
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from matterwave_sdk import FEEDBACK_REASONS
@@ -21,7 +22,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Collapsible, Input, OptionList, Static, TextArea
+from textual.widgets import Collapsible, DirectoryTree, Input, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
 from .api import NOTIFICATIONS_LIMIT_MAX, NOTIFICATIONS_PAGE
@@ -971,6 +972,104 @@ class TextEditor(ModalScreen[str | None]):
 
     def action_save(self) -> None:
         self.dismiss(self.query_one("#text", TextArea).text)
+
+    def action_dismiss_none(self) -> None:
+        self.dismiss(None)
+
+
+class HelpScreen(ModalScreen[None]):
+    """Every key, as the bindings have them: the key, what it does, and
+    the name the config file's [keys] table overrides it by. Esc, `?` or
+    F1 closes."""
+
+    BINDINGS = [Binding("escape,question_mark,f1", "dismiss_none", "Close")]
+    DEFAULT_CSS = """
+    HelpScreen { align: center middle; }
+    HelpScreen > Vertical { width: 90; height: auto; max-height: 90%;
+        border: round $accent; background: $surface; padding: 0 1; }
+    """
+
+    def __init__(self, rows: list[tuple[str, str, str]]) -> None:
+        super().__init__()
+        self.rows = rows
+
+    def compose(self) -> ComposeResult:
+        width = max((len(keys) for keys, _, _ in self.rows), default=0)
+        with Vertical():
+            yield Static("Keys (letters apply outside the composer; Esc gets there)", markup=False)
+            yield OptionList(
+                *(
+                    Option(f"{keys.ljust(width)}  {does}" + (f"  [{name}]" if name else ""))
+                    for keys, does, name in self.rows
+                ),
+                id="help-rows",
+            )
+            yield Static(
+                "In the composer: /role, /shell and /temp are commands; // sends a leading "
+                'slash. Change a key in the config file: [keys] name = "ctrl+n".',
+                classes="hint",
+                markup=False,
+            )
+
+    def on_mount(self) -> None:
+        self.query_one("#help-rows", OptionList).focus()
+
+    def action_dismiss_none(self) -> None:
+        self.dismiss(None)
+
+
+class FilePicker(ModalScreen[list[str] | None]):
+    """Files from a tree of a directory: Enter on a file attaches it (with
+    any marked ones), Space marks or unmarks the highlighted file, Esc
+    cancels."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss_none", "Cancel"),
+        # Over the tree's own Space (open a folder): Enter does that too.
+        Binding("space", "mark", "Mark", priority=True),
+    ]
+    DEFAULT_CSS = """
+    FilePicker { align: center middle; }
+    FilePicker > Vertical { width: 90; height: 80%;
+        border: round $accent; background: $surface; padding: 0 1; }
+    FilePicker DirectoryTree { height: 1fr; }
+    """
+
+    def __init__(self, root: Path) -> None:
+        super().__init__()
+        self.root = root
+        self.marked: list[str] = []
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(
+                f"Attach from {self.root} (Enter attaches, Space marks several, Esc cancels)",
+                markup=False,
+            )
+            yield DirectoryTree(self.root, id="files")
+            yield Static("", id="marked", markup=False)
+
+    def on_mount(self) -> None:
+        self.query_one("#files", DirectoryTree).focus()
+
+    def on_directory_tree_file_selected(self, event: DirectoryTree.FileSelected) -> None:
+        event.stop()
+        chosen = str(event.path)
+        self.dismiss([*self.marked, *([] if chosen in self.marked else [chosen])])
+
+    def action_mark(self) -> None:
+        node = self.query_one("#files", DirectoryTree).cursor_node
+        data = node.data if node is not None else None
+        path = getattr(data, "path", None)
+        if path is None or not Path(path).is_file():
+            return
+        name = str(path)
+        if name in self.marked:
+            self.marked.remove(name)
+        else:
+            self.marked.append(name)
+        names = ", ".join(Path(m).name for m in self.marked)
+        self.query_one("#marked", Static).update(f"Marked: {names}" if names else "")
 
     def action_dismiss_none(self) -> None:
         self.dismiss(None)

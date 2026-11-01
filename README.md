@@ -82,6 +82,8 @@ PowerShell or cmd.exe on Windows (whichever started the TUI) and `$SHELL` elsewh
 |---|---|---|
 | `Ctrl+Enter` | anywhere | send (also `Ctrl+J` / `Ctrl+S`, for terminals that do not report Ctrl+Enter) |
 | `Esc` | composer | to the transcript; cancels an edit; stops an answer that is streaming |
+| `Ctrl+E` | anywhere | write the message in `$VISUAL` / `$EDITOR` (Notepad on Windows, vi elsewhere); what it saves comes back to the composer |
+| `?` / `F1` | transcript | every key, generated from the bindings, with the name `[keys]` changes it by |
 | `↑` `↓` / `k` `j` | transcript | select a message |
 | `[` `]` | transcript | previous / next sibling branch of the selected message |
 | `e` | transcript | edit the selected (or last) user message in the composer |
@@ -101,7 +103,8 @@ PowerShell or cmd.exe on Windows (whichever started the TUI) and `$SHELL` elsewh
 | `s` | anywhere | share the conversation: how long the link lives, whether readers can open the attachments, the link copied; and its links, to revoke |
 | `S` | anywhere | every share link you made, to revoke |
 | `w` | anywhere | export the conversation to a Markdown file in the working directory; an existing file is never overwritten (`name (2).md`) |
-| `i` | anywhere | attach a file (its path, quoted or not, `~` allowed); it goes with this conversation's next message |
+| `i` | anywhere | attach a file by its path (quoted or not, `~` allowed) or every file a glob matches (`~/shots/*.png`); it goes with this conversation's next message |
+| `Ctrl+O` | anywhere | pick files to attach from a tree of the working directory |
 | `I` | anywhere | take a pending file off the next message (and delete the upload) |
 | `v` | anywhere | dictate into the composer: the microphone with the `dictation` extra, an audio file without |
 | `o` | anywhere | cycle the sidebar list: default → pinned → archived → all; with a folder or tag shown, back to the whole list |
@@ -127,6 +130,8 @@ Inside the dialogs:
 | Shares (`S`) | `x` revoke the highlighted link |
 | Prompt roles (`L`) | `Enter` apply, `a` add, `d` delete |
 | Share (`s`) | `Enter` change the expiry or the attachments, or create the link; `x` or `Delete` revoke the highlighted link (asks first) |
+| Pick files (`Ctrl+O`) | `Enter` attach the file (with any marked), `Space` mark or unmark the highlighted file |
+| Help (`?`) | `?` or `F1` closes it too |
 | Pending files (`I`) | `Enter`, `x` or `Delete` take the highlighted file off |
 | Account (`U`) | `Enter` toggle a preference or edit the locale or an instruction, `x` or `Delete` revoke the highlighted key or browser (asks first), `o` rotate the highlighted key and show its new secret once; this terminal's own key is left to `logout` |
 | Instructions (`t`), feedback (`b`) | `Ctrl+T` save |
@@ -195,13 +200,17 @@ default_profile = "work"
 [profiles.work]                        # matterwave-tui --profile work
 base_url = "https://work.example.com"
 model = "grt-max"
+
+[keys]                                 # a key's name, as the help (?) lists it = the key
+new = "ctrl+n"
 ```
 
 A setting comes from the first place that has it: the command line, then the environment, then the
 chosen profile, then the file's top level, then the default. A profile is chosen by `--profile`,
 else `MATTERWAVE_PROFILE`, else `default_profile`, and signs in on its own keyring entry (the
 server's origin and the profile's name), so two accounts on one server can sit side by side. A
-setting the file does not know is an error rather than a silent default.
+setting the file does not know is an error rather than a silent default. A theme chosen from the
+palette is remembered for the next start, unless the file names one.
 
 ## Environment
 

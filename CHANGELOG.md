@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Composing and getting about: `Ctrl+E` writes the message in
+  `$VISUAL` / `$EDITOR`; `?` or `F1` lists every key, generated from the
+  bindings; the config file's `[keys]` table moves a key (`new = "ctrl+n"`);
+  a theme chosen from the palette is remembered for the next start; `i`
+  takes a glob (`~/shots/*.png`) for several files, and `Ctrl+O` picks them
+  from a tree of the working directory.
 - A config file (`matterwave-tui config` shows where, and where each
   setting comes from): the server, the model, the theme, the image mode
   and the shell, and named profiles of them chosen with `--profile` or

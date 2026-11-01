@@ -21,6 +21,7 @@ README = (ROOT / "README.md").read_text(encoding="utf-8")
 # How the README writes the keys Textual names.
 NAMED = {
     "slash": "/",
+    "question_mark": "?",
     "left_square_bracket": "[",
     "right_square_bracket": "]",
     "escape": "Esc",
@@ -94,6 +95,8 @@ def test_every_key_in_the_table_is_bound():
         ("Pending files (`I`)", screens.PendingAttachments),
         ("Account (`U`)", screens.Account),
         ("Share (`s`)", screens.ShareDialog),
+        ("Pick files (`Ctrl+O`)", screens.FilePicker),
+        ("Help (`?`)", screens.HelpScreen),
     ],
 )
 def test_every_dialog_key_is_in_its_row(dialog, screen):

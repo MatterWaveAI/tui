@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Images in iTerm2 (OSC 1337 inline images), and auto-detection of the
+  terminals that draw them without being told: Ghostty and WezTerm speak
+  the kitty protocol, and foot, mlterm, Konsole, contour and Windows
+  Terminal draw sixel. `MATTERWAVE_IMAGES=iterm2` forces the new one.
+
+### Changed
+
+- One version source: `pyproject.toml` reads it from the package, and the
+  package ships `py.typed`, as its "Typing :: Typed" classifier claims.
+- `uv.lock` is committed, and `matterwave-sdk` (0.5.0 or later; it is not
+  on PyPI) resolves from its repository at a pinned commit, so a checkout
+  and CI install the same tree.
+- The model list, conversation create (temporary included), delete, pin,
+  unpin, archive, unarchive and a conversation's ratings go through the
+  SDK's typed methods instead of hand-built requests; only the routes the
+  SDK has no method for (an upload's scan status, accounts, imports,
+  speech, the account export) are still built here.
+
 ### Fixed
 
 - The status line's unread badge, usage and overage are read again after
@@ -48,21 +68,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   library.
 - The test suite signs in against an in-memory keyring, so a run no longer
   writes to the developer's OS keyring and passes on a runner without one.
-
-### Added
-
-- Images in iTerm2 (OSC 1337 inline images), and auto-detection of the
-  terminals that draw them without being told: Ghostty and WezTerm speak
-  the kitty protocol, and foot, mlterm, Konsole, contour and Windows
-  Terminal draw sixel. `MATTERWAVE_IMAGES=iterm2` forces the new one.
-
-### Changed
-
-- The model list, conversation create (temporary included), delete, pin,
-  unpin, archive, unarchive and a conversation's ratings go through the
-  SDK's typed methods instead of hand-built requests; only the routes the
-  SDK has no method for (an upload's scan status, accounts, imports,
-  speech, the account export) are still built here.
 
 ## [0.4.0] - 2026-10-31
 
@@ -159,8 +164,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hand-rolled HTTP; the typed rows are flattened to the app's dicts at the
   adapter edge.
 
-[0.3.1]: https://github.com/MatterWaveAI/tui/compare/v0.3.0...v0.3.1
-
 ## [0.3.0] - 2026-10-30
 
 ### Added
@@ -182,4 +185,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The status line shows the org's overage against its cap when
   `GET /api/budget` reports overage billing, with a warning at the cap.
 
+### Fixed
+
+- Pin and archive are sent with `PUT` (and cleared with `DELETE`), the
+  methods the platform registers; the `POST` they used was refused.
+
+## [0.2.1] - 2026-10-28
+
+### Added
+
+- Conversation management on the open conversation: rename (`F2`), delete
+  (`d`, behind a confirm), pin (`p`) and archive (`a`); `o` cycles the
+  sidebar between the default, pinned, archived and all conversations.
+- Attachments by path (`i`), uploaded and sent with the next message;
+  images and documents show as placeholder lines in the transcript.
+- Markdown export of the active path (`w`), byte for byte the web
+  exporter's document and filename.
+- Fork from the selected message (`f`), share links (`s`), and the org's
+  usage for the period in the status line.
+- Temporary chats: a new chat asks first, and a temporary one is
+  announced, cannot be shared or forked, and stays out of the sidebar.
+- Per-conversation instructions (`t`), edited against the effective
+  prompt.
+- Reply feedback: thumbs on each answer that vote in place and withdraw on
+  a second click, restored when the conversation opens; `b` adds reasons
+  and a comment.
+- An image attached for a model that cannot read images is refused by
+  name, with up to three models that can.
+
+### Changed
+
+- A stream that drops mid-answer is resumed once by `Last-Event-ID` before
+  it is reported as cut short.
+
+## [0.2.0] - 2026-10-27
+
+### Fixed
+
+- The package depends on the published `matterwave-sdk` instead of a
+  sibling path that only existed in the platform monorepo, so it installs.
+
+[Unreleased]: https://github.com/MatterWaveAI/tui/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/MatterWaveAI/tui/compare/v0.3.1...v0.4.0
+[0.3.1]: https://github.com/MatterWaveAI/tui/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/MatterWaveAI/tui/compare/v0.2.1...v0.3.0
+[0.2.1]: https://github.com/MatterWaveAI/tui/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/MatterWaveAI/tui/releases/tag/v0.2.0

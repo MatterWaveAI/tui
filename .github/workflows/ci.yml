@@ -8,16 +8,17 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    env:
-      PYTHONPATH: src
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
+          enable-cache: true
+      # The lockfile is the install: matterwave-sdk resolves from its git
+      # source (pyproject's [tool.uv.sources]), which pip would not read.
       - name: Install
-        run: pip install -e .[dev]
+        run: uv sync --locked --extra dev
       - name: Lint
-        run: ruff check .
+        run: uv run ruff check .
       - name: Test
-        run: pytest tests -q --ignore=tests/e2e
+        run: uv run pytest tests -q --ignore=tests/e2e

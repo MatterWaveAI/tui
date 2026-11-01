@@ -141,6 +141,11 @@ class SearchFilter:
                     target = os.path.realpath(entry.path)
                     if not _within(target, real_root):
                         continue
+                    target_rel = os.path.relpath(target, real_root).replace(os.sep, "/")
+                    if self.hidden(target_rel, os.path.isdir(target)):
+                        # A link to a denied or ignored file: its contents
+                        # would leave by another name.
+                        continue
                     if os.path.isdir(target):
                         # A link to a folder inside the root: it is listed,
                         # not walked, so a cycle cannot loop the search.

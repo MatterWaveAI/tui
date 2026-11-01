@@ -197,6 +197,16 @@ class _CapReached(Exception):
         self.status = status
 
 
+AGENT_FILES = ("MATTERWAVE.md", "AGENTS.md", "MATTERWAVE.local.md")
+
+
+def steers_the_agent(relative: str) -> bool:
+    """Whether a path is one the agent reads as configuration or
+    instructions in a later session: `.matterwave/` and the context files."""
+    first = relative.split("/", 1)[0].lower()
+    return first == ".matterwave" or relative.lower() in (f.lower() for f in AGENT_FILES)
+
+
 def call_summary(name: str, raw: str) -> str:
     """One line for the transcript: the tool and its main argument."""
     try:
@@ -454,9 +464,11 @@ class AgentSession:
                 f"{summary}\n\n(The task in progress:)\n{task}"
             ),
         }
-        self.messages = [head, *tail]
+        self.messages[:] = [head, *tail]
 
     def _drop_oldest_rounds(self, target: int) -> int:
+        """Leave out the oldest tool rounds (a call and its results) until
+        the history fits; the user's messages always stay."""
         dropped = 0
         while self.context_estimate() > target:
             rounds = [
@@ -465,9 +477,12 @@ class AgentSession:
             if len(rounds) <= 1:
                 break
             start = rounds[0]
-            end = rounds[1]
-            del self.messages[start:end]
-            self.messages.insert(start, {"role": "user", "content": "(an earlier round was left out to save context)"})
+            end = start + 1
+            while end < len(self.messages) and self.messages[end].get("role") == "tool":
+                end += 1
+            self.messages[start:end] = [
+                {"role": "assistant", "content": "(an earlier tool round was left out to save context)"}
+            ]
             dropped += 1
         return dropped
 
@@ -507,6 +522,7 @@ class AgentSession:
         history is left valid (unanswered calls get a stand-in) and the
         cancellation goes on up."""
         self.budget = Budget(self.max_turns, self.max_tokens)
+        self.last_outcome = RunOutcome("stopped", message="Stopped.")
         try:
             await self.ensure_conversation(prompt)
         except (APIError, APIConnectionError) as exc:
@@ -520,6 +536,11 @@ class AgentSession:
             self._close_open_calls(self.messages, "the user stopped the run")
             self.last_outcome = RunOutcome("stopped", message="Stopped.", usage=self.budget.usage())
             raise
+        except Exception as exc:  # the run fails; the session and the history stay usable
+            self._close_open_calls(self.messages, "the run failed")
+            outcome = RunOutcome(
+                "error", message=f"The run failed: {exc}", usage=self.budget.usage()
+            )
         self.last_outcome = outcome
         return outcome
 
@@ -657,8 +678,7 @@ class AgentSession:
                         reached.status, last_text, self.budget.cap_message(reached.status),
                         request_id, self.budget.usage(),
                     )
-                except (APIError, APIConnectionError, OSError, ValueError) as exc:
-                    # A tool that broke is a failed call, not a failed run.
+                except Exception as exc:  # a tool that broke is a failed call, not a failed run
                     result = ToolOutcome(f"The tool failed: {exc}", is_error=True)
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": result.text})
                 self.events.on_tool_end(call, result, agent.name if agent else None)
@@ -765,6 +785,12 @@ class AgentSession:
         if isinstance(prepared, ToolOutcome):
             return prepared
         pending: PendingWrite = prepared
+        if steers_the_agent(pending.relative):
+            # The agent's own settings, commands, subagents and context
+            # files: a change there outlasts the session (a setting can
+            # start a program next time), so it is asked about in every
+            # mode, yolo included, and refused headless.
+            ask = True
         if ask:
             verb = "Create" if pending.created else ("Edit" if name == "edit" else "Overwrite")
             request = ApprovalRequest(name, "edit" if name == "edit" else "write",

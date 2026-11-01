@@ -162,7 +162,9 @@ async def web_fetch(url: str, *, client: httpx.AsyncClient | None = None) -> tup
     if reason:
         return reason, True
     owns = client is None
-    http = client or httpx.AsyncClient(follow_redirects=True, timeout=WEB_FETCH_TIMEOUT_S)
+    # Redirects are not followed: the user approved this URL, not wherever
+    # it sends the request next (a local address, a metadata service).
+    http = client or httpx.AsyncClient(follow_redirects=False, timeout=WEB_FETCH_TIMEOUT_S)
     try:
         async with http.stream("GET", url, headers={"User-Agent": "matterwave-tui (web_fetch)"}) as response:
             data = bytearray()
@@ -172,11 +174,19 @@ async def web_fetch(url: str, *, client: httpx.AsyncClient | None = None) -> tup
                     break
             kind = response.headers.get("content-type", "")
             status = response.status_code
+            location = response.headers.get("location")
     except httpx.HTTPError as exc:
         return f"The fetch failed: {exc}.", True
     finally:
         if owns:
             await http.aclose()
+    if 300 <= status < 400 and location:
+        target = str(httpx.URL(url).join(location))
+        return (
+            f"HTTP {status}: {url} redirects to {target}. It was not followed; call web_fetch "
+            "with that URL if you need it (the user approves each fetch).",
+            True,
+        )
     cut = len(data) > WEB_FETCH_MAX_BYTES
     body = bytes(data[:WEB_FETCH_MAX_BYTES]).decode("utf-8", errors="replace")
     if "html" in kind:

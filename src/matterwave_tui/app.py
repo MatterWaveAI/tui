@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from matterwave_sdk import frames as fr
 from matterwave_sdk.errors import APIConnectionError, APIError, ConflictError
@@ -26,6 +26,9 @@ from textual.widgets import Footer, Input, Label, ListItem, ListView, Static, Te
 
 from . import images
 from .agent.session import SessionOptions
+
+if TYPE_CHECKING:
+    from .agent.screen import AgentScreen
 from .api import NOTIFICATIONS_PAGE, ChatAPI, Cut, Opened, StreamItem
 from .dictation import MEDIA_TYPES, MicRecorder, media_type_for, mic_available
 from .export import conversation_markdown, export_filename
@@ -612,7 +615,7 @@ class MatterWaveApp(App[None]):
             return False
         return not (self.temporary_chat and action in ("share", "fork"))
 
-    def _agent_screen(self) -> Any:
+    def _agent_screen(self) -> AgentScreen | None:
         """The agent screen when it is open, under a modal of its own or
         not: the chat is behind it either way."""
         from .agent.screen import AgentScreen
@@ -1052,7 +1055,8 @@ class MatterWaveApp(App[None]):
         if agent is not None:
             # Ctrl+Enter is the app's priority key; in code mode it sends
             # to the agent, and not while one of its dialogs is open.
-            if self.screen is agent:
+            front: object = self.screen
+            if front is agent:
                 agent.action_send()
             return
         composer = self.query_one("#composer", TextArea)

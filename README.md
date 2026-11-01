@@ -60,12 +60,16 @@ sandbox: `run_shell` can reach anything you can, which is why commands ask.
 | `yolo` | yes | applied | run |
 
 `yolo` exists only when the session starts with `--yolo`, and it is never saved as a default (a
-`yolo` default in the settings is ignored). When no sandbox is on, `--yolo` warns.
+`yolo` default in the settings is ignored). When no sandbox is on, `--yolo` warns. A change to
+the files that steer the agent itself (`.matterwave/`, `MATTERWAVE.md`, `AGENTS.md`,
+`MATTERWAVE.local.md`) is asked about in every mode, `yolo` included, since it outlasts the
+session.
 
 Each change in `ask` mode opens its unified diff: `y` applies it and `n` rejects it, leaving the
-file byte for byte as it was. A command shows in full, never shortened. `Esc` stops a run: the
-stream closes and a running command is killed with everything it started (the process group on
-POSIX, a job object on Windows).
+file byte for byte as it was. A command shows in full, never shortened; a dialog takes no answer
+in its first half second, so keys typed for something else cannot answer it. `Esc` stops a run:
+the stream closes and a running command is killed with everything it started (the process group
+on POSIX, a job object on Windows). What a command leaves running in the background ends with it.
 
 **Limits.** Each run (one prompt) has a cap on model calls (`--max-turns`, default 40) and on
 tokens (`--max-tokens`, default 400,000). A subagent's calls count against its parent's. A 402
@@ -156,8 +160,9 @@ In CI, run it in a container, keep `--max-turns` and `--max-tokens` low, and use
 
 - **MCP servers**: stdio (`command`, `args`, `env`) or Streamable HTTP (`url`, `headers`;
   `${VAR}` is read from the environment). `tools` is the allow-list; a tool outside it is never
-  offered to the model. A tool the server marks read-only is a read; anything else asks in `ask`
-  and `auto-edit` mode unless the server has `"trust": true`, and is never offered in `plan`.
+  offered to the model. A tool marks itself read-only, but only a trusted server's word is taken
+  (`"trust": true`, and MatterWave's own); every other tool asks in `ask` and `auto-edit` mode
+  (not at all on a trusted server) and is never offered in `plan`.
   MatterWave's own `/mcp` is pre-wired with your credential (`matterwaveMcp`).
 - **Subagents**: Markdown files in `agents/` of the config folder or `.matterwave/agents/` of a
   trusted project, with `name`, `description`, `tools` (the allow-list) and `max_turns` in the
@@ -165,11 +170,13 @@ In CI, run it in a container, keep `--max-turns` and `--max-tokens` low, and use
   it runs under the same mode, approvals and caps.
 - **Sandbox**: off by default. `podman` or `docker` run each command in a container that sees
   only the root (mounted at `/workspace`), with a read-only filesystem elsewhere and no network
-  unless `"network": true`; `bwrap` does the same on Linux and `seatbelt` on macOS. `--sandbox`
+  unless `"network": true`; `bwrap` does the same on Linux and `seatbelt` on macOS. The root's
+  `.git` and `.matterwave` stay read-only inside it. Stop removes the container. `--sandbox`
   picks one for a session.
 - **Web fetch** (`web_fetch`) and the **task list** (`todo_write`) are on unless
   `"agent": {"web_fetch": false}` / `{"todo": false}`. A fetch is asked for in `ask` and
-  `auto-edit` mode, and never sends your MatterWave credential.
+  `auto-edit` mode, never sends your MatterWave credential and does not follow a redirect (the
+  model is told where it leads and asks again).
 
 **What leaves your machine.** Every file the agent reads, every command's output and every page
 it fetches is sent to MatterWave and to the model behind it, and is metered. The deny list is a

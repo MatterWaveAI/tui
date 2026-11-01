@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import secrets
 import shutil
 import signal
 import subprocess
@@ -41,6 +42,7 @@ KILL_GRACE_S = 0.3
 SCRUBBED_ENV = ("MATTERWAVE_API_KEY",)
 CONTAINER_ROOT = "/workspace"
 SANDBOX_ENGINES = ("none", "podman", "docker", "bwrap", "seatbelt")
+READ_ONLY_FOLDERS = (".git", ".matterwave")
 
 
 @dataclass(frozen=True)
@@ -91,36 +93,62 @@ def sandbox_platform(config: SandboxConfig) -> str | None:
     return "linux" if config.engine in ("podman", "docker") else None
 
 
-def _seatbelt_profile(root: str) -> str:
-    quoted = root.replace("\\", "\\\\").replace('"', '\\"')
-    return (
-        "(version 1)(allow default)(deny network*)(deny file-write*)"
-        f'(allow file-write* (subpath "{quoted}") (literal "/dev/null") (literal "/dev/tty"))'
-    )
+def _quoted(path: str) -> str:
+    return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def build_argv(command: str, root: Path, sandbox: SandboxConfig) -> tuple[list[str], str]:
-    """The argv to start and the working directory to start it in."""
+def _seatbelt_profile(root: str, read_only: list[str], network: bool) -> str:
+    rules = ["(version 1)", "(allow default)", "(deny file-write*)"]
+    if not network:
+        rules.append("(deny network*)")
+    rules.append(f'(allow file-write* (subpath {_quoted(root)}) (literal "/dev/null") (literal "/dev/tty"))')
+    rules.extend(f"(deny file-write* (subpath {_quoted(path)}))" for path in read_only)
+    return "".join(rules)
+
+
+def read_only_folders(root: Path) -> list[str]:
+    """The folders under the root a sandboxed command may read but not
+    change: the repository's `.git` (its hooks run later, outside any
+    sandbox) and the agent's own `.matterwave` (its settings can start
+    programs)."""
+    return [name for name in READ_ONLY_FOLDERS if (root / name).is_dir()]
+
+
+def build_argv(
+    command: str, root: Path, sandbox: SandboxConfig, *, name: str | None = None
+) -> tuple[list[str], str]:
+    """The argv to start and the working directory to start it in. `name`
+    names a container, so Stop can remove it as well as its client."""
     if sandbox.engine in ("podman", "docker"):
-        argv = [sandbox.engine, "run", "--rm", "-i", "--read-only"]
+        # --init: the container's PID 1 passes a stop on to the command.
+        argv = [sandbox.engine, "run", "--rm", "-i", "--init", "--read-only"]
+        if name:
+            argv += ["--name", name]
         if sandbox.engine == "podman":
             # Podman mounts a writable /tmp on a read-only container unless told not to.
             argv.append("--read-only-tmpfs=false")
         if not sandbox.network:
             argv.append("--network=none")
-        argv += ["-v", f"{root}:{CONTAINER_ROOT}:rw", "-w", CONTAINER_ROOT]
-        argv += [sandbox.image, "/bin/sh", "-c", command]
+        argv += ["-v", f"{root}:{CONTAINER_ROOT}:rw"]
+        for folder in read_only_folders(root):
+            argv += ["-v", f"{root / folder}:{CONTAINER_ROOT}/{folder}:ro"]
+        argv += ["-w", CONTAINER_ROOT, sandbox.image, "/bin/sh", "-c", command]
         return argv, str(root)
     if sandbox.engine == "bwrap":
         argv = [
             "bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
             "--bind", str(root), str(root), "--chdir", str(root), "--die-with-parent",
         ]
+        for folder in read_only_folders(root):
+            argv += ["--ro-bind", str(root / folder), str(root / folder)]
         if not sandbox.network:
             argv.append("--unshare-net")
         return [*argv, "/bin/sh", "-c", command], str(root)
     if sandbox.engine == "seatbelt":
-        profile = _seatbelt_profile(os.path.realpath(root))
+        real = os.path.realpath(root)
+        profile = _seatbelt_profile(
+            real, [os.path.join(real, f) for f in read_only_folders(root)], sandbox.network
+        )
         return ["sandbox-exec", "-p", profile, "/bin/sh", "-c", command], str(root)
     _, prefix = contract.shell_for()
     return [*prefix, command], str(root)
@@ -209,10 +237,15 @@ class _WindowsJob:
 
 
 class ProcessTree:
-    """A started command and the means to end it with everything below it."""
+    """A started command and the means to end it with everything below it.
+    `container` (engine, name) is a sandbox container to remove as well:
+    killing a container's client does not always stop the container."""
 
-    def __init__(self, proc: asyncio.subprocess.Process) -> None:
+    def __init__(
+        self, proc: asyncio.subprocess.Process, container: tuple[str, str] | None = None
+    ) -> None:
         self.proc = proc
+        self.container = container
         self._job: _WindowsJob | None = None
         if sys.platform == "win32":
             with contextlib.suppress(OSError):
@@ -222,28 +255,31 @@ class ProcessTree:
     def pid(self) -> int:
         return self.proc.pid
 
-    async def kill(self) -> None:
-        """End the command and its children, and wait for the command."""
-        if self.proc.returncode is None:
-            if sys.platform == "win32":
-                if self._job is not None:
-                    self._job.terminate()
-                else:
-                    await _taskkill(self.proc.pid)
-            else:
-                with contextlib.suppress(ProcessLookupError, PermissionError):
-                    os.killpg(self.proc.pid, signal.SIGTERM)
-                try:
-                    await asyncio.wait_for(self.proc.wait(), KILL_GRACE_S)
-                except TimeoutError:
-                    with contextlib.suppress(ProcessLookupError, PermissionError):
-                        os.killpg(self.proc.pid, signal.SIGKILL)
+    async def kill(self, *, remove_container: bool = True) -> None:
+        """End the command and its children, and wait for the command. The
+        group is signalled even when the shell itself has exited: a child it
+        started in the background is still in it."""
+        if sys.platform == "win32":
+            if self._job is not None:
+                self._job.terminate()
+            elif self.proc.returncode is None:
+                await _taskkill(self.proc.pid)
+        else:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(self.proc.pid, signal.SIGTERM)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self.proc.wait(), KILL_GRACE_S)
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(self.proc.pid, signal.SIGKILL)
         with contextlib.suppress(ProcessLookupError):
             if self.proc.returncode is None:
                 self.proc.kill()
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self.proc.wait(), 5)
         self.close()
+        if self.container is not None and remove_container:
+            engine, name = self.container
+            await _remove_container(engine, name)
 
     def close(self) -> None:
         if self._job is not None:
@@ -260,7 +296,18 @@ async def _taskkill(pid: int) -> None:
         await killer.wait()
 
 
-async def start(argv: list[str], cwd: str) -> ProcessTree:
+async def _remove_container(engine: str, name: str) -> None:
+    with contextlib.suppress(OSError, TimeoutError):
+        remover = await asyncio.create_subprocess_exec(
+            engine, "rm", "-f", name,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(remover.wait(), 15)
+
+
+async def start(
+    argv: list[str], cwd: str, container: tuple[str, str] | None = None
+) -> ProcessTree:
     kwargs: dict[str, object] = {}
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -275,7 +322,7 @@ async def start(argv: list[str], cwd: str) -> ProcessTree:
         env=child_env(),
         **kwargs,  # type: ignore[arg-type]
     )
-    return ProcessTree(proc)
+    return ProcessTree(proc, container)
 
 
 def _decode(data: bytes) -> str:
@@ -304,8 +351,11 @@ async def run_command(
     reason = sandbox_available(box)
     if reason is not None:
         raise SandboxUnavailable(reason)
-    argv, cwd = build_argv(command, root, box)
-    tree = await start(argv, cwd)
+    container: tuple[str, str] | None = None
+    if box.engine in ("podman", "docker"):
+        container = (box.engine, f"mw-agent-{secrets.token_hex(6)}")
+    argv, cwd = build_argv(command, root, box, name=container[1] if container else None)
+    tree = await start(argv, cwd, container)
     if on_start is not None:
         on_start(tree)
     stdout = tree.proc.stdout
@@ -338,6 +388,10 @@ async def run_command(
     try:
         await asyncio.wait_for(drain(), timeout_s)
         await tree.proc.wait()
+        # What the command left running in the background goes with it, as
+        # the job object does on Windows. (A container that exited removed
+        # itself.)
+        await tree.kill(remove_container=False)
     except TimeoutError:
         timed_out = True
         await tree.kill()

@@ -537,7 +537,7 @@ async def test_an_mcp_stdio_server_from_project_settings_lists_its_allowed_tools
         call("mcp__demo__drop_database"),
         say("Done."),
     ])
-    events = Recorder(False)
+    events = Recorder(False, True)
     session = await opened(fake, root, events, trust=True)
     try:
         await session.run("use the server")
@@ -546,7 +546,9 @@ async def test_an_mcp_stdio_server_from_project_settings_lists_its_allowed_tools
     names = fake.tool_names(0)
     assert "mcp__demo__lookup" in names and "mcp__demo__deploy" in names
     assert not any("drop_database" in n for n in names)
-    assert [r.kind for r in events.asked] == ["mcp"]
+    # The server is not trusted, so its own read-only hint does not skip
+    # the question: both calls ask.
+    assert [r.kind for r in events.asked] == ["mcp", "mcp"]
     assert '"target": "prod"' in events.asked[0].detail
     results = fake.tool_results()
     assert "rejected" in results[0]

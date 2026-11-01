@@ -87,7 +87,7 @@ async def test_an_edit_shows_its_diff_and_rejecting_it_leaves_the_file_byte_iden
     async with app.run_test(size=(120, 40)) as pilot:
         screen = await ready(app, pilot)
         await send(app, pilot, "change the return value")
-        await until(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+        await until(pilot, lambda: isinstance(app.screen, ApprovalScreen) and app.screen.armed)
         assert app.screen.request.kind == "edit"
         shown = screenshot_text(app)
         assert "-    return 1" in shown and "+    return 2" in shown
@@ -105,6 +105,30 @@ async def test_an_edit_shows_its_diff_and_rejecting_it_leaves_the_file_byte_iden
 
 
 @pytest.mark.asyncio
+async def test_keys_typed_as_the_dialog_opens_do_not_answer_it(root: Path):
+    before = (root / "src" / "app.py").read_bytes()
+    fake = FakeV1([call("edit", path="src/app.py", old_string="return 1", new_string="return 2"),
+                   say("ok")])
+    app = app_for(fake, root)
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await ready(app, pilot)
+        await send(app, pilot, "change it")
+        await until(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+        await pilot.press("y", "enter", "y")
+        assert isinstance(app.screen, ApprovalScreen) and not app.screen.armed
+        assert (root / "src" / "app.py").read_bytes() == before
+        # The composer takes no keys while the run goes.
+        assert screen.query_one("#agent-composer", TextArea).read_only
+        await until(pilot, lambda: app.screen.armed)
+        await pilot.press("enter")
+        assert isinstance(app.screen, ApprovalScreen)
+        await pilot.press("n")
+        await finished(pilot, screen)
+        assert (root / "src" / "app.py").read_bytes() == before
+        assert not screen.query_one("#agent-composer", TextArea).read_only
+
+
+@pytest.mark.asyncio
 async def test_approving_the_diff_applies_the_edit(root: Path):
     fake = FakeV1([call("edit", path="src/app.py", old_string="return 1", new_string="return 2"),
                    say("Changed.")])
@@ -112,7 +136,7 @@ async def test_approving_the_diff_applies_the_edit(root: Path):
     async with app.run_test(size=(120, 40)) as pilot:
         screen = await ready(app, pilot)
         await send(app, pilot, "change it")
-        await until(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+        await until(pilot, lambda: isinstance(app.screen, ApprovalScreen) and app.screen.armed)
         await pilot.press("y")
         await finished(pilot, screen)
         assert (root / "src" / "app.py").read_bytes() == b"def main():\n    return 2\n"
@@ -153,7 +177,7 @@ async def test_the_status_line_shows_the_mode_in_every_screen_state(root: Path):
         await pilot.press("shift+tab")  # auto-edit: commands still ask
         snapshots = {"idle": (status(app), screenshot_text(app))}
         await send(app, pilot, "run something")
-        await until(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+        await until(pilot, lambda: isinstance(app.screen, ApprovalScreen) and app.screen.armed)
         snapshots["approval"] = (status(app), screenshot_text(app))
         approval_line = str(app.screen.query_one("#approval-mode", Static).render())
         await pilot.press("n")
@@ -272,7 +296,7 @@ async def test_the_trust_prompt_is_asked_once_and_decides_the_context_file(root:
     fake = FakeV1([say("ok")])
     app = app_for(fake, root)
     async with app.run_test(size=(120, 40)) as pilot:
-        await until(pilot, lambda: isinstance(app.screen, TrustScreen))
+        await until(pilot, lambda: isinstance(app.screen, TrustScreen) and app.screen.armed)
         assert "mode ask" in status(app)
         await pilot.press("y")
         screen = await ready(app, pilot)
@@ -287,7 +311,7 @@ async def test_the_trust_prompt_is_asked_once_and_decides_the_context_file(root:
     fake2 = FakeV1([say("ok")])
     app2 = app_for(fake2, other)
     async with app2.run_test(size=(120, 40)) as pilot:
-        await until(pilot, lambda: isinstance(app2.screen, TrustScreen))
+        await until(pilot, lambda: isinstance(app2.screen, TrustScreen) and app2.screen.armed)
         await pilot.press("n")
         screen = await ready(app2, pilot)
         assert any("not loaded: this folder is not trusted" in line for line in screen.log_texts())

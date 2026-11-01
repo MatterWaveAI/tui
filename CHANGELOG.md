@@ -23,8 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   needs `--yolo` each session and is never saved; `--yolo` without a
   sandbox warns. In `ask` mode each change opens its unified diff and is
   written only on `y`; `n` leaves the file byte for byte as it was.
+- Changes to the files that steer the agent (`.matterwave/`, the context
+  files) are asked about in every mode and refused headless. An approval
+  dialog takes no answer in its first moments and Enter never answers it.
 - Stop (`Esc`) closes the stream and kills a running command with
-  everything it started (process group on POSIX, job object on Windows).
+  everything it started (process group on POSIX, job object on Windows);
+  background children end with their command.
   Each run has a turn cap and a token cap; a 402 or 429 ends it with the
   chat's own copy. The agent says it is unavailable when the org has
   switched local agent tools off (`local_agent_tools` on `/api/me`) or the
@@ -55,14 +59,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP client: stdio and Streamable HTTP servers from user and (trusted)
   project settings, each with a tool allow-list and `trust`; MatterWave's
   own `/mcp` pre-wired with the user's credential. MCP writes go through
-  the same approvals.
+  the same approvals; a tool's read-only hint counts only from a trusted
+  server.
 - A task list tool (`todo_write`), the plan-mode exit (`exit_plan_mode`),
   client web fetch behind approval (`web_fetch`), and subagents from
   Markdown definitions with their own prompt and tool allow-list, nested
   under the parent's mode, approvals and caps.
 - An optional shell sandbox, off by default: podman or docker (only the
-  root mounted, read-only elsewhere, no network), bubblewrap on Linux,
-  seatbelt on macOS.
+  root mounted, with its `.git` and `.matterwave` read-only, read-only
+  elsewhere, no network, removed on Stop), bubblewrap on Linux, seatbelt
+  on macOS. Web fetch does not follow redirects.
 - `FakeV1` in `tests/fake_api.py`: a scripted `/v1` under the real adapter
   and the SDK, with golden files for the headless output formats.
 

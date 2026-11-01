@@ -437,7 +437,10 @@ class McpManager:
                 if name in config.exclude_tools:
                     continue
                 annotations = raw.get("annotations")
-                read_only = isinstance(annotations, dict) and annotations.get("readOnlyHint") is True
+                hinted = isinstance(annotations, dict) and annotations.get("readOnlyHint") is True
+                # The hint is the server's word about itself: taken from a
+                # server the user trusts, and from MatterWave's own.
+                read_only = hinted and (config.trust or config.source == "builtin")
                 schema = raw.get("inputSchema")
                 info = McpToolInfo(
                     server=config.name,

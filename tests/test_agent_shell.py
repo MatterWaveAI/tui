@@ -23,11 +23,18 @@ PY = sys.executable
 
 def alive(pid: int) -> bool:
     if sys.platform == "win32":
-        out = subprocess.run(  # noqa: S603
-            ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],  # noqa: S607
-            capture_output=True, text=True, check=False,
-        ).stdout
-        return f'"{pid}"' in out
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32")
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -101,11 +108,9 @@ async def test_stop_kills_the_whole_tree(tmp_path: Path):
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    deadline = time.monotonic() + 2.0
-    while alive(grandchild) and time.monotonic() < deadline:  # noqa: ASYNC110 -- polling another process
-        await asyncio.sleep(0.05)
-    assert not alive(grandchild), "the grandchild outlived Stop"
-    assert time.monotonic() - stop < 2.5
+    while alive(grandchild) and time.monotonic() - stop < 2.0:  # noqa: ASYNC110 -- polling another process
+        await asyncio.sleep(0.02)
+    assert not alive(grandchild), "the grandchild outlived Stop by two seconds"
 
 
 @pytest.mark.asyncio
@@ -147,7 +152,7 @@ async def test_the_command_runs_in_the_root_and_reports_its_exit_code(tmp_path: 
 
 def test_a_container_sandbox_mounts_only_the_root_read_write(tmp_path: Path):
     argv, _ = build_argv("touch x", tmp_path, SandboxConfig(engine="podman", image="img"))
-    assert argv[:5] == ["podman", "run", "--rm", "-i", "--read-only"]
+    assert argv[:6] == ["podman", "run", "--rm", "-i", "--init", "--read-only"]
     assert "--read-only-tmpfs=false" in argv and "--network=none" in argv
     assert f"{tmp_path}:/workspace:rw" in argv
     assert argv[-4:] == ["img", "/bin/sh", "-c", "touch x"]
@@ -205,3 +210,30 @@ async def test_with_bwrap_a_write_outside_the_root_fails(tmp_path: Path):
     assert outside.exit_code != 0
     inside = await run_command("touch inside.txt", tmp_path, timeout_s=30, output_max_bytes=65536, sandbox=box)
     assert inside.exit_code == 0 and (tmp_path / "inside.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_stop_in_the_sandbox_removes_the_container(tmp_path: Path):
+    image = _podman_image()
+    if image is None:
+        pytest.skip("podman with a runnable local image is not available here")
+    started: list[ProcessTree] = []
+    task = asyncio.create_task(
+        run_command("sleep 60", tmp_path, timeout_s=120, output_max_bytes=65536,
+                    sandbox=SandboxConfig(engine="podman", image=image), on_start=started.append)
+    )
+    for _ in range(200):
+        if started:
+            break
+        await asyncio.sleep(0.05)
+    assert started and started[0].container is not None
+    _, name = started[0].container
+    await asyncio.sleep(3)  # the container is up
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    left = subprocess.run(  # noqa: S603, ASYNC221 -- a check after the fact
+        ["podman", "ps", "-a", "--filter", f"name={name}", "--format", "{{.Names}}"],  # noqa: S607
+        capture_output=True, text=True, timeout=60, check=False,
+    ).stdout
+    assert name not in left

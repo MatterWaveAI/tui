@@ -108,6 +108,13 @@ def _integer(args: Mapping[str, Any], key: str, low: int, high: int | None = Non
     return value
 
 
+def _glob_regex(pattern: str) -> re.Pattern[str]:
+    try:
+        return re.compile(contract.glob_to_regex(pattern.replace("\\", "/")), _GLOB_FLAGS)
+    except re.error as exc:
+        raise ArgumentError(f"The glob {pattern!r} is not valid ({exc}).") from exc
+
+
 def _is_binary(data: bytes) -> bool:
     return b"\0" in data[:BINARY_SNIFF_BYTES]
 
@@ -268,7 +275,7 @@ class LocalTools:
         base, target = self._search_base(args)
         if not target.absolute.is_dir():
             return ToolOutcome(f"{args.get('path')} is not a directory.", is_error=True)
-        regex = re.compile(contract.glob_to_regex(pattern.replace("\\", "/")), _GLOB_FLAGS)
+        regex = _glob_regex(pattern)
         cap = LIMITS["search_max_results"]
         found: list[str] = []
         more = False
@@ -298,7 +305,7 @@ class LocalTools:
             raise ArgumentError(f"`pattern` is not a valid regular expression ({exc}).") from exc
         glob_re: re.Pattern[str] | None = None
         if file_glob:
-            glob_re = re.compile(contract.glob_to_regex(file_glob.replace("\\", "/")), _GLOB_FLAGS)
+            glob_re = _glob_regex(file_glob)
         base, target = self._search_base(args)
         if target.absolute.is_file():
             candidates: list[str] = [target.relative]

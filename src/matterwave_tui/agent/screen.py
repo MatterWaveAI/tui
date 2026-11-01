@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,9 @@ from .tools import ToolOutcome
 from .wire import AgentWire, model_rows, unavailable_reason
 
 LIVE_REDRAW_S = 1 / 15
+# A dialog that decides something ignores keys this long after it opens, so
+# a key typed for something else cannot answer a question not yet read.
+ANSWER_GRACE_S = 0.6
 RESULT_PREVIEW_LINES = 3
 INIT_PROMPT = (
     "Draft a MATTERWAVE.md for this repository: read its README, its build and test setup and "
@@ -98,12 +102,30 @@ class Answer(Markdown):
         self.text = text
 
 
-class ApprovalScreen(ModalScreen[bool]):
+class Deliberate(ModalScreen[bool]):
+    """A yes/no dialog that takes no answer in its first moments
+    (`ANSWER_GRACE_S`): the composer may have had keys on their way."""
+
+    def on_mount(self) -> None:
+        self.opened_at = time.monotonic()
+
+    @property
+    def armed(self) -> bool:
+        opened = getattr(self, "opened_at", None)
+        return opened is not None and time.monotonic() - opened >= ANSWER_GRACE_S
+
+    def answer(self, value: bool) -> None:
+        if self.armed:
+            self.dismiss(value)
+
+
+class ApprovalScreen(Deliberate):
     """One approval: the change as a unified diff, or the whole command.
-    `y` / Enter approves, `n` / Esc rejects."""
+    `y` approves, `n` / Esc rejects. Enter is no answer: it is the key most
+    likely to arrive from typing elsewhere."""
 
     BINDINGS = [
-        Binding("y,enter", "approve", "Approve"),
+        Binding("y", "approve", "Approve"),
         Binding("n,escape", "reject", "Reject"),
     ]
     DEFAULT_CSS = """
@@ -138,10 +160,10 @@ class ApprovalScreen(ModalScreen[bool]):
                 yield Static(body, id="approval-detail")
 
     def action_approve(self) -> None:
-        self.dismiss(True)
+        self.answer(True)
 
     def action_reject(self) -> None:
-        self.dismiss(False)
+        self.answer(False)
 
 
 class PickScreen(ModalScreen[str | None]):
@@ -174,7 +196,7 @@ class PickScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
-class TrustScreen(ModalScreen[bool]):
+class TrustScreen(Deliberate):
     BINDINGS = [Binding("y", "yes", "Trust"), Binding("n,escape", "no", "Don't trust")]
     DEFAULT_CSS = """
     TrustScreen { align: center middle; }
@@ -199,10 +221,10 @@ class TrustScreen(ModalScreen[bool]):
             )
 
     def action_yes(self) -> None:
-        self.dismiss(True)
+        self.answer(True)
 
     def action_no(self) -> None:
-        self.dismiss(False)
+        self.answer(False)
 
 
 class ScreenEvents(RunEvents):
@@ -276,6 +298,9 @@ class AgentScreen(Screen[None]):
         self.session: AgentSession | None = None
         self.unavailable: str | None = None
         self.running = False
+        # A command's worker (/compact, /restore, /resume) is changing the
+        # history; a run waits for it.
+        self.busy = False
         self.state = "opening"
         self.shell: ProcessTree | None = None
         self.outcomes: list[RunOutcome] = []
@@ -507,8 +532,8 @@ class AgentScreen(Screen[None]):
             composer.text = ""
             self.command(text)
             return
-        if self.running:
-            self.notify("A run is going; Esc stops it.")
+        if self.running or self.busy:
+            self.notify("A run is going; Esc stops it." if self.running else "One moment.")
             return
         if self.session is None:
             self.notify("The session is still opening.")
@@ -521,6 +546,7 @@ class AgentScreen(Screen[None]):
 
     def begin(self, prompt: str, *, shown: str | None = None) -> None:
         self.add_line(f"› {shown or prompt}", "user")
+        self.query_one("#agent-composer", TextArea).read_only = True
         self.running = True
         self.state = "running"
         self.render_status()
@@ -549,6 +575,8 @@ class AgentScreen(Screen[None]):
     def _settle(self, outcome: RunOutcome | None, *, stopped: bool) -> None:
         self.end_text()
         self.running = False
+        with contextlib.suppress(NoMatches):
+            self.query_one("#agent-composer", TextArea).read_only = False
         self.shell = None
         self.state = "idle"
         if self.session is not None:
@@ -688,9 +716,13 @@ class AgentScreen(Screen[None]):
     @work(group="agent-cmd")
     async def _cmd_compact(self, rest: str) -> None:
         session = self.session
-        if session is None or self.running:
+        if session is None or self.running or self.busy:
             return
-        note = await session.compact(force=True)
+        self.busy = True
+        try:
+            note = await session.compact(force=True)
+        finally:
+            self.busy = False
         self.add_line(f"Compacted: {note}.", "notice")
         self.render_status()
 
@@ -746,12 +778,17 @@ class AgentScreen(Screen[None]):
         session = self.session
         if session is None or session.checkpoints is None:
             return
+        if self.running or self.busy:
+            return
+        self.busy = True
         try:
             checkpoint_id = int(value.lstrip("#"))
             paths = await session.checkpoints.arestore(checkpoint_id)
         except (ValueError, CheckpointError, OSError) as exc:
             self.add_line(f"Not restored: {exc}.", "error")
             return
+        finally:
+            self.busy = False
         rows = {r.id: r for r in session.checkpoints.entries()}
         row = rows.get(checkpoint_id)
         if row is not None and row.turn is not None and row.conversation_id == session.conversation_id:
@@ -804,11 +841,16 @@ class AgentScreen(Screen[None]):
         session = self.session
         if session is None:
             return
+        if self.running or self.busy:
+            return
+        self.busy = True
         try:
             count = await resume(session, conversation_id)
         except OpenError as exc:
             self.add_line(str(exc), "error")
             return
+        finally:
+            self.busy = False
         self.add_line(f"Resumed {session.title or conversation_id} ({count} messages).", "notice")
         self.render_status()
 
@@ -854,7 +896,7 @@ class AgentScreen(Screen[None]):
         session = self.session
         if session is None or self.running:
             return
-        session.messages = []
+        session.messages.clear()
         session.todos = []
         session.conversation_id = None
         self.show_todos([])

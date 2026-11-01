@@ -178,7 +178,7 @@ async def resume(session: AgentSession, conversation_id: str) -> int:
         tree = await session.wire.tree(conversation_id)
     except (APIError, APIConnectionError) as exc:
         raise OpenError(f"The run {conversation_id} could not be read: {exc}") from exc
-    session.messages = stored_run_messages(tree)
+    session.messages[:] = stored_run_messages(tree)
     session.conversation_id = conversation_id
     session.title = tree.title
     await session.load_account_instructions()

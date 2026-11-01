@@ -58,3 +58,9 @@ def test_a_tag_publishes_only_its_own_version_with_notes_and_an_sbom():
     assert "--format cyclonedx1.5" in publish
     assert "python scripts/release.py notes > notes.md" in publish
     assert "gh release create" in publish and "release/sbom.cdx.json" in publish
+
+
+def test_ci_refuses_private_ticket_ids_in_tracked_files():
+    assert "run: sh scripts/check-ticket-ids.sh" in read("ci.yml")
+    script = (WORKFLOWS.parents[1] / "scripts" / "check-ticket-ids.sh").read_text(encoding="utf-8")
+    assert "git grep -nIE" in script and "[TB]-[0-9]{3,4}" in script

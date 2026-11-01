@@ -31,6 +31,8 @@ jobs:
         run: uv sync --locked --extra dev --extra images
       - name: Lint
         run: uv run ruff check .
+      - name: No private ticket ids in tracked files
+        run: sh scripts/check-ticket-ids.sh
       - name: Format
         run: uv run ruff format --check .
       - name: Types

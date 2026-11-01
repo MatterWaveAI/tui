@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import glob
 import json
 import os
-import re
+import shlex
+import subprocess
+import tempfile
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 from matterwave_sdk import frames as fr
 from matterwave_sdk.errors import APIConnectionError, APIError, ConflictError
 from matterwave_sdk.models import Attachment, Conversation, ConversationMessage, UsageBalance
@@ -24,31 +29,49 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widget import Widget
 from textual.widgets import Footer, Input, Label, ListItem, ListView, Static, TextArea
 
-from . import images
+from . import __version__, images, markers
 from .api import NOTIFICATIONS_PAGE, ChatAPI, Cut, Opened, StreamItem
 from .dictation import MEDIA_TYPES, MicRecorder, media_type_for, mic_available
-from .export import conversation_markdown, export_filename
+from .export import conversation_markdown, export_filename, free_path
 from .failures import Failure, classify, retry_in
-from .models import is_image_filename, model_accepts_images, model_window, vision_capable_model_ids
+from .models import (
+    answer_usage,
+    is_image_filename,
+    model_accepts_images,
+    model_window,
+    vision_capable_model_ids,
+)
+from .paths import migrate_legacy_state, state_dir
 from .roles import load_roles, roles_path, save_roles
 from .screens import (
+    Account,
+    AccountActions,
     Accounts,
+    AccountState,
     Confirm,
     DeviceLogin,
     DeviceLoginFn,
     Dictation,
     FeedbackDialog,
+    FilePicker,
+    HelpScreen,
     InstructionsEditor,
     Library,
     LibraryState,
     ModelPicker,
+    NewChat,
     Notifications,
+    PendingAttachments,
     Prompt,
     RoleEditor,
     Roles,
+    ShareDialog,
     Shares,
 )
+from .shell import detect_shell, run_shell_command, shell_command, shell_request
 from .thread import Divider, Message, Thread
+from .update import STATE_FILE as UPDATE_STATE_FILE
+from .update import check_for_update
 from .widgets import DividerView, ImageView, MessageView, ThumbClicked, code_blocks
 
 # How often a stream redraws the answer in progress. A redraw per delta is
@@ -77,9 +100,6 @@ IMPORT_POLL_S = 1.5
 # Ten minutes of polls before the watch gives up saying so (the worker
 # keeps the row on the server, so nothing is lost, only unwatched).
 IMPORT_POLLS_MAX = 400
-# The shell assistant: how long a proposed command may run before it is
-# stopped, and the gate's wording.
-SHELL_TIMEOUT_S = 30.0
 # The sources an export names, as they are said to the person.
 IMPORT_SOURCE_NAMES = {"chatgpt": "ChatGPT", "claude": "Claude"}
 # The account export: a server job like an import, polled the same way;
@@ -87,19 +107,25 @@ IMPORT_SOURCE_NAMES = {"chatgpt": "ChatGPT", "claude": "Claude"}
 # own content-disposition names them.
 EXPORT_POLL_S = 1.5
 EXPORT_POLLS_MAX = 400
+# An upload's malware scan, waited on the way the web composer waits on it
+# (web/src/apps/chat/attachments.ts): a deployment that scans after the
+# upload answers `scanning`, and a turn naming the file is refused until it
+# is `clean`. Ninety seconds of polls, then the person is asked to attach
+# it again; the server keeps scanning, and sweeps a row nothing names.
+SCAN_CLEAN = "clean"
+SCAN_REJECTED = frozenset({"infected", "scan_failed", "failed"})
+SCAN_POLL_S = 1.5
+SCAN_POLLS_MAX = 60
+# What the app remembers between runs beside the roles: the theme.
+SETTINGS_FILE = "settings.json"
 
 
 # --- per-device state (dismissed announcement ids) ----------------------------
 
 
 def _state_path() -> Path:
-    """Where the app keeps its per-device state. MATTERWAVE_STATE_DIR moves
-    it, which is also how the tests point it at a scratch directory."""
-    root = os.environ.get("MATTERWAVE_STATE_DIR")
-    if not root:
-        xdg = os.environ.get("XDG_STATE_HOME")
-        root = xdg if xdg else str(Path.home() / ".local" / "state")
-    return Path(root) / "matterwave-tui" / "dismissed-announcements.json"
+    """Where the announcements this device dismissed are kept."""
+    return state_dir() / "dismissed-announcements.json"
 
 
 def _read_dismissed(path: Path) -> set[str]:
@@ -126,35 +152,86 @@ def estimate_tokens(text: str) -> int:
     return (len(text) + 3) // 4
 
 
-def shell_command(text: str) -> str:
-    """The command an answer proposes: one fenced block's contents when the
-    answer is a single fenced block, the bare text otherwise."""
-    stripped = text.strip()
-    fence = re.fullmatch(r"```[^\n]*\n(.*)\n```\s*", stripped, re.DOTALL)
-    return (fence.group(1) if fence else stripped).strip()
+def scan_pending(scan_status: str) -> bool:
+    """Whether an upload is still waiting on its scan. An empty status is an
+    API that predates scanning, which never refuses a turn over it."""
+    return bool(scan_status) and scan_status != SCAN_CLEAN and scan_status not in SCAN_REJECTED
 
 
-async def run_shell_command(command: str) -> str:
-    """A proposed command, run for real; its output (stderr folded in), or
-    the note that it outlived its half minute and was stopped."""
-    proc = await asyncio.create_subprocess_shell(
-        command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
+def scan_refusal(filename: str, scan_status: str) -> str:
+    """Why an upload left the message, naming the file. The scanner's
+    signature name is never said: it is a hint about what got through."""
+    if scan_status == "infected":
+        return f"{filename} was removed by the malware scan."
+    if scan_status in SCAN_REJECTED:
+        return f"{filename} could not be scanned; attach it again."
+    return f"Scanning {filename} is taking longer than expected; attach it again."
+
+
+def typed_path(path_text: str) -> Path:
+    """A path as it was typed or pasted: the quotes Windows' "Copy as path"
+    (or a shell's drag and drop) puts round it come off, and `~` expands."""
+    text = path_text.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1].strip()
+    return Path(text).expanduser()
+
+
+def expand_paths(path_text: str) -> list[str] | None:
+    """The files a glob matches, sorted; None when the text is a plain
+    path rather than a pattern."""
+    path = typed_path(path_text)
+    if not glob.has_magic(str(path)):
+        return None
+    return sorted(p for p in glob.glob(str(path)) if Path(p).is_file())
+
+
+def editor_command(env: Mapping[str, str]) -> list[str]:
+    """`$VISUAL`, else `$EDITOR`, else the platform's plain editor, as an
+    argument list (Windows paths keep their backslashes)."""
+    named = env.get("VISUAL") or env.get("EDITOR")
+    if not named:
+        return ["notepad"] if os.name == "nt" else ["vi"]
+    return shlex.split(named, posix=os.name != "nt")
+
+
+def load_saved_theme() -> str | None:
+    """The theme last chosen in the app, from the state directory."""
     try:
-        out, _ = await asyncio.wait_for(proc.communicate(), SHELL_TIMEOUT_S)
-    except TimeoutError:
-        proc.kill()
-        await proc.wait()
-        return "(stopped: the command ran past its thirty seconds)"
-    text = out.decode(errors="replace").strip()
-    return text or f"(no output; exit {proc.returncode})"
+        saved = json.loads((state_dir() / SETTINGS_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    theme = saved.get("theme") if isinstance(saved, dict) else None
+    return theme if isinstance(theme, str) and theme else None
+
+
+def save_theme(theme: str) -> None:
+    path = state_dir() / SETTINGS_FILE
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"theme": theme}), encoding="utf-8")
+    except OSError:
+        return
+
+
+def human_size(size: int) -> str:
+    """Bytes as a person reads them: 512 B, 3.2 KB, 20 MB."""
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.0f} {unit}" if unit == "B" or value >= 10 else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
+def attachment_label(attachment: Attachment) -> str:
+    """A pending file as the status line and the detach list name it."""
+    return attachment.filename + (" (scanning…)" if scan_pending(attachment.scan_status) else "")
 
 
 def _read_attachment(path_text: str) -> tuple[bytes, str]:
     """The file's bytes and its name, off the event loop (it may be large)."""
-    path = Path(path_text).expanduser()
+    path = typed_path(path_text)
     return path.read_bytes(), path.name
 
 
@@ -168,8 +245,12 @@ class ConversationItem(ListItem):
 
     def caption(self) -> str:
         c = self.conversation
-        marks = ("📌 " if c.pinned_at else "") + ("🗄 " if c.archived_at else "")
-        return marks + (c.title or "New chat") + self.library
+        marks = [
+            markers.badge(name)
+            for name, on in (("pinned", c.pinned_at), ("archived", c.archived_at))
+            if on
+        ]
+        return " · ".join([*marks, c.title or "New chat"]) + self.library
 
     def retitle(self, title: str) -> None:
         self.conversation = replace(self.conversation, title=title)
@@ -184,6 +265,14 @@ class ConversationItem(ListItem):
         """The conversation's folder or tags changed: redraw the row."""
         self.library = library
         self.query_one(Label).update(self.caption())
+
+
+class MoreResults(ListItem):
+    """The last row of a search that has another page: selecting it reads
+    that page in its place."""
+
+    def __init__(self) -> None:
+        super().__init__(Label("More results…", markup=False))
 
 
 class Transcript(VerticalScroll):
@@ -234,16 +323,32 @@ class TuiCommands(Provider):
     commands: the actions that have no key of their own."""
 
     ENTRIES: tuple[tuple[str, str, str], ...] = (
-        ("Switch account…", "who is signed in here, and make another one acting",
-         "action_switch_account"),
-        ("Import a ChatGPT or Claude export…", "bring an exported history into this account",
-         "action_import"),
-        ("Export this account's data…", "every conversation and rating the account holds, "
-         "as one JSON file", "action_export_account"),
-        ("Dictate audio…", "transcribe the microphone or an audio file into the composer",
-         "action_dictate"),
-        ("Prompt roles…", "named system prompts to apply to this conversation",
-         "action_roles"),
+        (
+            "Account…",
+            "API keys, signed-in browsers, preferences, your instructions and the plan",
+            "action_account",
+        ),
+        (
+            "Switch account…",
+            "who is signed in here, and make another one acting",
+            "action_switch_account",
+        ),
+        (
+            "Import a ChatGPT or Claude export…",
+            "bring an exported history into this account",
+            "action_import",
+        ),
+        (
+            "Export this account's data…",
+            "every conversation and rating the account holds, as one JSON file",
+            "action_export_account",
+        ),
+        (
+            "Dictate audio…",
+            "transcribe the microphone or an audio file into the composer",
+            "action_dictate",
+        ),
+        ("Prompt roles…", "named system prompts to apply to this conversation", "action_roles"),
     )
 
     async def discover(self) -> Hits:
@@ -254,8 +359,7 @@ class TuiCommands(Provider):
         matcher = self.matcher(query)
         for name, help_text, action in self.ENTRIES:
             if (match := matcher.match(name)) > 0:
-                yield Hit(match, matcher.highlight(name), getattr(self.app, action),
-                          help=help_text)
+                yield Hit(match, matcher.highlight(name), getattr(self.app, action), help=help_text)
 
 
 class MatterWaveApp(App[None]):
@@ -279,45 +383,79 @@ class MatterWaveApp(App[None]):
     #status { height: 1; background: $panel; color: $text-muted; padding: 0 1; }
     """
     BINDINGS = [
-        Binding("ctrl+enter,ctrl+j,ctrl+s", "send", "Send", priority=True),
-        Binding("n", "new", "New"),
-        Binding("slash", "search", "Search"),
-        Binding("m", "pick_model", "Model"),
-        Binding("e", "edit", "Edit"),
-        Binding("r", "regenerate", "Regenerate"),
-        Binding("left_square_bracket", "branch(-1)", "Prev branch"),
-        Binding("right_square_bracket", "branch(1)", "Next branch"),
-        Binding("x", "toggle_originals", "Originals"),
-        Binding("c", "compact", "Compact"),
-        Binding("t", "instructions", "Instructions"),
-        Binding("b", "feedback", "Feedback"),
-        Binding("f2", "rename", "Rename"),
-        Binding("p", "toggle_pin", "Pin"),
-        Binding("a", "toggle_archive", "Archive"),
-        Binding("d", "delete_conversation", "Delete"),
-        Binding("f", "fork", "Fork"),
-        Binding("s", "share", "Share"),
-        Binding("S", "my_shares", "Shares"),
-        Binding("l", "library", "Library"),
-        Binding("L", "roles", "Roles"),
-        Binding("R", "report", "Report"),
-        Binding("N", "notifications", "Inbox"),
-        Binding("A", "dismiss_announcements", "Dismiss"),
-        Binding("w", "export_markdown", "Export"),
-        Binding("i", "attach", "Attach"),
-        Binding("v", "dictate", "Dictate"),
-        Binding("o", "cycle_filter", "List"),
-        Binding("y", "copy", "Copy"),
-        Binding("Y", "copy_code", "Copy code"),
-        Binding("escape", "leave_composer", "Transcript", show=False),
-        Binding("ctrl+q", "quit", "Quit", priority=True),
+        Binding("ctrl+enter,ctrl+j,ctrl+s", "send", "Send", priority=True, id="send"),
+        Binding("n", "new", "New", id="new"),
+        Binding("slash", "search", "Search", id="search"),
+        Binding("m", "pick_model", "Model", id="pick_model"),
+        Binding("e", "edit", "Edit", id="edit"),
+        Binding("r", "regenerate", "Regenerate", id="regenerate"),
+        Binding("left_square_bracket", "branch(-1)", "Prev branch", id="prev_branch"),
+        Binding("right_square_bracket", "branch(1)", "Next branch", id="next_branch"),
+        Binding("x", "toggle_originals", "Originals", id="toggle_originals"),
+        Binding("c", "compact", "Compact", id="compact"),
+        Binding("t", "instructions", "Instructions", id="instructions"),
+        Binding("b", "feedback", "Feedback", id="feedback"),
+        Binding("f2", "rename", "Rename", id="rename"),
+        Binding("p", "toggle_pin", "Pin", id="toggle_pin"),
+        Binding("a", "toggle_archive", "Archive", id="toggle_archive"),
+        Binding("d", "delete_conversation", "Delete", id="delete_conversation"),
+        Binding("f", "fork", "Fork", id="fork"),
+        Binding("s", "share", "Share", id="share"),
+        Binding("S", "my_shares", "Shares", id="my_shares"),
+        Binding("l", "library", "Library", id="library"),
+        Binding("L", "roles", "Roles", id="roles"),
+        Binding("R", "report", "Report", id="report"),
+        Binding("N", "notifications", "Inbox", id="notifications"),
+        Binding("A", "dismiss_announcements", "Dismiss", id="dismiss_announcements"),
+        Binding("U", "account", "Account", id="account"),
+        Binding("w", "export_markdown", "Export", id="export_markdown"),
+        Binding("i", "attach", "Attach", id="attach"),
+        Binding("ctrl+o", "pick_files", "Pick files", id="pick_files"),
+        Binding("I", "detach", "Detach", id="detach"),
+        Binding("v", "dictate", "Dictate", id="dictate"),
+        Binding("o", "cycle_filter", "List", id="cycle_filter"),
+        Binding("y", "copy", "Copy", id="copy"),
+        Binding("Y", "copy_code", "Copy code", id="copy_code"),
+        Binding("ctrl+e", "edit_in_editor", "Editor", priority=True, id="editor"),
+        Binding("question_mark,f1", "help", "Help", id="help"),
+        Binding("escape", "leave_composer", "Transcript", show=False, id="leave_composer"),
+        Binding("ctrl+q", "quit", "Quit", priority=True, id="quit"),
     ]
 
     def __init__(
-        self, api: ChatAPI, *, relogin: DeviceLoginFn | None = None, shell_mode: bool = False
+        self,
+        api: ChatAPI,
+        *,
+        relogin: DeviceLoginFn | None = None,
+        shell_mode: bool = False,
+        model: str | None = None,
+        theme: str | None = None,
+        environ: Mapping[str, str] | None = None,
+        keymap: Mapping[str, str] | None = None,
+        update_check: bool = False,
+        show_answer_usage: bool = True,
+        plain: bool = False,
     ) -> None:
         super().__init__()
         self.api = api
+        # `--plain`: every mark drawn as its word, no symbols.
+        markers.configure(plain)
+        # Tokens and cost under each answer this session streamed, by
+        # message id; the config file's `answer_usage = "hide"` hides them.
+        self.show_answer_usage = show_answer_usage
+        self.answer_tokens: dict[str, tuple[int | None, int | None]] = {}
+        self._turn_tokens: tuple[int | None, int | None] | None = None
+        # The once-a-day look for a newer release; the CLI turns it on.
+        self.update_check = update_check
+        # The config file's [keys]: binding id -> key, over the defaults.
+        self.keymap_overrides = dict(keymap or {})
+        # Hands the composer's file to the editor; a test stands in.
+        self._run_editor: Callable[[list[str]], int] = self._suspend_for_editor
+        # The environment the image and shell settings are read from: the
+        # process's own, with the config file's filling its gaps.
+        environ = os.environ if environ is None else environ
+        # The config file's theme, applied once the app is up.
+        self.configured_theme = theme
         self.relogin_fn = relogin
         self.conversations: list[Conversation] = []
         self.conversation: Conversation | None = None
@@ -325,7 +463,10 @@ class MatterWaveApp(App[None]):
         self.drafts: dict[str, str] = {}
         self.models_list: list[dict[str, Any]] = []
         self.default_model: str | None = None
-        self.model: str | None = None
+        self.model: str | None = model
+        # `-m` at launch: the model for every turn, whatever a conversation
+        # was last on, until the picker chooses another.
+        self.model_override = model
         self.editing: str | None = None
         self.streaming = False
         # Typed while an answer streams: it sends itself when the turn
@@ -344,15 +485,25 @@ class MatterWaveApp(App[None]):
         # The org's balance this period, for the status line; None until the
         # usage route has answered (or forever, when it is not there).
         self.usage_balance: UsageBalance | None = None
-        # Files uploaded but not sent yet; their ids go with the next turn.
-        self.pending_attachments: list[Attachment] = []
+        # Files uploaded but not sent yet, per conversation ("" before one
+        # exists), the way drafts are kept: their ids go with that
+        # conversation's next turn and nowhere else.
+        self.attachment_drafts: dict[str, list[Attachment]] = {}
+        # A send asked for while an upload was still being scanned: it goes
+        # by itself once every scan is clean, and not at all if one fails.
+        self.send_after_scan = False
         # The open conversation is temporary: created so in this session, so
         # no share or fork, and a notice standing in for the usual history.
         self.temporary_chat = False
         # The caller's own ratings in the open conversation, by message id.
         self.feedback: dict[str, dict[str, Any]] = {}
-        # Which slice of the conversations the sidebar shows.
+        # Which slice of the conversations the sidebar shows, and the folder
+        # or tag it is narrowed to: ("folder" | "tag", id), or None.
         self.list_filter = "default"
+        self.library_filter: tuple[str, str] | None = None
+        # The search the sidebar shows, and the cursor of its next page.
+        self.search_query = ""
+        self.search_cursor: str | None = None
         # The caller's notifications (the page GET /api/me/notifications
         # answers) and the unread count the badge shows; None until the
         # route has answered (or forever, when it is not there). What the
@@ -383,7 +534,7 @@ class MatterWaveApp(App[None]):
         # Terminal graphics: which protocol this terminal speaks (None is
         # the plain placeholder), what the layer has drawn, and the writes
         # waiting for the next refresh to carry them out.
-        self.image_backend: str | None = images.detect_backend(os.environ)
+        self.image_backend: str | None = images.detect_backend(environ)
         self._image_placements: dict[str, images.Placement] = {}
         self._image_ops: list[str] = []
         self._image_seq = 0
@@ -391,16 +542,114 @@ class MatterWaveApp(App[None]):
         # so a redraw hands a rebuilt view its picture without a re-fetch.
         self._image_data: dict[str, bytes] = {}
         # The prompt library: named system texts on this device, applied
-        # with /role or the `L` screen. Empty until roles.json is read.
+        # with /role or the `L` screen. Empty until roles.json is read,
+        # which is after an earlier release's files have moved over.
+        migrate_legacy_state()
         self.roles = load_roles(roles_path())
-        # Shell assistant mode: each finished answer is a proposed command,
-        # run only after the person confirms. `--shell` starts with it on;
-        # /shell toggles. The runner is an attribute so a test can stand in.
+        # The temperature a conversation's turns are sent with, set by
+        # /temp; absent, the server's default.
+        self.temperatures: dict[str, float] = {}
+        # Shell assistant mode: each turn tells the model the OS and shell,
+        # and each finished answer is a proposed command, run only after
+        # the person confirms. `--shell` starts with it on; /shell toggles.
+        # The runner is an attribute so a test can stand in.
         self.shell_mode = shell_mode
-        self._run_shell = run_shell_command
+        self.shell = detect_shell(environ)
+        self._run_shell: Callable[[str], Awaitable[str]] = self._run_in_shell
         # The answer the turn that just ended produced, for the shell gate.
         self._completed_answer: Message | None = None
         self._search_seq = 0
+
+    @property
+    def pending_attachments(self) -> list[Attachment]:
+        """The open conversation's uploads, waiting for its next turn."""
+        return self.attachment_drafts.get(self._draft_key(), [])
+
+    @pending_attachments.setter
+    def pending_attachments(self, attachments: list[Attachment]) -> None:
+        key = self._draft_key()
+        if attachments:
+            self.attachment_drafts[key] = list(attachments)
+        else:
+            self.attachment_drafts.pop(key, None)
+
+    def _draft_key(self) -> str:
+        return self.conversation.id if self.conversation is not None else ""
+
+    # --- keys, help, theme, editor --------------------------------------------
+
+    def _apply_keymap(self) -> None:
+        """The config file's key overrides, by binding id; an id no binding
+        has is said rather than ignored."""
+        known = {b.id for b in self.BINDINGS if isinstance(b, Binding) and b.id}
+        unknown = sorted(set(self.keymap_overrides) - known)
+        if unknown:
+            self.notify(
+                f"[keys] names {', '.join(unknown)}, which no key does; "
+                "the help (?) lists the names.",
+                severity="warning",
+            )
+        self.set_keymap({k: v for k, v in self.keymap_overrides.items() if k in known})
+
+    @work(group="update", exclusive=True)
+    async def look_for_update(self) -> None:
+        async with httpx.AsyncClient() as http:
+            latest = await check_for_update(__version__, state_dir() / UPDATE_STATE_FILE, http=http)
+        if latest:
+            self.notify(
+                f"matterwave-tui {latest} is out (this is {__version__}): "
+                "uv tool upgrade matterwave-tui."
+            )
+
+    def _remember_theme(self, theme: Any) -> None:
+        save_theme(str(getattr(theme, "name", theme)))
+
+    def help_rows(self) -> list[tuple[str, str, str]]:
+        """(keys, what it does, its name for [keys]) for every binding, the
+        config file's overrides in place."""
+        rows: list[tuple[str, str, str]] = []
+        for binding in [*self.BINDINGS, *Transcript.BINDINGS]:
+            if not isinstance(binding, Binding):
+                continue
+            keys = self.keymap_overrides.get(binding.id or "", binding.key)
+            shown = " / ".join(
+                self.get_key_display(replace(binding, key=k)) for k in keys.split(",")
+            )
+            rows.append((shown, binding.description or binding.action, binding.id or ""))
+        return rows
+
+    def action_help(self) -> None:
+        """`?` / F1: every key, generated from the bindings."""
+        self.push_screen(HelpScreen(self.help_rows()))
+
+    def action_edit_in_editor(self) -> None:
+        """Ctrl+E: the composer's text in `$VISUAL` / `$EDITOR`, the app
+        suspended while it runs; what the editor saves comes back."""
+        composer = self.query_one("#composer", TextArea)
+        command = editor_command(os.environ)
+        handle, name = tempfile.mkstemp(suffix=".md", prefix="matterwave-")
+        path = Path(name)
+        try:
+            with os.fdopen(handle, "w", encoding="utf-8") as draft:
+                draft.write(composer.text)
+            status = self._run_editor([*command, str(path)])
+            text = path.read_text(encoding="utf-8")
+        except Exception as exc:
+            self.notify(f"The editor ({command[0]}) could not run: {exc}", severity="warning")
+            return
+        finally:
+            path.unlink(missing_ok=True)
+        if status != 0:
+            self.notify(f"The editor exited {status}; the composer is as it was.")
+            return
+        composer.text = text.rstrip("\n")
+        composer.focus()
+        self.render_status()
+
+    def _suspend_for_editor(self, argv: list[str]) -> int:
+        with self.suspend():
+            # The person's own editor, named by their own environment.
+            return subprocess.call(argv)  # noqa: S603
 
     # --- layout ----------------------------------------------------------------
 
@@ -419,6 +668,21 @@ class MatterWaveApp(App[None]):
         yield Footer()
 
     async def on_mount(self) -> None:
+        # The config file's theme, else the one last chosen here; a theme
+        # chosen from the palette is remembered for the next start.
+        theme = self.configured_theme or load_saved_theme()
+        if theme:
+            if theme in self.available_themes:
+                self.theme = theme
+            else:
+                self.notify(
+                    f"No theme named {theme}; the palette's “Change theme” lists them.",
+                    severity="warning",
+                )
+        self.theme_changed_signal.subscribe(self, self._remember_theme)
+        self._apply_keymap()
+        if self.update_check:
+            self.look_for_update()
         self.set_interval(LIVE_REDRAW_S, self._flush_live)
         self.set_interval(1.0, self._tick_rate_limit)
         if self.image_backend is not None:
@@ -458,21 +722,24 @@ class MatterWaveApp(App[None]):
             if balance.exhausted:
                 bits.append("budget used up")
             else:
-                warn = "⚠ " if balance.warn else ""
-                bits.append(f"{warn}usage {balance.used:,}/{balance.included:,} "
-                            f"({round(balance.percent)}%)")
+                warn = markers.lead("warning") if balance.warn else ""
+                bits.append(
+                    f"{warn}usage {balance.used:,}/{balance.included:,} ({round(balance.percent)}%)"
+                )
         budget = self.budget
         if budget is not None and budget.get("overage_enabled"):
             overage = int(budget.get("overage_micros") or 0)
             cap = int(budget.get("overage_cap_micros") or 0)
             if cap:
-                warn = "⚠ " if overage >= cap else ""
+                warn = markers.lead("warning") if overage >= cap else ""
                 bits.append(f"{warn}overage ${overage / 1e6:,.2f} of ${cap / 1e6:,.2f}")
         if self.unread_notifications:
-            bits.append(f"✉ {self.unread_notifications} unread")
+            bits.append(f"{markers.icon('unread')}{self.unread_notifications} unread")
         if self.pending_attachments:
-            names = ", ".join(a.filename for a in self.pending_attachments)
+            names = ", ".join(attachment_label(a) for a in self.pending_attachments)
             bits.append(f"attached: {names}")
+        if self.send_after_scan:
+            bits.append("sends when the scan is done")
         if self.streaming:
             bits.append("streaming… (Esc stops)")
         if self.queued_prompt:
@@ -487,6 +754,11 @@ class MatterWaveApp(App[None]):
             bits.append("editing (Esc cancels)")
         if self.shell_mode:
             bits.append("shell: answers are commands to confirm")
+        if self.library_filter is not None:
+            bits.append(f"showing only {self._library_filter_name()} (o shows all)")
+        temperature = self.temperatures.get(self._draft_key())
+        if temperature is not None:
+            bits.append(f"temperature {temperature:g}")
         return " │ ".join(bits)
 
     def render_status(self) -> None:
@@ -581,11 +853,16 @@ class MatterWaveApp(App[None]):
 
     @work(group="load")
     async def load_initial(self) -> None:
-        await self.load_models()
+        loaded = await self.load_models()
+        override = self.model_override
+        if loaded and override and self.models_list and not self.model_allowed(override):
+            self.notify(
+                f"{override} is not a model you can use here; each conversation keeps its own.",
+                severity="warning",
+            )
+            self.model = self.model_override = None
         await self.refresh_conversations()
-        self.load_usage()
-        self.load_budget()
-        self.load_notifications()
+        self.refresh_account_lines()
         self.load_announcements()
         self.load_library()
         if self.conversations:
@@ -599,15 +876,25 @@ class MatterWaveApp(App[None]):
             self.fail_from_exception(exc)
             return False
         data = models.get("data")
-        self.models_list = [m for m in data if isinstance(m, dict)] if isinstance(data, list) else []
+        self.models_list = (
+            [m for m in data if isinstance(m, dict)] if isinstance(data, list) else []
+        )
         default = models.get("default_model")
         self.default_model = str(default) if default else None
         return True
 
     async def refresh_conversations(self, query: str = "") -> None:
+        """The sidebar: a search's first page, or the list -- every page of
+        it when a folder or tag narrows it, since that filter is the
+        client's and must not miss what the first page left out."""
+        more: str | None = None
         try:
             if query:
-                found = await self.api.search_conversations(query)
+                page = await self.api.search(query)
+                found, more = page.conversations, page.next_cursor
+            elif self.library_filter is not None:
+                everything = await self.api.all_conversations(filter=self.list_filter)
+                found = [c for c in everything if self._in_library_filter(c)]
             else:
                 found = await self.api.list_conversations(filter=self.list_filter)
         except Exception as exc:
@@ -615,11 +902,51 @@ class MatterWaveApp(App[None]):
             return
         if not query:
             self.conversations = found
+        self.search_query, self.search_cursor = query, more
         view = self.query_one("#conversations", ListView)
         await view.clear()
-        await view.extend(
-            [ConversationItem(c, library=self._library_suffix(c)) for c in found]
-        )
+        items: list[ListItem] = [
+            ConversationItem(c, library=self._library_suffix(c)) for c in found
+        ]
+        if more:
+            items.append(MoreResults())
+        await view.extend(items)
+
+    def _in_library_filter(self, conversation: Conversation) -> bool:
+        if self.library_filter is None:
+            return True
+        kind, row_id = self.library_filter
+        if kind == "folder":
+            return conversation.folder_id == row_id
+        return row_id in self.library_assignments.get(conversation.id, [])
+
+    @work(group="search", exclusive=True)
+    async def load_more_results(self) -> None:
+        """The search's next page, in place of its "More results…" row."""
+        if not self.search_query or not self.search_cursor:
+            return
+        try:
+            page = await self.api.search(self.search_query, self.search_cursor)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return
+        view = self.query_one("#conversations", ListView)
+        for row in list(view.query(MoreResults)):
+            await row.remove()
+        self.search_cursor = page.next_cursor
+        items: list[ListItem] = [
+            ConversationItem(c, library=self._library_suffix(c)) for c in page.conversations
+        ]
+        if page.next_cursor:
+            items.append(MoreResults())
+        await view.extend(items)
+
+    def refresh_account_lines(self) -> None:
+        """The status line's account bits as the server now holds them: the
+        period's usage, the overage against its cap, the unread count."""
+        self.load_usage()
+        self.load_budget()
+        self.load_notifications()
 
     @work(group="usage", exclusive=True)
     async def load_usage(self) -> None:
@@ -701,13 +1028,17 @@ class MatterWaveApp(App[None]):
     def _picked(self, event: ListView.Selected) -> None:
         if isinstance(event.item, ConversationItem):
             self.open_worker(event.item.conversation.id)
+        elif isinstance(event.item, MoreResults):
+            self.load_more_results()
 
     @work(group="load", exclusive=True)
     async def open_worker(self, conversation_id: str) -> None:
         await self.open_conversation(conversation_id)
 
     async def open_conversation(self, conversation_id: str) -> None:
-        if self.streaming and (self.conversation is None or self.conversation.id != conversation_id):
+        if self.streaming and (
+            self.conversation is None or self.conversation.id != conversation_id
+        ):
             self._detach_turn()
         composer = self.query_one("#composer", TextArea)
         if self.conversation is not None:
@@ -718,8 +1049,11 @@ class MatterWaveApp(App[None]):
             self.fail_from_exception(exc)
             return
         self.conversation = replace(tree, messages=[])
+        # A send that was waiting on a scan belonged to the conversation
+        # left; its text and files stay there, and nothing goes by itself.
+        self.send_after_scan = False
         self.thread = Thread.from_tree(tree.messages, tree.current_leaf_message_id)
-        self.model = tree.default_model or self.model
+        self.model = self.model_override or tree.default_model or self.model
         self.editing = None
         self.feedback = {}
         # A conversation read from the list is never the temporary one that
@@ -756,9 +1090,13 @@ class MatterWaveApp(App[None]):
                 widgets.append(DividerView(item))
             else:
                 widgets.append(
-                    MessageView(item, position=self.thread.position(item),
-                                feedback=self.feedback.get(item.id),
-                                image_backend=self.image_backend)
+                    MessageView(
+                        item,
+                        usage=self._usage_line(item),
+                        position=self.thread.position(item),
+                        feedback=self.feedback.get(item.id),
+                        image_backend=self.image_backend,
+                    )
                 )
         if self.live is not None:
             widgets.append(MessageView(self.live, streaming=True))
@@ -839,7 +1177,13 @@ class MatterWaveApp(App[None]):
                     image_id, at.x, at.y, "", images.kitty_delete(image_id)
                 )
             else:
-                placement = images.sixel_placement(image_id, at.x + 1, at.y + 1, view.data)
+                placement = (
+                    images.iterm2_placement(
+                        image_id, at.x + 1, at.y + 1, max(at.width, 8), max(at.height, 2), view.data
+                    )
+                    if self.image_backend == "iterm2"
+                    else images.sixel_placement(image_id, at.x + 1, at.y + 1, view.data)
+                )
                 if placement is None:
                     view.set_failed()
                     continue
@@ -862,6 +1206,14 @@ class MatterWaveApp(App[None]):
         if views and self.live is not None:
             await views[-1].update_message(self.live)
             transcript.scroll_end(animate=False)
+
+    def _usage_line(self, message: Message) -> str | None:
+        """Under an answer: what it took and cost, when this session saw
+        its turn (the server keeps no per-answer usage on the message)."""
+        tokens = self.answer_tokens.get(message.id)
+        if not self.show_answer_usage or tokens is None or message.role != "assistant":
+            return None
+        return answer_usage(self.models_list, message.model or self.model, *tokens)
 
     def selected_message(self) -> Message | None:
         widget = self.query_one("#transcript", Transcript).selected_widget()
@@ -915,20 +1267,14 @@ class MatterWaveApp(App[None]):
 
     def action_new(self) -> None:
         """A new chat. Temporary is decided here or not at all: the flag is
-        fixed at creation and no route flips it afterwards."""
+        fixed at creation and no route flips it afterwards. Enter keeps the
+        chat; only `t` makes the kind that deletes itself."""
 
-        def chosen(temporary: bool | None) -> None:
-            self._new_conversation(bool(temporary))
+        def chosen(kind: str | None) -> None:
+            if kind is not None:
+                self._new_conversation(kind == "temporary")
 
-        self.push_screen(
-            Confirm(
-                "Start a temporary chat? It won't appear in your history or search, can't be "
-                "shared, and is deleted 24 hours after the last message.",
-                danger=False,
-                hint="Enter = temporary, Esc = a regular chat.",
-            ),
-            chosen,
-        )
+        self.push_screen(NewChat(), chosen)
 
     @work(group="action")
     async def _new_conversation(self, temporary: bool) -> None:
@@ -981,6 +1327,7 @@ class MatterWaveApp(App[None]):
                 return
             self.conversation = replace(self.conversation, default_model=updated.default_model)
         self.model = model_id
+        self.model_override = None
         self.render_status()
 
     def action_send(self) -> None:
@@ -988,7 +1335,9 @@ class MatterWaveApp(App[None]):
         text = composer.text.strip()
         if not text:
             return
-        if text.startswith("/"):
+        if text.startswith("/") and not text.startswith("//"):
+            # A command, not a message; an unknown one leaves the text where
+            # it is, to be fixed or escaped.
             if self._composer_command(text):
                 composer.text = ""
                 self.drafts.pop(self.conversation.id if self.conversation else "", None)
@@ -1003,16 +1352,35 @@ class MatterWaveApp(App[None]):
             self.notify("Queued — it sends when this answer finishes.")
             self.render_status()
             return
+        scanning = [a.filename for a in self.pending_attachments if scan_pending(a.scan_status)]
+        if scanning and not self.editing:
+            # A turn naming an upload the scanner has not cleared is refused,
+            # so the message waits in the composer for the verdict.
+            self.send_after_scan = True
+            self.notify(f"Waiting for the scan of {', '.join(scanning)}; the message sends then.")
+            self.render_status()
+            return
+        # `//` is a leading slash escaped: "//etc/hosts" sends "/etc/hosts".
+        # The queue above keeps the escape, since the queued text comes back
+        # through here.
+        if text.startswith("//"):
+            text = text[1:]
+        if self.shell_mode:
+            text = shell_request(text, self.shell)
         attachment_ids = [a.id for a in self.pending_attachments] or None
         if self.conversation is None:
-            self.run_worker(self._create_then_send(text, attachment_ids), group="stream",
-                            exclusive=True)
+            self.run_worker(
+                self._create_then_send(text, attachment_ids), group="stream", exclusive=True
+            )
             return
         cid = self.conversation.id
+        temperature = self.temperatures.get(cid)
         if self.editing:
-            stream = self.api.edit(cid, self.editing, text, self.model)
+            stream = self.api.edit(cid, self.editing, text, self.model, temperature=temperature)
         else:
-            stream = self.api.send(cid, text, self.model, attachment_ids=attachment_ids)
+            stream = self.api.send(
+                cid, text, self.model, attachment_ids=attachment_ids, temperature=temperature
+            )
         composer.text = ""
         self.drafts.pop(cid, None)
         self.editing = None
@@ -1025,11 +1393,21 @@ class MatterWaveApp(App[None]):
         except Exception as exc:
             self.fail_from_exception(exc)
             return
+        # The files attached before the conversation existed go with this
+        # turn; they are no longer waiting for one.
+        self.attachment_drafts.pop("", None)
+        # A temperature set before the conversation existed is its own now.
+        temperature = self.temperatures.pop("", None)
+        if temperature is not None:
+            self.temperatures[conv.id] = temperature
         await self.refresh_conversations()
         await self.open_conversation(conv.id)
         self.query_one("#composer", TextArea).text = ""
-        self.pending_attachments = []
-        await self._consume(self.api.send(conv.id, text, self.model, attachment_ids=attachment_ids))
+        await self._consume(
+            self.api.send(
+                conv.id, text, self.model, attachment_ids=attachment_ids, temperature=temperature
+            )
+        )
 
     def action_edit(self) -> None:
         message = self.selected_message()
@@ -1053,7 +1431,14 @@ class MatterWaveApp(App[None]):
             message = self.thread.last("assistant")
         if message is None:
             return
-        self.consume(self.api.regenerate(self.conversation.id, message.id, self.model))
+        self.consume(
+            self.api.regenerate(
+                self.conversation.id,
+                message.id,
+                self.model,
+                temperature=self.temperatures.get(self.conversation.id),
+            )
+        )
 
     @work(group="action")
     async def action_branch(self, delta: int) -> None:
@@ -1192,6 +1577,7 @@ class MatterWaveApp(App[None]):
         except Exception as exc:
             self.fail_from_exception(exc)
             return
+        self.attachment_drafts.pop(conversation_id, None)
         if self.conversation is not None and self.conversation.id == conversation_id:
             if self.streaming:
                 self._detach_turn()
@@ -1231,33 +1617,72 @@ class MatterWaveApp(App[None]):
 
     @work(group="action")
     async def action_share(self) -> None:
+        """`s`: the share dialog for the open conversation, with the links
+        already made for it."""
         if self.conversation is None:
             return
+        target = self.conversation
         try:
-            url = await self.api.share_conversation(self.conversation.id)
-        except ConflictError as exc:
-            self.notify(exc.message or "This conversation cannot be shared.")
-            return
+            rows = await self.api.conversation_shares(target.id)
         except Exception as exc:
             self.fail_from_exception(exc)
             return
-        self.notify(f"Share link: {url}")
+
+        async def create(
+            expires_in_s: int | None, include_attachments: bool
+        ) -> tuple[str, list[dict[str, Any]]] | None:
+            return await self.apply_share(target.id, expires_in_s, include_attachments)
+
+        async def revoke(share_id: str) -> list[dict[str, Any]]:
+            await self.apply_share_revoke(share_id)
+            return await self.api.conversation_shares(target.id)
+
+        self.push_screen(ShareDialog(target.title, rows, create=create, revoke=revoke))
+
+    async def apply_share(
+        self, conversation_id: str, expires_in_s: int | None, include_attachments: bool
+    ) -> tuple[str, list[dict[str, Any]]] | None:
+        """A new link, copied to the clipboard; the dialog's list is read
+        again so it shows it."""
+        try:
+            url = await self.api.share_conversation(
+                conversation_id,
+                expires_in_s=expires_in_s,
+                include_attachments=include_attachments,
+            )
+        except ConflictError as exc:
+            self.notify(exc.message or "This conversation cannot be shared.")
+            return None
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return None
+        self.copy_to_clipboard(url)
+        self.notify(f"Share link copied: {url}")
+        try:
+            rows = await self.api.conversation_shares(conversation_id)
+        except Exception:
+            rows = []
+        return url, rows
 
     @work(group="action")
     async def action_export_markdown(self) -> None:
         if self.conversation is None:
             return
         conversation, thread = self.conversation, self.thread
-        path = Path.cwd() / export_filename(conversation)
         document = conversation_markdown(conversation, thread)
 
-        def write() -> None:
-            path.write_text(document, encoding="utf-8")
+        def write() -> Path:
+            # Exclusive creation: a file that appeared since the free name
+            # was picked is not overwritten either.
+            path = free_path(Path.cwd() / export_filename(conversation))
+            with path.open("x", encoding="utf-8") as out:
+                out.write(document)
+            return path
 
         try:
-            await asyncio.to_thread(write)
+            path = await asyncio.to_thread(write)
         except OSError as exc:
-            self.notify(f"Could not write {path.name}: {exc}", severity="error")
+            self.notify(f"Could not write the export: {exc}", severity="error")
             return
         self.notify(f"Exported to {path}")
 
@@ -1270,6 +1695,31 @@ class MatterWaveApp(App[None]):
 
     @work(group="action")
     async def apply_attach(self, path_text: str) -> None:
+        """A path, or a glob (`~/shots/*.png`) for every file it matches."""
+        paths = expand_paths(path_text)
+        if paths is None:
+            await self._attach_one(path_text)
+            return
+        if not paths:
+            self.notify(f"No file matches {path_text}.", severity="warning")
+            return
+        for path in paths:
+            await self._attach_one(path)
+
+    def action_pick_files(self) -> None:
+        """Ctrl+O: files picked from a tree of the working directory."""
+
+        def chosen(paths: list[str] | None) -> None:
+            if paths:
+                self.run_worker(self._attach_all(paths), group="action")
+
+        self.push_screen(FilePicker(Path.cwd()), chosen)
+
+    async def _attach_all(self, paths: list[str]) -> None:
+        for path in paths:
+            await self._attach_one(path)
+
+    async def _attach_one(self, path_text: str) -> None:
         try:
             data, filename = await asyncio.to_thread(_read_attachment, path_text)
         except OSError as exc:
@@ -1287,7 +1737,14 @@ class MatterWaveApp(App[None]):
                 severity="warning",
             )
             return
+        refusal = await self._over_the_limits(filename, len(data))
+        if refusal:
+            self.notify(refusal, severity="warning")
+            return
         conversation_id = self.conversation.id if self.conversation else None
+        # The file belongs to the conversation it was attached in, even if
+        # another is open by the time the upload lands.
+        key = self._draft_key()
         try:
             attachment = await self.api.upload_attachment(
                 data, filename, conversation_id=conversation_id
@@ -1295,15 +1752,135 @@ class MatterWaveApp(App[None]):
         except Exception as exc:
             self.fail_from_exception(exc)
             return
-        self.pending_attachments.append(attachment)
-        self.notify(f"Attached {attachment.filename}.")
+        if attachment.scan_status in SCAN_REJECTED:
+            # A scanner that decides inside the upload, and said no.
+            self.notify(scan_refusal(attachment.filename, attachment.scan_status), severity="error")
+            return
+        self.attachment_drafts[key] = [*self.attachment_drafts.get(key, []), attachment]
+        if scan_pending(attachment.scan_status):
+            self.notify(f"Attached {attachment.filename}; it is being scanned.")
+            self.run_worker(self._watch_scan(attachment.id), group="scan")
+        else:
+            self.notify(f"Attached {attachment.filename}.")
         self.render_status()
+
+    async def _watch_scan(self, attachment_id: str) -> None:
+        """Poll one upload's scan until it has a verdict, or the limit
+        runs out."""
+        scan_status = ""
+        for _ in range(SCAN_POLLS_MAX):
+            await asyncio.sleep(SCAN_POLL_S)
+            if self._attachment_key(attachment_id) is None:
+                return
+            try:
+                scan_status = await self.api.attachment_scan_status(attachment_id)
+            except Exception:
+                # A failed poll is asked again, as the web composer does;
+                # only the limit ends the wait.
+                scan_status = ""
+            if scan_status and not scan_pending(scan_status):
+                break
+        self._scan_settled(attachment_id, scan_status)
+
+    def _scan_settled(self, attachment_id: str, scan_status: str) -> None:
+        """A verdict, or none in time: a clean file stays attached; any
+        other leaves the message with the file named, and a send that was
+        waiting stays in the composer for the person to decide. When the
+        last scan comes back clean, the waiting send goes."""
+        key = self._attachment_key(attachment_id)
+        if key is None:
+            return
+        held = self.attachment_drafts[key]
+        attachment = next(a for a in held if a.id == attachment_id)
+        if scan_status == SCAN_CLEAN:
+            self.attachment_drafts[key] = [
+                replace(a, scan_status=SCAN_CLEAN) if a.id == attachment_id else a for a in held
+            ]
+        else:
+            kept = [a for a in held if a.id != attachment_id]
+            if kept:
+                self.attachment_drafts[key] = kept
+            else:
+                del self.attachment_drafts[key]
+            if key == self._draft_key():
+                self.send_after_scan = False
+            self.notify(scan_refusal(attachment.filename, scan_status), severity="error")
+        self.render_status()
+        if self.send_after_scan and not any(
+            scan_pending(a.scan_status) for a in self.pending_attachments
+        ):
+            self.send_after_scan = False
+            self.action_send()
+
+    async def _over_the_limits(self, filename: str, size: int) -> str | None:
+        """Why the server would refuse this upload for its size, said before
+        the bytes go: bigger than one upload may be, or than what is left of
+        the quota. A deployment without the limits route checks nothing
+        here, and the server's own refusal stays the backstop."""
+        try:
+            limits = await self.api.attachment_limits()
+        except Exception:
+            return None
+        if limits.max_upload_bytes and size > limits.max_upload_bytes:
+            return (
+                f"{filename} is {human_size(size)}; one upload may be at most "
+                f"{human_size(limits.max_upload_bytes)}."
+            )
+        if limits.quota_bytes and size > limits.quota_remaining_bytes:
+            return (
+                f"{filename} is {human_size(size)}, and only "
+                f"{human_size(limits.quota_remaining_bytes)} of your "
+                f"{human_size(limits.quota_bytes)} storage is left."
+            )
+        return None
+
+    def _attachment_key(self, attachment_id: str) -> str | None:
+        """Which conversation's pending files hold this upload, if any."""
+        for key, held in self.attachment_drafts.items():
+            if any(a.id == attachment_id for a in held):
+                return key
+        return None
+
+    def action_detach(self) -> None:
+        """`I`: take a file off the open conversation's next message."""
+        pending = list(self.pending_attachments)
+        if not pending:
+            self.notify("Nothing is attached to this message.")
+            return
+
+        def chosen(attachment_id: str | None) -> None:
+            if attachment_id:
+                self.apply_detach(attachment_id)
+
+        self.push_screen(PendingAttachments([(a.id, attachment_label(a)) for a in pending]), chosen)
+
+    @work(group="action")
+    async def apply_detach(self, attachment_id: str) -> None:
+        """Off the message at once; then off the server too, where nothing
+        else names the upload and it would count against the quota until
+        the sweeper took it."""
+        removed = next((a for a in self.pending_attachments if a.id == attachment_id), None)
+        if removed is None:
+            return
+        self.pending_attachments = [a for a in self.pending_attachments if a.id != attachment_id]
+        self.render_status()
+        self.notify(f"Removed {removed.filename}.")
+        # The file is off the message whatever the server says; one it
+        # keeps is unreferenced, and its sweeper removes it.
+        with contextlib.suppress(Exception):
+            await self.api.delete_attachment(attachment_id)
 
     @work(group="action")
     async def action_cycle_filter(self) -> None:
-        index = LIST_FILTERS.index(self.list_filter)
-        self.list_filter = LIST_FILTERS[(index + 1) % len(LIST_FILTERS)]
+        """The next slice of the list; with a folder or tag narrowing it,
+        the first press shows the whole slice again."""
+        if self.library_filter is not None:
+            self.library_filter = None
+        else:
+            index = LIST_FILTERS.index(self.list_filter)
+            self.list_filter = LIST_FILTERS[(index + 1) % len(LIST_FILTERS)]
         await self.refresh_conversations()
+        self.render_status()
         self.notify(f"Showing {self.list_filter} conversations.")
 
     # --- notifications and announcements -----------------------------------------
@@ -1369,8 +1946,9 @@ class MatterWaveApp(App[None]):
             return
         lines = []
         for row in self.announcements:
-            prefix = {"critical": "⛔ ", "warning": "⚠ "}.get(str(row.get("severity")), "ℹ ")
-            lines.append(prefix + str(row.get("message") or ""))
+            severity = str(row.get("severity"))
+            name = severity if severity in ("critical", "warning") else "notice"
+            lines.append(f"{markers.badge(name)}: {row.get('message') or ''}")
         lines.append("A dismisses these; a critical notice stays until the operator ends it.")
         banner.update("\n".join(lines))
         banner.add_class("shown")
@@ -1385,9 +1963,7 @@ class MatterWaveApp(App[None]):
         }
         path = _state_path()
         _write_dismissed(path, _read_dismissed(path) | dismissible)
-        self.announcements = [
-            row for row in self.announcements if not row.get("dismissible", True)
-        ]
+        self.announcements = [row for row in self.announcements if not row.get("dismissible", True)]
         self.render_announcements()
         # The footer's Dismiss goes away with the banner.
         self.refresh_bindings()
@@ -1408,9 +1984,7 @@ class MatterWaveApp(App[None]):
         # app's report-this-reply is; whatever the transcript is resting on
         # by default is not a selection, and reports the conversation.
         transcript = self.query_one("#transcript", Transcript)
-        selected = (
-            transcript.selected_widget() if transcript.selected is not None else None
-        )
+        selected = transcript.selected_widget() if transcript.selected is not None else None
         message_id = (
             selected.message.id
             if isinstance(selected, MessageView) and selected.message.role == "assistant"
@@ -1505,11 +2079,7 @@ class MatterWaveApp(App[None]):
             self.fail_from_exception(exc)
             return
         rows = body.get("accounts")
-        offered = (
-            [row for row in rows if isinstance(row, dict)]
-            if isinstance(rows, list)
-            else []
-        )
+        offered = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
         # The acting account is not offered (switching to it would be a
         # no-op); with nothing parked there is nothing to choose.
         if not offered or all(
@@ -1536,6 +2106,8 @@ class MatterWaveApp(App[None]):
         # The drafts, ratings, notifications and sidebar were the old
         # account's; the new account's state is read back whole.
         self.drafts.clear()
+        self.attachment_drafts.clear()
+        self.send_after_scan = False
         self.feedback = {}
         self.notification_rows = []
         self.unread_notifications = None
@@ -1547,13 +2119,125 @@ class MatterWaveApp(App[None]):
         self.live = None
         await self.render_thread()
         await self.refresh_conversations()
-        self.load_usage()
-        self.load_budget()
-        self.load_notifications()
+        self.refresh_account_lines()
         self.load_announcements()
         if self.conversations:
             await self.open_conversation(self.conversations[0].id)
         self.render_status()
+
+    # --- the person's own account ------------------------------------------------------
+
+    @work(group="action")
+    async def action_account(self) -> None:
+        """`U`: keys, browsers, preferences, instructions and the plan."""
+        state = await self._account_state()
+        if state is None:
+            return
+        self.push_screen(
+            Account(
+                state,
+                AccountActions(
+                    revoke_key=self.apply_key_revoke,
+                    rotate_key=self.apply_key_rotate,
+                    revoke_session=self.apply_session_revoke,
+                    set_preferences=self.apply_preferences,
+                    set_instructions=self.apply_user_instructions,
+                ),
+            )
+        )
+
+    async def _account_state(self) -> AccountState | None:
+        """Everything the account screen shows, read fresh. The keys, the
+        preferences and the instructions are the screen; a summary line
+        whose route this deployment or this key cannot read is left out."""
+        try:
+            keys, preferences, instructions = await asyncio.gather(
+                self.api.api_keys(), self.api.preferences(), self.api.user_instructions()
+            )
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return None
+        reads = await asyncio.gather(
+            self.api.entitlements(),
+            self.api.billing_status(),
+            self.api.plans(),
+            self.api.enforcement(),
+            self.api.sessions(),
+            return_exceptions=True,
+        )
+        entitlements, billing, plans, enforcement, sessions = (
+            None if isinstance(r, BaseException) else r for r in reads
+        )
+        return AccountState(
+            summary=account_summary(entitlements, billing, plans, enforcement),
+            keys=keys,
+            sessions=sessions if isinstance(sessions, list) else [],
+            preferences=preferences,
+            instructions=instructions,
+            own_prefix=self.api.own_key_prefix(),
+        )
+
+    async def _after_account_write(self) -> AccountState | None:
+        return await self._account_state()
+
+    async def apply_key_revoke(self, key_id: str) -> AccountState | None:
+        try:
+            await self.api.revoke_key(key_id)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return None
+        self.notify("Key revoked.")
+        return await self._after_account_write()
+
+    async def apply_key_rotate(self, key_id: str) -> tuple[AccountState, str] | None:
+        try:
+            rotated = await self.api.rotate_key(key_id)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return None
+        state = await self._after_account_write()
+        secret = str(rotated.get("key") or "")
+        if state is None or not secret:
+            return None
+        return state, secret
+
+    async def apply_session_revoke(self, session_id: str) -> AccountState | None:
+        try:
+            await self.api.revoke_session(session_id)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return None
+        self.notify("That browser is signed out.")
+        return await self._after_account_write()
+
+    async def apply_preferences(self, preferences: dict[str, Any]) -> AccountState | None:
+        """The whole preferences shape, as every client of the account
+        reads it; the server refuses what it would not keep (a malformed
+        locale, receipts turned off), and that refusal is what shows."""
+        try:
+            await self.api.set_preferences(preferences)
+        except APIError as exc:
+            self.notify(exc.message or "The preferences were not saved.", severity="warning")
+            return None
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return None
+        self.notify("Preferences saved.")
+        return await self._after_account_write()
+
+    async def apply_user_instructions(self, about: str, style: str) -> AccountState | None:
+        """The person's own instructions; a plan without them is the
+        server's refusal, said in passing."""
+        try:
+            await self.api.set_user_instructions(about, style)
+        except APIError as exc:
+            self.notify(exc.message or "The instructions were not saved.", severity="warning")
+            return None
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return None
+        self.notify("Instructions saved.")
+        return await self._after_account_write()
 
     # --- importing --------------------------------------------------------------------
 
@@ -1691,15 +2375,18 @@ class MatterWaveApp(App[None]):
             self.fail_from_exception(exc)
             return
         created = str(row.get("created_at") or "")
-        path = Path.cwd() / f"matterwave-export-{created[:10] or 'account'}.json"
+        name = f"matterwave-export-{created[:10] or 'account'}.json"
 
-        def write() -> None:
-            path.write_bytes(data)
+        def write() -> Path:
+            path = free_path(Path.cwd() / name)
+            with path.open("xb") as out:
+                out.write(data)
+            return path
 
         try:
-            await asyncio.to_thread(write)
+            path = await asyncio.to_thread(write)
         except OSError as exc:
-            self.notify(f"Could not write {path.name}: {exc}", severity="error")
+            self.notify(f"Could not write {name}: {exc}", severity="error")
             return
         self.notify(f"Account export saved to {path} ({len(data)} bytes).")
 
@@ -1713,8 +2400,10 @@ class MatterWaveApp(App[None]):
         if mic_available():
             self.push_screen(Dictation(MicRecorder()), self._dictated)
         else:
-            self.notify(f"No microphone support installed (pip install matterwave-tui[dictation]); "
-                        f"naming an audio file instead ({', '.join(sorted(MEDIA_TYPES))}).")
+            self.notify(
+                f"No microphone support installed (pip install matterwave-tui[dictation]); "
+                f"naming an audio file instead ({', '.join(sorted(MEDIA_TYPES))})."
+            )
 
             def chosen(path_text: str | None) -> None:
                 if path_text:
@@ -1783,12 +2472,14 @@ class MatterWaveApp(App[None]):
             if folder.get("id")
         }
         tag_names = {
-            str(tag.get("id")): str(tag.get("name") or "") for tag in self.library_tags if tag.get("id")
+            str(tag.get("id")): str(tag.get("name") or "")
+            for tag in self.library_tags
+            if tag.get("id")
         }
         bits: list[str] = []
         folder = folder_names.get(conversation.folder_id or "")
         if folder:
-            bits.append(f"📁 {folder}")
+            bits.append(f"{markers.lead('folder')}{folder}")
         bits.extend(
             f"#{tag_names.get(tag_id, tag_id)}"
             for tag_id in self.library_assignments.get(conversation.id, [])
@@ -1876,8 +2567,95 @@ class MatterWaveApp(App[None]):
                 new_tag=self.apply_tag_create,
                 move_to=self.apply_folder_move,
                 set_tags=self.apply_tags_set,
-            )
+                rename_folder=self.apply_folder_rename,
+                delete_folder=self.apply_folder_delete,
+                delete_tag=self.apply_tag_delete,
+            ),
+            self._show_only,
         )
+
+    def _show_only(self, choice: tuple[str, str] | None) -> None:
+        """The library's Enter: the sidebar narrowed to one folder or tag;
+        the one already shown, chosen again, shows the whole list."""
+        if choice is None:
+            return
+        self.library_filter = None if choice == self.library_filter else choice
+        self.run_worker(self._refilter(), group="load", exclusive=True)
+
+    async def _refilter(self) -> None:
+        await self.refresh_conversations()
+        self.render_status()
+        if self.library_filter is None:
+            self.notify(f"Showing {self.list_filter} conversations.")
+        else:
+            self.notify(f"Showing only {self._library_filter_name()}.")
+
+    def _library_filter_name(self) -> str:
+        if self.library_filter is None:
+            return ""
+        kind, row_id = self.library_filter
+        rows = self.library_folders if kind == "folder" else self.library_tags
+        name = next((str(r.get("name") or "") for r in rows if r.get("id") == row_id), row_id)
+        return f"{markers.lead('folder')}{name}" if kind == "folder" else f"#{name}"
+
+    async def apply_folder_rename(self, folder_id: str, name: str) -> LibraryState | None:
+        """A folder's new name; one another folder has is the server's 409,
+        said in passing."""
+        try:
+            folder = await self.api.rename_folder(folder_id, name)
+        except ConflictError as exc:
+            self.notify(exc.message or "That folder name is taken.")
+            return None
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return None
+        self.library_folders = [
+            folder if f.get("id") == folder_id else f for f in self.library_folders
+        ]
+        self._refresh_library_captions()
+        self.render_status()
+        return self._library_state(self._open_folder_id())
+
+    async def apply_folder_delete(self, folder_id: str) -> LibraryState | None:
+        """The folder goes; the server returns its conversations to the
+        main list, and so do the sidebar and the open conversation."""
+        try:
+            await self.api.delete_folder(folder_id)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return None
+        self.library_folders = [f for f in self.library_folders if f.get("id") != folder_id]
+        for conversation in [c for c in self.conversations if c.folder_id == folder_id]:
+            self._sync_conversation(replace(conversation, folder_id=None))
+        if self.conversation is not None and self.conversation.folder_id == folder_id:
+            self.conversation = replace(self.conversation, folder_id=None)
+        await self._forget_filter(("folder", folder_id))
+        self.notify("Folder deleted; its conversations are back in the main list.")
+        return self._library_state(self._open_folder_id())
+
+    async def apply_tag_delete(self, tag_id: str) -> LibraryState | None:
+        """The tag goes, and off every conversation that carried it."""
+        try:
+            await self.api.delete_tag(tag_id)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return None
+        self.library_tags = [t for t in self.library_tags if t.get("id") != tag_id]
+        self.library_assignments = {
+            cid: [t for t in tag_ids if t != tag_id]
+            for cid, tag_ids in self.library_assignments.items()
+        }
+        await self._forget_filter(("tag", tag_id))
+        self.notify("Tag deleted.")
+        return self._library_state(self._open_folder_id())
+
+    async def _forget_filter(self, deleted: tuple[str, str]) -> None:
+        """A deleted folder or tag cannot narrow the sidebar any more."""
+        if self.library_filter == deleted:
+            self.library_filter = None
+            await self.refresh_conversations()
+        self._refresh_library_captions()
+        self.render_status()
 
     async def apply_folder_create(self, name: str) -> LibraryState | None:
         """A folder of that name. A duplicate is the server's 409, and its
@@ -1895,13 +2673,17 @@ class MatterWaveApp(App[None]):
 
     async def apply_tag_create(self, name: str) -> LibraryState | None:
         """A tag of that name; the server answers the one already there
-        when the name is taken, so a write is never refused for that."""
+        when the name is taken, so a write is never refused for that, and
+        the tag the library already lists is replaced rather than added."""
         try:
             tag = await self.api.create_tag(name)
         except Exception as exc:
             self.fail_from_exception(exc)
             return None
-        self.library_tags = [*self.library_tags, tag]
+        self.library_tags = [
+            *(t for t in self.library_tags if t.get("id") != tag.get("id")),
+            tag,
+        ]
         return self._library_state(self._open_folder_id())
 
     async def apply_folder_move(self, folder_id: str | None) -> LibraryState | None:
@@ -1990,14 +2772,19 @@ class MatterWaveApp(App[None]):
 
     def _composer_command(self, text: str) -> bool:
         """A leading slash is a command, not a message. True when the text
-        was one (handled or not) and must not be sent as a turn."""
+        was a command and is done with (handled, or refused with a reason);
+        False for an unknown one, whose text stays in the composer."""
         body = text[1:]
         first = body.split(" ", 1)[0]
-        if first not in ("role", "shell"):
+        if first not in ("role", "shell", "temp"):
             self.notify(
-                f"Unknown command /{first} — /role and /shell are the ones.",
+                f"Unknown command /{first}: /role, /shell and /temp are the commands. "
+                "Start with // to send a message that begins with /.",
                 severity="warning",
             )
+            return False
+        if first == "temp":
+            self.set_temperature(body[len("temp") :].strip())
             return True
         if first == "shell":
             if body.strip() != "shell":
@@ -2005,12 +2792,12 @@ class MatterWaveApp(App[None]):
             else:
                 self.toggle_shell()
             return True
-        rest = body[len("role"):].strip()
+        rest = body[len("role") :].strip()
         if rest in ("", "--list"):
             self.action_roles()
             return True
         if rest.startswith("--add"):
-            name = rest[len("--add"):].strip()
+            name = rest[len("--add") :].strip()
             if not name:
                 self.notify("Name the role: /role --add name.", severity="warning")
                 return True
@@ -2029,6 +2816,7 @@ class MatterWaveApp(App[None]):
     def action_roles(self) -> None:
         """The prompt library screen; the role picked there applies to the
         conversation that is open."""
+
         def chosen(name: str | None) -> None:
             if name:
                 self.apply_role(name)
@@ -2070,12 +2858,41 @@ class MatterWaveApp(App[None]):
 
     # --- shell assistant -------------------------------------------------------------
 
+    def set_temperature(self, value: str) -> None:
+        """`/temp 0.3` sets the open conversation's temperature (0 to 2, the
+        platform's bounds) for its turns from now on; `/temp default` goes
+        back to the server's; `/temp` alone says which is in force."""
+        key = self._draft_key()
+        if not value:
+            current = self.temperatures.get(key)
+            self.notify(
+                f"Temperature {current:g} for this conversation."
+                if current is not None
+                else "The server's default temperature; /temp 0.3 sets one."
+            )
+            return
+        if value == "default":
+            self.temperatures.pop(key, None)
+            self.notify("Back to the server's default temperature.")
+            self.render_status()
+            return
+        try:
+            temperature = float(value)
+        except ValueError:
+            temperature = -1.0
+        if not 0.0 <= temperature <= 2.0:
+            self.notify("A temperature is a number from 0 to 2: /temp 0.3.", severity="warning")
+            return
+        self.temperatures[key] = temperature
+        self.notify(f"Temperature {temperature:g} for this conversation's turns.")
+        self.render_status()
+
     def toggle_shell(self) -> None:
         self.shell_mode = not self.shell_mode
         if self.shell_mode:
             self.notify(
-                "Shell assistant on. An answer becomes a proposed command; "
-                "nothing runs until you confirm it."
+                f"Shell assistant on, for {self.shell.name} on {self.shell.os_name}. An answer "
+                "becomes a proposed command; nothing runs until you confirm it."
             )
         else:
             self.notify("Shell assistant off.")
@@ -2234,6 +3051,7 @@ class MatterWaveApp(App[None]):
         self._turn = turn
         self.streaming = True
         self._completed_answer = None
+        self._turn_tokens = None
         self.show_failure(None)
         self.live = self._new_live()
         await self.render_thread()
@@ -2269,6 +3087,10 @@ class MatterWaveApp(App[None]):
         partial = self.live
         self.live = None
         queued, self.queued_prompt = self.queued_prompt, None
+        # A turn, finished or stopped, spent tokens and may have crossed a
+        # budget line, which the server says with a notification: the
+        # status line's usage, overage and unread badge are read again.
+        self.refresh_account_lines()
         if stopped:
             await self._resync()
             # Esc cancels the stream and the queue with it; the queued
@@ -2308,11 +3130,21 @@ class MatterWaveApp(App[None]):
 
         self.push_screen(
             Confirm(
-                f"Run this command?\n\n{command}",
-                hint="Enter runs it in a shell; Esc leaves it alone.",
+                f"Run this command in {self.shell.name}?\n\n{command}",
+                hint="Enter runs it; Esc leaves it alone.",
             ),
             approved,
         )
+
+    async def _run_in_shell(self, command: str) -> str:
+        """The command in this terminal's shell, its output as the
+        transcript shows it."""
+        output, status = await run_shell_command(command, self.shell)
+        if status is None:
+            return output
+        if not output:
+            return f"(no output; exit {status})"
+        return output if status == 0 else f"{output}\n(exit {status})"
 
     async def _execute_shell(self, command: str) -> None:
         try:
@@ -2364,12 +3196,15 @@ class MatterWaveApp(App[None]):
             while len(parts) <= item.index:
                 parts.append({"type": "reasoning" if item.reasoning else "text", "text": ""})
             parts[item.index]["text"] = (
-                str(parts[item.index].get("text", "")) + (item.content or "") + (item.reasoning or "")
+                str(parts[item.index].get("text", ""))
+                + (item.content or "")
+                + (item.reasoning or "")
             )
             self._live_dirty = True
         elif isinstance(item, fr.TitleFrame) and self.conversation is not None:
             self._retitle(self.conversation.id, item.title)
         elif isinstance(item, fr.ContextFrame):
+            self._turn_tokens = (item.prompt_tokens, item.completion_tokens)
             self.context_used = (item.prompt_tokens or 0) + (item.completion_tokens or 0)
             if item.context_window:
                 self.context_window = item.context_window
@@ -2379,6 +3214,8 @@ class MatterWaveApp(App[None]):
                 self.notify(item.detail)
         elif isinstance(item, fr.DoneFrame):
             self.live = None
+            if self._turn_tokens is not None:
+                self.answer_tokens[item.message.id] = self._turn_tokens
             self.thread.add(item.message)
             self.thread.leaf = item.message.id
             self._completed_answer = item.message
@@ -2433,6 +3270,44 @@ class MatterWaveApp(App[None]):
 
         self.push_screen(DeviceLogin(self.relogin_fn), done)
         return await future
+
+
+def account_summary(
+    entitlements: dict[str, Any] | None,
+    billing: dict[str, Any] | None,
+    plans: list[dict[str, Any]] | None,
+    enforcement: dict[str, Any] | None,
+) -> list[str]:
+    """The account screen's read-only lines: the plan, how it is paid,
+    what else is on offer, and any moderation action in force."""
+    lines: list[str] = []
+    if entitlements:
+        plan = str(entitlements.get("plan_name") or entitlements.get("plan") or "?")
+        line = f"Plan: {plan} ({entitlements.get('status') or 'active'})"
+        if entitlements.get("per_seat"):
+            line += f", {entitlements.get('seats')} seats"
+        if entitlements.get("writes_blocked"):
+            line += f" — read-only: {entitlements.get('read_only_reason') or 'over the plan'}"
+        lines.append(line)
+    if billing:
+        method = "invoices" if billing.get("collection_method") == "send_invoice" else "card"
+        line = f"Billing: {method}"
+        if not billing.get("billing_enabled", True):
+            line = "Billing: not enabled on this deployment"
+        if billing.get("dunning"):
+            line += " — a payment is late; the web app's billing page says what happens next"
+        lines.append(line)
+    if plans:
+        offered = ", ".join(
+            f"{p.get('name') or p.get('code')} ${int(p.get('price_cents_monthly') or 0) / 100:,.0f}"
+            + ("/seat" if p.get("per_seat") else "")
+            for p in plans
+        )
+        lines.append(f"Plans (a month): {offered}; change it in the web app")
+    if enforcement and enforcement.get("state") not in (None, "none"):
+        reason = enforcement.get("reason") or enforcement.get("message") or ""
+        lines.append(f"Moderation: {enforcement.get('state')}" + (f" — {reason}" if reason else ""))
+    return lines or ["The plan and billing are not readable with this key."]
 
 
 def _part_from(frame: fr.PartStartFrame) -> dict[str, Any]:

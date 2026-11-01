@@ -1,0 +1,9 @@
+# Who reviews what. GitHub requests a review from the owners of every path a
+# pull request touches; with branch protection's "require review from code
+# owners", their approval is what lets it merge. The last matching line wins.
+
+*           @MatterWaveAI/maintainers
+
+# CI, the release workflows and this file decide what ships and who signs
+# off on it.
+/.github/   @MatterWaveAI/maintainers

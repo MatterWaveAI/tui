@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import replace
 from typing import Any
@@ -11,6 +12,7 @@ from matterwave_sdk import frames as fr
 from matterwave_sdk.errors import ConflictError
 from matterwave_sdk.models import (
     Attachment,
+    AttachmentLimits,
     Conversation,
     ConversationContext,
     ConversationMessage,
@@ -19,19 +21,52 @@ from matterwave_sdk.models import (
     UsageBalance,
 )
 
-from matterwave_tui.api import NOTIFICATIONS_PAGE, Opened, StreamItem
+from matterwave_tui.api import NOTIFICATIONS_PAGE, Opened, SearchPage, StreamItem
+
+# The fake's search answers this many hits a page, so paging is exercised.
+SEARCH_PAGE = 2
 
 MODELS: list[dict[str, Any]] = [
-    {"id": "grt-nano", "label": "GRT Nano", "partner": False, "research_preview": False,
-     "included": True, "upgrade_to": None, "context_window": 8192},
-    {"id": "grt-max", "label": "GRT Max", "partner": False, "research_preview": False,
-     "included": False, "upgrade_to": "Pro", "context_window": 131072,
-     "supports_vision": False},
-    {"id": "other-7b", "label": "Other 7B", "partner": True, "research_preview": False,
-     "included": True, "upgrade_to": None, "context_window": None,
-     "supports_vision": True},
-    {"id": "lab-x", "label": "Lab X", "partner": False, "research_preview": True,
-     "included": True, "upgrade_to": None, "context_window": 32768},
+    {
+        "id": "grt-nano",
+        "label": "GRT Nano",
+        "partner": False,
+        "research_preview": False,
+        "included": True,
+        "upgrade_to": None,
+        "context_window": 8192,
+        "input_usd_per_m": 0.5,
+        "output_usd_per_m": 1.5,
+    },
+    {
+        "id": "grt-max",
+        "label": "GRT Max",
+        "partner": False,
+        "research_preview": False,
+        "included": False,
+        "upgrade_to": "Pro",
+        "context_window": 131072,
+        "supports_vision": False,
+    },
+    {
+        "id": "other-7b",
+        "label": "Other 7B",
+        "partner": True,
+        "research_preview": False,
+        "included": True,
+        "upgrade_to": None,
+        "context_window": None,
+        "supports_vision": True,
+    },
+    {
+        "id": "lab-x",
+        "label": "Lab X",
+        "partner": False,
+        "research_preview": True,
+        "included": True,
+        "upgrade_to": None,
+        "context_window": 32768,
+    },
 ]
 
 ORG_INSTRUCTIONS_TEXT = "Be brief."
@@ -46,8 +81,14 @@ DEFAULT_INSTRUCTIONS: dict[str, Any] = {
 
 def conversation(cid: str = "c1", **fields: Any) -> Conversation:
     return Conversation.from_dict(
-        {"id": cid, "title": "New chat", "created_at": "1", "updated_at": "1",
-         "default_model": "grt-nano", **fields}
+        {
+            "id": cid,
+            "title": "New chat",
+            "created_at": "1",
+            "updated_at": "1",
+            "default_model": "grt-nano",
+            **fields,
+        }
     )
 
 
@@ -56,8 +97,16 @@ def message(
 ) -> ConversationMessage:
     parts = extra.pop("parts", [{"type": "text", "text": text}])
     return ConversationMessage.from_dict(
-        {"id": mid, "conversation_id": "c1", "role": role, "parts": parts, "content": text,
-         "created_at": created_at, "parent_id": parent, **extra}
+        {
+            "id": mid,
+            "conversation_id": "c1",
+            "role": role,
+            "parts": parts,
+            "content": text,
+            "created_at": created_at,
+            "parent_id": parent,
+            **extra,
+        }
     )
 
 
@@ -148,6 +197,10 @@ class FakeAPI:
         self.leaf_moves: list[str] = []
         self.model_updates: list[tuple[str, str | None]] = []
         self.searches: list[str] = []
+        self.all_reads = 0
+        self.folder_renames: list[tuple[str, str]] = []
+        self.folder_deletes: list[str] = []
+        self.tag_deletes: list[str] = []
         self.compacted: list[str] = []
         self.renames: list[tuple[str, str]] = []
         self.deletes: list[str] = []
@@ -155,7 +208,20 @@ class FakeAPI:
         self.archives: list[tuple[str, bool]] = []
         self.forks: list[tuple[str, str]] = []
         self.shares: list[str] = []
+        self.share_options: list[tuple[int | None, bool]] = []
+        self.temperatures_sent: list[float | None] = []
+        self.limits = AttachmentLimits(
+            max_upload_bytes=1000, quota_bytes=5000, quota_used_bytes=0, quota_remaining_bytes=5000
+        )
         self.uploads: list[tuple[str, bytes]] = []
+        # The malware scan: what an upload answers, then what each poll of
+        # its scan answers in turn (the last one repeats); `scan_gate`, when
+        # set, holds every poll until the test sets the event.
+        self.upload_scan_status = "clean"
+        self.scan_answers: list[str] = []
+        self.scan_polls: list[str] = []
+        self.scan_gate: asyncio.Event | None = None
+        self.attachment_deletes: list[str] = []
         # Temporary chats are fixed at creation; the server keeps them out
         # of every list and every search, and refuses pin, fork and share.
         self.creates: list[tuple[str | None, str | None, bool]] = []
@@ -219,6 +285,49 @@ class FakeAPI:
             "member_exhausted": False,
         }
         self.tree_reads = 0
+        # The person's own account: keys (this terminal's is `mw_mine0000`),
+        # browser sessions, preferences, instructions and the plan.
+        self.key_rows: list[dict[str, Any]] = [
+            {
+                "id": "k1",
+                "prefix": "mw_mine0000",
+                "name": "matterwave-tui",
+                "kind": "device",
+                "revoked_at": None,
+                "last_used_at": "2026-10-31T00:00:00Z",
+            },
+            {
+                "id": "k2",
+                "prefix": "mw_ci000000",
+                "name": "CI",
+                "kind": "user",
+                "revoked_at": None,
+                "last_used_at": None,
+            },
+        ]
+        self.keys_revoked: list[str] = []
+        self.keys_rotated: list[str] = []
+        self.session_rows: list[dict[str, Any]] = [
+            {
+                "id": "s1",
+                "current": False,
+                "created_at": "2026-10-01T00:00:00Z",
+                "last_seen_at": "2026-10-30T00:00:00Z",
+                "user_agent": "Firefox",
+                "ip": "10.0.0.2",
+            },
+        ]
+        self.sessions_revoked: list[str] = []
+        self.preferences_state: dict[str, Any] = {
+            "email": {"product_updates": False, "usage_alerts": True, "billing_receipts": True},
+            "locale": None,
+            "notifications": {"budget_warn": True},
+        }
+        self.preferences_puts: list[dict[str, Any]] = []
+        self.user_instructions_state = {"about": "", "style": ""}
+        self.user_instructions_puts: list[tuple[str, str]] = []
+        self.usage_reads = 0
+        self.budget_reads = 0
         self.streams_closed = 0
 
     async def me(self) -> Me:
@@ -237,12 +346,21 @@ class FakeAPI:
             return [c for c in kept if c.archived_at]
         return [c for c in kept if not c.archived_at]
 
-    async def search_conversations(self, query: str) -> list[Conversation]:
+    async def all_conversations(self, filter: str = "default") -> list[Conversation]:
+        self.all_reads += 1
+        return await self.list_conversations(filter)
+
+    async def search(self, query: str, cursor: str | None = None) -> SearchPage:
         self.searches.append(query)
-        return [
-            c for c in self.conversations
+        hits = [
+            c
+            for c in self.conversations
             if c.id not in self.temporary_ids and query.lower() in c.title.lower()
         ]
+        start = int(cursor or 0)
+        page = hits[start : start + SEARCH_PAGE]
+        more = start + SEARCH_PAGE < len(hits)
+        return SearchPage(page, str(start + SEARCH_PAGE) if more else None)
 
     async def create_conversation(
         self, title=None, model=None, temporary: bool = False
@@ -292,9 +410,7 @@ class FakeAPI:
     async def set_pinned(self, conversation_id: str, pinned: bool) -> Conversation:
         self.pins.append((conversation_id, pinned))
         self._refuse_temporary(conversation_id, "pinned")
-        return self._replace(
-            conversation_id, pinned_at="2026-10-27T00:00:00Z" if pinned else None
-        )
+        return self._replace(conversation_id, pinned_at="2026-10-27T00:00:00Z" if pinned else None)
 
     async def set_archived(self, conversation_id: str, archived: bool) -> Conversation:
         self.archives.append((conversation_id, archived))
@@ -314,9 +430,16 @@ class FakeAPI:
         self.conversations.insert(0, forked)
         return forked
 
-    async def share_conversation(self, conversation_id: str) -> str:
+    async def share_conversation(
+        self,
+        conversation_id: str,
+        *,
+        expires_in_s: int | None = None,
+        include_attachments: bool = False,
+    ) -> str:
         self._refuse_temporary(conversation_id, "shared")
         self.shares.append(conversation_id)
+        self.share_options.append((expires_in_s, include_attachments))
         self.share_rows.insert(
             0,
             share_row(
@@ -346,7 +469,9 @@ class FakeAPI:
     ) -> dict[str, Any]:
         self.feedback_puts.append((message_id, rating, list(reasons), comment))
         row = {
-            "message_id": message_id, "rating": rating, "reasons": list(reasons),
+            "message_id": message_id,
+            "rating": rating,
+            "reasons": list(reasons),
             "comment": comment,
         }
         self.feedback_rows = [
@@ -363,6 +488,7 @@ class FakeAPI:
         return [dict(row) for row in self.feedback_rows]
 
     async def usage(self) -> UsageBalance:
+        self.usage_reads += 1
         return self.balance
 
     async def upload_attachment(
@@ -370,10 +496,29 @@ class FakeAPI:
     ) -> Attachment:
         self.uploads.append((filename, data))
         return Attachment.from_dict(
-            {"id": f"att{len(self.uploads)}", "filename": filename,
-             "content_type": "application/octet-stream", "size_bytes": len(data),
-             "scan_status": "clean", "created_at": "1"}
+            {
+                "id": f"att{len(self.uploads)}",
+                "filename": filename,
+                "content_type": "application/octet-stream",
+                "size_bytes": len(data),
+                "scan_status": self.upload_scan_status,
+                "created_at": "1",
+            }
         )
+
+    async def attachment_limits(self) -> AttachmentLimits:
+        return self.limits
+
+    async def attachment_scan_status(self, attachment_id: str) -> str:
+        if self.scan_gate is not None:
+            await self.scan_gate.wait()
+        self.scan_polls.append(attachment_id)
+        if len(self.scan_answers) > 1:
+            return self.scan_answers.pop(0)
+        return self.scan_answers[0] if self.scan_answers else "clean"
+
+    async def delete_attachment(self, attachment_id: str) -> None:
+        self.attachment_deletes.append(attachment_id)
 
     async def library(self) -> dict[str, Any]:
         return {
@@ -391,11 +536,43 @@ class FakeAPI:
             )
         self.folders_created.append(name)
         folder = {
-            "id": f"f{len(self.library_folders) + 1}", "name": name, "position": 0,
-            "created_at": "1", "updated_at": "1",
+            "id": f"f{len(self.library_folders) + 1}",
+            "name": name,
+            "position": 0,
+            "created_at": "1",
+            "updated_at": "1",
         }
         self.library_folders.append(folder)
         return dict(folder)
+
+    async def rename_folder(self, folder_id: str, name: str) -> dict[str, Any]:
+        if any(f["name"] == name and f["id"] != folder_id for f in self.library_folders):
+            raise ConflictError(
+                "You already have one with that name.",
+                status_code=409,
+                request_id="req-name-taken",
+            )
+        self.folder_renames.append((folder_id, name))
+        for folder in self.library_folders:
+            if folder["id"] == folder_id:
+                folder["name"] = name
+                return dict(folder)
+        raise LookupError(folder_id)
+
+    async def delete_folder(self, folder_id: str) -> None:
+        self.folder_deletes.append(folder_id)
+        self.library_folders = [f for f in self.library_folders if f["id"] != folder_id]
+        self.conversations = [
+            replace(c, folder_id=None) if c.folder_id == folder_id else c
+            for c in self.conversations
+        ]
+
+    async def delete_tag(self, tag_id: str) -> None:
+        self.tag_deletes.append(tag_id)
+        self.library_tags = [t for t in self.library_tags if t["id"] != tag_id]
+        self.library_assignments = {
+            cid: [t for t in ids if t != tag_id] for cid, ids in self.library_assignments.items()
+        }
 
     async def move_to_folder(self, conversation_id: str, folder_id: str | None) -> None:
         self.folder_moves.append((conversation_id, folder_id))
@@ -423,9 +600,7 @@ class FakeAPI:
     async def notifications(
         self, *, unread: bool = False, limit: int = NOTIFICATIONS_PAGE
     ) -> dict[str, Any]:
-        rows = [
-            dict(row) for row in self.notification_rows if not unread or not row.get("read_at")
-        ]
+        rows = [dict(row) for row in self.notification_rows if not unread or not row.get("read_at")]
         return {"data": rows[:limit], "unread_count": self._unread_count()}
 
     async def read_notification(self, notification_id: str) -> dict[str, Any]:
@@ -458,9 +633,7 @@ class FakeAPI:
 
     async def conversation_shares(self, conversation_id: str) -> list[dict[str, Any]]:
         return [
-            dict(row)
-            for row in self.share_rows
-            if row.get("conversation_id") == conversation_id
+            dict(row) for row in self.share_rows if row.get("conversation_id") == conversation_id
         ]
 
     async def my_shares(self) -> list[dict[str, Any]]:
@@ -526,9 +699,6 @@ class FakeAPI:
         self.import_rows.append(row)
         return dict(row)
 
-    async def list_imports(self) -> list[dict[str, Any]]:
-        return [dict(row) for row in self.import_rows]
-
     async def import_status(self, import_id: str) -> dict[str, Any]:
         self.import_status_calls.append(import_id)
         for row in self.import_rows:
@@ -544,9 +714,6 @@ class FakeAPI:
                     row["messages_created"] = 9
                 return dict(row)
         raise LookupError(import_id)
-
-    async def export_inline(self) -> dict[str, Any]:
-        return {"exported_at": "2026-10-30T00:00:00Z", "conversations": []}
 
     async def start_export(self) -> dict[str, Any]:
         self.exports_started.append("asked")
@@ -592,7 +759,76 @@ class FakeAPI:
         return self.transcript_text
 
     async def budget(self) -> dict[str, Any]:
+        self.budget_reads += 1
         return dict(self.budget_payload)
+
+    # --- the person's own account ----------------------------------------------------
+
+    def own_key_prefix(self) -> str | None:
+        return "mw_mine0000"
+
+    async def api_keys(self) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.key_rows]
+
+    async def rotate_key(self, key_id: str) -> dict[str, Any]:
+        self.keys_rotated.append(key_id)
+        row = next(r for r in self.key_rows if r["id"] == key_id)
+        return {**row, "key": "mw_rotated1_testsecret"}
+
+    async def revoke_key(self, key_id: str) -> None:
+        self.keys_revoked.append(key_id)
+        for row in self.key_rows:
+            if row["id"] == key_id:
+                row["revoked_at"] = "2026-10-31T01:00:00Z"
+
+    async def sessions(self) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.session_rows]
+
+    async def revoke_session(self, session_id: str) -> None:
+        self.sessions_revoked.append(session_id)
+        self.session_rows = [r for r in self.session_rows if r["id"] != session_id]
+
+    async def preferences(self) -> dict[str, Any]:
+        return copy.deepcopy(self.preferences_state)
+
+    async def set_preferences(self, preferences: dict[str, Any]) -> dict[str, Any]:
+        self.preferences_puts.append(copy.deepcopy(preferences))
+        self.preferences_state = copy.deepcopy(preferences)
+        return copy.deepcopy(preferences)
+
+    async def user_instructions(self) -> dict[str, str]:
+        return dict(self.user_instructions_state)
+
+    async def set_user_instructions(self, about: str, style: str) -> dict[str, str]:
+        self.user_instructions_puts.append((about, style))
+        self.user_instructions_state = {"about": about, "style": style}
+        return dict(self.user_instructions_state)
+
+    async def entitlements(self) -> dict[str, Any]:
+        return {
+            "plan": "pro",
+            "plan_name": "Pro",
+            "status": "active",
+            "per_seat": False,
+            "seats": 1,
+            "writes_blocked": False,
+        }
+
+    async def billing_status(self) -> dict[str, Any]:
+        return {
+            "billing_enabled": True,
+            "collection_method": "charge_automatically",
+            "dunning": None,
+        }
+
+    async def plans(self) -> list[dict[str, Any]]:
+        return [
+            {"code": "free", "name": "Free", "price_cents_monthly": 0, "per_seat": False},
+            {"code": "pro", "name": "Pro", "price_cents_monthly": 2000, "per_seat": False},
+        ]
+
+    async def enforcement(self) -> dict[str, Any]:
+        return {"state": "none"}
 
     def _replace(self, conversation_id: str, **fields: Any) -> Conversation:
         conv = replace(self._find(conversation_id), **fields)
@@ -609,9 +845,21 @@ class FakeAPI:
         self.compacted.append(conversation_id)
         first, last = self.tree_messages[0], self.tree_messages[-1]
         summary = message(
-            "s1", "system", "", parent=last.id, created_at="9",
-            parts=[{"type": "summary", "text": "They talked.", "covers_from": first.id,
-                    "covers_to": last.id, "tokens_before": 900, "tokens_after": 120}],
+            "s1",
+            "system",
+            "",
+            parent=last.id,
+            created_at="9",
+            parts=[
+                {
+                    "type": "summary",
+                    "text": "They talked.",
+                    "covers_from": first.id,
+                    "covers_to": last.id,
+                    "tokens_before": 900,
+                    "tokens_after": 120,
+                }
+            ],
         )
         self.tree_messages.append(summary)
         return summary
@@ -631,18 +879,25 @@ class FakeAPI:
             self.streams_closed += 1
 
     def send(
-        self, conversation_id, content, model=None, attachment_ids=None
+        self, conversation_id, content, model=None, attachment_ids=None, temperature=None
     ) -> AsyncIterator[StreamItem]:
         self.sent.append((conversation_id, content, model))
         self.sent_attachment_ids.append(attachment_ids)
+        self.temperatures_sent.append(temperature)
         return self._play()
 
-    def edit(self, conversation_id, message_id, content, model=None) -> AsyncIterator[StreamItem]:
+    def edit(
+        self, conversation_id, message_id, content, model=None, temperature=None
+    ) -> AsyncIterator[StreamItem]:
         self.sent.append((conversation_id, f"edit:{message_id}:{content}", model))
+        self.temperatures_sent.append(temperature)
         return self._play()
 
-    def regenerate(self, conversation_id, message_id, model=None) -> AsyncIterator[StreamItem]:
+    def regenerate(
+        self, conversation_id, message_id, model=None, temperature=None
+    ) -> AsyncIterator[StreamItem]:
         self.sent.append((conversation_id, f"regen:{message_id}", model))
+        self.temperatures_sent.append(temperature)
         return self._play()
 
     async def aclose(self) -> None:

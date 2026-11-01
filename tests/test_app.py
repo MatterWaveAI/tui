@@ -17,11 +17,13 @@ from matterwave_tui.app import (
     IMPORT_MAX_BYTES,
     TEMPORARY_NOTICE,
     MatterWaveApp,
+    MoreResults,
     Transcript,
     TuiCommands,
 )
 from matterwave_tui.auth import DeviceCode
 from matterwave_tui.screens import (
+    Account,
     Accounts,
     Confirm,
     DeviceLogin,
@@ -30,8 +32,12 @@ from matterwave_tui.screens import (
     InstructionsEditor,
     Library,
     ModelPicker,
+    NewChat,
     Notifications,
+    PendingAttachments,
     Prompt,
+    SecretShown,
+    ShareDialog,
     Shares,
 )
 from matterwave_tui.widgets import DividerView, ImageView, MessageView
@@ -47,8 +53,14 @@ from .fake_api import (
 )
 
 BASE = "https://matterwave.test"
-CONV = {"id": "c1", "title": "New chat", "default_model": "grt-nano",
-        "created_at": "1", "updated_at": "1", "current_leaf_message_id": None}
+CONV = {
+    "id": "c1",
+    "title": "New chat",
+    "default_model": "grt-nano",
+    "created_at": "1",
+    "updated_at": "1",
+    "current_leaf_message_id": None,
+}
 
 
 def transcript_text(app: MatterWaveApp) -> str:
@@ -165,8 +177,13 @@ async def test_a_stream_that_ends_without_done_is_marked_cut_off():
 @pytest.mark.asyncio
 async def test_a_cut_stream_reads_back_what_the_server_kept():
     api = FakeAPI(
-        [Opened("req-cut"), fr.MessageFrame(message("u1", "user", "hi")),
-         fr.PartStartFrame(0, "text"), fr.DeltaFrame(0, "Hel"), Cut("req-cut")]
+        [
+            Opened("req-cut"),
+            fr.MessageFrame(message("u1", "user", "hi")),
+            fr.PartStartFrame(0, "text"),
+            fr.DeltaFrame(0, "Hel"),
+            Cut("req-cut"),
+        ]
     )
     kept = message("a1", "assistant", "Hel", parent="u1", created_at="2", truncated=True)
     app = MatterWaveApp(api)
@@ -281,7 +298,11 @@ async def test_branch_keys_move_the_leaf_and_x_expands_a_summary():
         assert "one" in transcript_text(app)
 
         summary = message(
-            "s1", "system", "", parent="a1", created_at="4",
+            "s1",
+            "system",
+            "",
+            parent="a1",
+            created_at="4",
             parts=[{"type": "summary", "text": "folded", "covers_from": "u1", "covers_to": "a1"}],
         )
         app.thread.add(summary)
@@ -481,7 +502,9 @@ async def test_compact_folds_the_thread_behind_a_divider():
 async def test_a_rate_limit_and_a_plan_refusal_are_their_own_states():
     limited = RateLimitError(
         "Rate limit of 60 requests per minute exceeded for this API key.",
-        status_code=429, request_id="req-429", retry_after=30,
+        status_code=429,
+        request_id="req-429",
+        retry_after=30,
     )
     app = MatterWaveApp(FakeAPI(refusal=limited))
     async with app.run_test() as pilot:
@@ -591,6 +614,7 @@ async def test_switching_conversations_mid_stream_keeps_the_answer_out_of_the_ne
         assert app.live is None
         assert app.failure is None
 
+
 @pytest.mark.asyncio
 async def test_pin_archive_and_the_list_filters_make_them_actions():
     api = FakeAPI()
@@ -600,7 +624,7 @@ async def test_pin_archive_and_the_list_filters_make_them_actions():
         await pilot.press("escape", "p")
         await settle(app, pilot)
         assert api.pins == [("c1", True)]
-        assert sidebar_captions(app) == ["📌 New chat"]
+        assert sidebar_captions(app) == ["📌 pinned · New chat"]
         await pilot.press("p")
         await settle(app, pilot)
         assert api.pins[-1] == ("c1", False)
@@ -613,7 +637,7 @@ async def test_pin_archive_and_the_list_filters_make_them_actions():
         await pilot.press("o", "o")  # pinned, then archived
         await settle(app, pilot)
         assert app.list_filter == "archived"
-        assert sidebar_captions(app) == ["🗄 New chat"]
+        assert sidebar_captions(app) == ["🗄 archived · New chat"]
         await pilot.press("a")
         await settle(app, pilot)
         assert api.archives[-1] == ("c1", False)
@@ -688,16 +712,86 @@ async def test_fork_copies_from_the_selected_message_and_opens_the_copy():
 
 
 @pytest.mark.asyncio
-async def test_share_hands_back_a_link():
+async def test_the_share_dialog_sets_expiry_and_attachments_copies_and_revokes():
+    api = FakeAPI()
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    copied: list[str] = []
+    app.copy_to_clipboard = copied.append  # type: ignore[method-assign]
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("escape", "s")
+        await settle(app, pilot)
+        dialog = app.screen
+        assert isinstance(dialog, ShareDialog)
+        options = dialog.query_one("#share-options", OptionList)
+        # Expires: never -> in 1 hour -> in 1 day.
+        options.highlighted = 0
+        await pilot.press("enter", "enter")
+        options.highlighted = 1
+        await pilot.press("enter")
+        options.highlighted = 2
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.share_options == [(86400, True)]
+        assert copied == ["https://matterwave.test/share/tok-c1"]
+        assert any("Share link copied" in s for s in shown)
+        assert "tok-c1" in str(dialog.query_one("#share-link", Static).render())
+        # The new link is listed, and revoked from here.
+        assert options.option_count == 5
+        options.highlighted = 4
+        await pilot.press("x")
+        await settle(app, pilot)
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.shares_revoked == ["s1"]
+        assert "revoked" in str(options.get_option_at_index(4).prompt)
+
+
+@pytest.mark.asyncio
+async def test_slash_temp_sets_the_conversations_temperature():
+    api = FakeAPI(happy_script())
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        composer = app.query_one("#composer", TextArea)
+        for command in ("/temp 3", "/temp warm"):
+            composer.text = command
+            app.action_send()
+        assert sum("A temperature is a number from 0 to 2" in s for s in shown) == 2
+        composer.text = "/temp 0.2"
+        app.action_send()
+        assert "temperature 0.2" in status(app)
+        composer.text = "hi"
+        app.action_send()
+        await settle(app, pilot)
+        composer.text = "/temp default"
+        app.action_send()
+        composer.text = "again"
+        app.action_send()
+        await settle(app, pilot)
+        assert api.temperatures_sent == [0.2, None]
+        assert "temperature" not in status(app)
+
+
+@pytest.mark.asyncio
+async def test_a_file_over_the_limits_is_refused_before_it_is_sent(tmp_path):
+    (tmp_path / "big.bin").write_bytes(b"x" * 1500)
+    (tmp_path / "fits.bin").write_bytes(b"x" * 900)
     api = FakeAPI()
     app = MatterWaveApp(api)
     shown = capture_notify(app)
     async with app.run_test() as pilot:
         await settle(app, pilot)
-        await pilot.press("escape", "s")
+        app.apply_attach(str(tmp_path / "big.bin"))
         await settle(app, pilot)
-        assert api.shares == ["c1"]
-        assert any("https://matterwave.test/share/tok-c1" in s for s in shown)
+        assert "big.bin is 1.5 KB; one upload may be at most 1000 B." in shown
+        api.limits = replace(api.limits, quota_remaining_bytes=500)
+        app.apply_attach(str(tmp_path / "fits.bin"))
+        await settle(app, pilot)
+        assert any("only 500 B of your 4.9 KB storage is left" in s for s in shown)
+        assert api.uploads == []
 
 
 @pytest.mark.asyncio
@@ -720,6 +814,13 @@ async def test_export_writes_the_active_path_as_markdown(tmp_path, monkeypatch):
         assert "Exported from MatterWave on " in text
         assert "## You" in text and "What is TUI?" in text
         assert "## Assistant (grt-nano)" in text and "A terminal UI." in text
+        # A second export never overwrites the first: it takes the next
+        # free name, as a browser's second download does.
+        files[0].write_text("my notes", encoding="utf-8")
+        await pilot.press("w")
+        await settle(app, pilot)
+        assert files[0].read_text(encoding="utf-8") == "my notes"
+        assert (tmp_path / "New chat (2).md").read_text(encoding="utf-8").startswith("# New chat")
 
 
 @pytest.mark.asyncio
@@ -767,8 +868,12 @@ async def test_the_status_line_shows_the_overage_cap():
 
     api = FakeAPI()
     api.budget_payload = {
-        "period_start": "2026-10-01", "included_tokens": 100000, "tokens_used": 1234,
-        "remaining_tokens": 98766, "overage_enabled": True, "overage_cap_micros": 1000000,
+        "period_start": "2026-10-01",
+        "included_tokens": 100000,
+        "tokens_used": 1234,
+        "remaining_tokens": 98766,
+        "overage_enabled": True,
+        "overage_cap_micros": 1000000,
         "overage_micros": 250000,
     }
     app = MatterWaveApp(api)
@@ -785,9 +890,7 @@ async def test_the_status_line_shows_the_overage_cap():
 async def test_the_notifications_panel_reads_one_or_all(tmp_path, monkeypatch):
     monkeypatch.setenv("MATTERWAVE_STATE_DIR", str(tmp_path))
     api = FakeAPI()
-    api.notification_rows = [
-        notification("n1"), notification("n2", read_at="2026-10-29T01:00:00Z")
-    ]
+    api.notification_rows = [notification("n1"), notification("n2", read_at="2026-10-29T01:00:00Z")]
     app = MatterWaveApp(api)
     async with app.run_test() as pilot:
         await settle(app, pilot)
@@ -887,7 +990,7 @@ async def test_the_library_screen_files_and_tags_and_the_captions_follow():
         def labels() -> list[str]:
             return [str(rows.get_option_at_index(i).prompt) for i in range(rows.option_count)]
 
-        assert labels() == ["— Folders —", "  Work", "— Tags —", "  draft"]
+        assert labels() == ["— Folders —", "Work", "— Tags —", "draft"]
 
         # Onto the folder row and `m`: the chat is filed, the caption
         # names the folder.
@@ -898,7 +1001,7 @@ async def test_the_library_screen_files_and_tags_and_the_captions_follow():
         assert app.conversation is not None and app.conversation.folder_id == "f1"
         assert sidebar_captions(app) == ["New chat — 📁 Work"]
         assert "Filed." in shown
-        assert labels()[1] == "● Work"
+        assert labels()[1] == "Work  (this chat)"
 
         # Onto the tag row and Space: the tag is set, the caption carries it.
         rows.highlighted = 3
@@ -906,7 +1009,7 @@ async def test_the_library_screen_files_and_tags_and_the_captions_follow():
         await settle(app, pilot)
         assert api.tag_sets == [("c1", ["t1"])]
         assert sidebar_captions(app) == ["New chat — 📁 Work · #draft"]
-        assert labels()[3] == "● draft"
+        assert labels()[3] == "draft  (on this chat)"
         await pilot.press("space")
         await settle(app, pilot)
         assert api.tag_sets[-1] == ("c1", [])
@@ -923,7 +1026,11 @@ async def test_the_library_screen_files_and_tags_and_the_captions_follow():
         assert api.folders_created == ["Archive"]
         assert isinstance(app.screen, Library)
         assert labels() == [
-            "— Folders —", "● Work", "  Archive", "— Tags —", "  draft",
+            "— Folders —",
+            "Work  (this chat)",
+            "Archive",
+            "— Tags —",
+            "draft",
         ]
 
         # A folder of a taken name is the server's 409, said, not a banner.
@@ -943,7 +1050,7 @@ async def test_the_library_screen_files_and_tags_and_the_captions_follow():
         await pilot.press("enter")
         await settle(app, pilot)
         assert api.tags_created == ["spam"]
-        assert labels()[-1] == "  spam"
+        assert labels()[-1] == "spam"
 
         # `m` on the folder the chat is already in takes it back out.
         rows.highlighted = 1
@@ -1075,21 +1182,28 @@ async def test_a_new_chat_offers_the_temporary_toggle_before_anything_is_sent():
     shown = capture_notify(app)
     async with app.run_test() as pilot:
         await settle(app, pilot)
-        # Esc first: a regular chat, as before.
+        # Esc makes nothing at all.
         await pilot.press("escape", "n")
         await settle(app, pilot)
-        assert isinstance(app.screen, Confirm)
+        assert isinstance(app.screen, NewChat)
+        await pilot.press("escape")
+        await settle(app, pilot)
+        assert api.creates == []
+        assert not isinstance(app.screen, NewChat)
+
+        # Enter, the natural key, makes a regular chat that is kept.
         await pilot.press("n")
+        await settle(app, pilot)
+        await pilot.press("enter")
         await settle(app, pilot)
         assert api.creates == [(None, None, False)]
         assert app.conversation is not None and app.conversation.id == "c2"
         assert not app.temporary_chat
-        assert not isinstance(app.screen, Confirm)
 
-        # Enter this time: a temporary chat, created with the flag on.
+        # Only `t` makes a temporary chat, created with the flag on.
         await pilot.press("escape", "n")
         await settle(app, pilot)
-        await pilot.press("enter")
+        await pilot.press("t")
         await settle(app, pilot)
         assert api.creates[-1] == (None, None, True)
         assert app.temporary_chat
@@ -1186,9 +1300,7 @@ async def test_feedback_is_restored_on_open_and_the_dialog_edits_reasons():
         message("u1", "user", "q"),
         message("a1", "assistant", "one", parent="u1", created_at="2"),
     ]
-    api.feedback_rows = [
-        {"message_id": "a1", "rating": -1, "reasons": ["wrong"], "comment": "no"}
-    ]
+    api.feedback_rows = [{"message_id": "a1", "rating": -1, "reasons": ["wrong"], "comment": "no"}]
     app = MatterWaveApp(api)
     shown = capture_notify(app)
     async with app.run_test() as pilot:
@@ -1256,6 +1368,544 @@ async def test_an_image_is_refused_when_the_model_cannot_see_and_a_document_is_n
         attach("notes.txt")
         await settle(app, pilot)
         assert [name for name, _ in api.uploads] == ["notes.txt"]
+
+
+@pytest.mark.asyncio
+async def test_a_send_right_after_attaching_waits_for_the_scan(tmp_path, monkeypatch):
+    monkeypatch.setattr("matterwave_tui.app.SCAN_POLL_S", 0)
+    notes = tmp_path / "notes.txt"
+    notes.write_bytes(b"notes")
+    api = FakeAPI(happy_script("Seen."))
+    api.upload_scan_status = "scanning"
+    api.scan_answers = ["scanning", "clean"]
+    api.scan_gate = asyncio.Event()
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        app.apply_attach(str(notes))
+        for _ in range(5):
+            await pilot.pause()
+        assert "attached: notes.txt (scanning…)" in status(app)
+        composer = app.query_one("#composer", TextArea)
+        composer.text = "look"
+        app.action_send()
+        await pilot.pause()
+        # Refused by the server until the scan is clean: nothing goes yet,
+        # and the message is still the person's.
+        assert api.sent == []
+        assert composer.text == "look"
+        assert "sends when the scan is done" in status(app)
+        api.scan_gate.set()
+        await settle(app, pilot)
+        assert api.scan_polls == ["att1", "att1"]
+        assert api.sent == [("c1", "look", "grt-nano")]
+        assert api.sent_attachment_ids == [["att1"]]
+        assert "attached" not in status(app)
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_scan_names_the_file_and_keeps_the_message(tmp_path, monkeypatch):
+    monkeypatch.setattr("matterwave_tui.app.SCAN_POLL_S", 0)
+    report = tmp_path / "report.pdf"
+    report.write_bytes(b"%PDF")
+    api = FakeAPI(happy_script("Seen."))
+    api.upload_scan_status = "scanning"
+    api.scan_answers = ["infected"]
+    api.scan_gate = asyncio.Event()
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        app.apply_attach(str(report))
+        for _ in range(5):
+            await pilot.pause()
+        composer = app.query_one("#composer", TextArea)
+        composer.text = "summarise this"
+        app.action_send()
+        api.scan_gate.set()
+        await settle(app, pilot)
+        assert "report.pdf was removed by the malware scan." in shown
+        assert api.sent == []
+        assert composer.text == "summarise this"
+        assert app.pending_attachments == []
+        assert "attached" not in status(app)
+
+
+@pytest.mark.asyncio
+async def test_the_scan_is_polled_on_its_route_before_the_turn_goes(tmp_path, monkeypatch):
+    monkeypatch.setattr("matterwave_tui.app.SCAN_POLL_S", 0)
+    notes = tmp_path / "notes.txt"
+    notes.write_bytes(b"notes")
+    seen: list[tuple[str, str]] = []
+    scans = iter(["scanning", "clean"])
+    # The verdict is held back until the send has been asked for.
+    verdict = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        if (known := json_routes(request)) is not None:
+            return known
+        if (request.method, request.url.path) == ("POST", "/api/attachments"):
+            return httpx.Response(
+                201,
+                json={
+                    "id": "att1",
+                    "filename": "notes.txt",
+                    "content_type": "text/plain",
+                    "size_bytes": 5,
+                    "scan_status": "scanning",
+                    "created_at": "1",
+                },
+            )
+        if (request.method, request.url.path) == ("GET", "/api/attachments/att1/scan"):
+            answer = next(scans)
+            if answer == "clean":
+                await verdict.wait()
+            return httpx.Response(200, json={"id": "att1", "scan_status": answer})
+        if (request.method, request.url.path) == ("POST", "/api/conversations/c1/messages"):
+            assert json.loads(request.content)["attachment_ids"] == ["att1"]
+            return httpx.Response(
+                200,
+                text='event: done\ndata: {"id": "a1", "role": "assistant", "truncated": false}\n\n',
+                headers={"x-request-id": "req-live", "content-type": "text/event-stream"},
+            )
+        return httpx.Response(404, json={"detail": request.url.path})
+
+    app = MatterWaveApp(http_api(handler))
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        app.apply_attach(str(notes))
+        composer = app.query_one("#composer", TextArea)
+        composer.text = "look"
+        for _ in range(5):
+            await pilot.pause()
+        app.action_send()
+        await pilot.pause()
+        assert ("POST", "/api/conversations/c1/messages") not in seen
+        verdict.set()
+        await settle(app, pilot)
+        writes = [hit for hit in seen if hit[0] != "GET" or hit[1].endswith("/scan")]
+        assert writes == [
+            ("POST", "/api/attachments"),
+            ("GET", "/api/attachments/att1/scan"),
+            ("GET", "/api/attachments/att1/scan"),
+            ("POST", "/api/conversations/c1/messages"),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_pending_attachments_stay_with_their_conversation(tmp_path):
+    notes = tmp_path / "notes.txt"
+    notes.write_bytes(b"notes")
+    api = FakeAPI(happy_script("Seen."))
+    api.conversations = [conversation("c1", title="First"), conversation("c2", title="Second")]
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert app.conversation is not None and app.conversation.id == "c1"
+        app.apply_attach(str(notes))
+        await settle(app, pilot)
+        assert "attached: notes.txt" in status(app)
+        await app.open_conversation("c2")
+        await settle(app, pilot)
+        assert "attached" not in status(app)
+        composer = app.query_one("#composer", TextArea)
+        composer.text = "no files here"
+        app.action_send()
+        await settle(app, pilot)
+        assert api.sent_attachment_ids == [None]
+        await app.open_conversation("c1")
+        await settle(app, pilot)
+        assert "attached: notes.txt" in status(app)
+        composer.text = "with the file"
+        app.action_send()
+        await settle(app, pilot)
+        assert api.sent_attachment_ids == [None, ["att1"]]
+        assert api.sent[-1][0] == "c1"
+
+
+@pytest.mark.asyncio
+async def test_a_pending_attachment_can_be_taken_off(tmp_path):
+    (tmp_path / "keep.txt").write_bytes(b"keep")
+    (tmp_path / "drop.txt").write_bytes(b"drop")
+    api = FakeAPI(happy_script("Seen."))
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        app.apply_attach(str(tmp_path / "keep.txt"))
+        await settle(app, pilot)
+        app.apply_attach(str(tmp_path / "drop.txt"))
+        await settle(app, pilot)
+        assert "attached: keep.txt, drop.txt" in status(app)
+        await pilot.press("escape", "I")
+        await settle(app, pilot)
+        assert isinstance(app.screen, PendingAttachments)
+        await pilot.press("down", "x")
+        await settle(app, pilot)
+        assert not isinstance(app.screen, PendingAttachments)
+        assert api.attachment_deletes == ["att2"]
+        assert "attached: keep.txt" in status(app) and "drop.txt" not in status(app)
+        app.query_one("#composer", TextArea).text = "one file"
+        app.action_send()
+        await settle(app, pilot)
+        assert api.sent_attachment_ids == [["att1"]]
+
+
+@pytest.mark.asyncio
+async def test_a_quoted_or_home_relative_path_attaches(tmp_path, monkeypatch):
+    folder = tmp_path / "My Files"
+    folder.mkdir()
+    (folder / "notes.txt").write_bytes(b"notes")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    api = FakeAPI()
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        # Windows' "Copy as path" puts double quotes round it; a drag into
+        # a shell may use single ones.
+        app.apply_attach(f'"{folder / "notes.txt"}"')
+        await settle(app, pilot)
+        app.apply_attach(f"'{folder / 'notes.txt'}'")
+        await settle(app, pilot)
+        app.apply_attach("~/My Files/notes.txt")
+        await settle(app, pilot)
+        assert [name for name, _ in api.uploads] == ["notes.txt"] * 3
+
+
+@pytest.mark.asyncio
+async def test_creating_a_tag_that_exists_leaves_one_row():
+    api = FakeAPI()
+    api.library_tags = [{"id": "t1", "name": "draft", "created_at": "1"}]
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("escape", "l")
+        await settle(app, pilot)
+        assert isinstance(app.screen, Library)
+        state = await app.apply_tag_create("draft")
+        assert state is not None
+        assert [tag["name"] for tag in state[1]] == ["draft"]
+        assert [tag["id"] for tag in app.library_tags] == ["t1"]
+        state = await app.apply_tag_create("later")
+        assert state is not None
+        assert [tag["name"] for tag in state[1]] == ["draft", "later"]
+
+
+@pytest.mark.asyncio
+async def test_a_launch_model_is_used_until_another_is_picked():
+    api = FakeAPI(happy_script())
+    app = MatterWaveApp(api, model="other-7b")
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        # c1 was last on grt-nano; `-m` wins for this session's turns.
+        assert app.model == "other-7b"
+        app.query_one("#composer", TextArea).text = "hi"
+        app.action_send()
+        await settle(app, pilot)
+        assert api.sent == [("c1", "hi", "other-7b")]
+        app.apply_model("lab-x")
+        await settle(app, pilot)
+        assert app.model_override is None
+        app.query_one("#composer", TextArea).text = "again"
+        app.action_send()
+        await settle(app, pilot)
+        assert api.sent[-1] == ("c1", "again", "lab-x")
+
+
+@pytest.mark.asyncio
+async def test_a_launch_model_the_plan_lacks_is_refused_up_front():
+    api = FakeAPI(happy_script())
+    app = MatterWaveApp(api, model="grt-max")
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert any("grt-max is not a model you can use here" in s for s in shown)
+        assert app.model == "grt-nano"
+
+
+@pytest.mark.asyncio
+async def test_each_answer_refreshes_usage_budget_and_the_unread_badge():
+    api = FakeAPI(happy_script())
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert (api.usage_reads, api.budget_reads) == (1, 1)
+        assert "unread" not in status(app)
+        # The turn crosses a budget line: the server files a notification
+        # and the period's usage moves.
+        api.notification_rows = [notification("n1")]
+        api.balance = replace(api.balance, used=90000, percent=90.0, warn=True)
+        app.query_one("#composer", TextArea).text = "hi"
+        app.action_send()
+        await settle(app, pilot)
+        assert (api.usage_reads, api.budget_reads) == (2, 2)
+        assert "✉ 1 unread" in status(app)
+        assert "⚠ usage 90,000/100,000 (90%)" in status(app)
+
+
+def library_api() -> FakeAPI:
+    api = FakeAPI()
+    api.conversations = [
+        conversation("c1", title="Plan", folder_id="f1"),
+        conversation("c2", title="Notes"),
+        conversation("c3", title="Draft"),
+    ]
+    api.library_folders = [
+        {"id": "f1", "name": "Work", "position": 0, "created_at": "1", "updated_at": "1"},
+        {"id": "f2", "name": "Home", "position": 1, "created_at": "1", "updated_at": "1"},
+    ]
+    api.library_tags = [{"id": "t1", "name": "todo", "created_at": "1"}]
+    api.library_assignments = {"c3": ["t1"]}
+    return api
+
+
+@pytest.mark.asyncio
+async def test_the_sidebar_narrows_to_a_folder_or_a_tag_and_o_widens_it():
+    api = library_api()
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("escape", "l")
+        await settle(app, pilot)
+        assert isinstance(app.screen, Library)
+        # The first folder is highlighted as the library opens: Enter shows
+        # only it.
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert not isinstance(app.screen, Library)
+        assert sidebar_titles(app) == ["Plan"]
+        assert api.all_reads == 1
+        assert "showing only 📁 Work (o shows all)" in status(app)
+        # A tag, from the library again.
+        await pilot.press("l")
+        await settle(app, pilot)
+        # Rows: the folders' heading, two folders, the tags' heading, the tag.
+        app.screen.query_one("#library-rows", OptionList).highlighted = 4
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert sidebar_titles(app) == ["Draft"]
+        await pilot.press("o")
+        await settle(app, pilot)
+        assert sidebar_titles(app) == ["Plan", "Notes", "Draft"]
+        assert app.list_filter == "default"
+        assert "showing only" not in status(app)
+
+
+@pytest.mark.asyncio
+async def test_folders_are_renamed_and_deleted_and_tags_deleted_from_the_library():
+    api = library_api()
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("escape", "l")
+        await settle(app, pilot)
+        library = app.screen
+        assert isinstance(library, Library)
+        # Rename the highlighted folder, the first.
+        await pilot.press("r")
+        await settle(app, pilot)
+        assert isinstance(app.screen, Prompt)
+        app.screen.query_one("#prompt-input", Input).value = "Office"
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.folder_renames == [("f1", "Office")]
+        assert "📁 Office" in sidebar_captions(app)[0]
+        # A name another folder has is the server's 409, said in passing.
+        await pilot.press("r")
+        await settle(app, pilot)
+        app.screen.query_one("#prompt-input", Input).value = "Home"
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert "You already have one with that name." in shown
+        # Delete the folder: after a confirm, its conversation is unfiled.
+        await pilot.press("x")
+        await settle(app, pilot)
+        assert isinstance(app.screen, Confirm)
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.folder_deletes == ["f1"]
+        assert [f["id"] for f in library.folders] == ["f2"]
+        assert all("📁" not in caption for caption in sidebar_captions(app))
+        assert app.conversation is not None and app.conversation.folder_id is None
+        # Delete the tag: it comes off the conversation that carried it.
+        tag_row = len(library.folders) + 2
+        library.query_one("#library-rows", OptionList).highlighted = tag_row
+        await pilot.press("x")
+        await settle(app, pilot)
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.tag_deletes == ["t1"]
+        assert app.library_assignments["c3"] == []
+        assert all("#todo" not in caption for caption in sidebar_captions(app))
+
+
+@pytest.mark.asyncio
+async def test_search_pages_through_more_results():
+    api = FakeAPI()
+    api.conversations = [conversation(f"c{n}", title=f"Tea {n}") for n in range(1, 6)]
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await app.refresh_conversations("tea")
+        await settle(app, pilot)
+        view = app.query_one("#conversations", ListView)
+        assert sidebar_titles_with_more(app) == ["Tea 1", "Tea 2", "More results…"]
+        view.index = 2
+        view.action_select_cursor()
+        await settle(app, pilot)
+        assert sidebar_titles_with_more(app) == [
+            "Tea 1",
+            "Tea 2",
+            "Tea 3",
+            "Tea 4",
+            "More results…",
+        ]
+        app.load_more_results()
+        await settle(app, pilot)
+        assert sidebar_titles_with_more(app)[-1] == "Tea 5"
+        assert api.searches == ["tea", "tea", "tea"]
+
+
+def sidebar_titles_with_more(app: MatterWaveApp) -> list[str]:
+    out: list[str] = []
+    for item in app.query_one("#conversations", ListView).children:
+        if isinstance(item, MoreResults):
+            out.append("More results…")
+        else:
+            out.append(item.conversation.title)
+    return out
+
+
+def account_row(app: MatterWaveApp, prefix: str) -> int:
+    """The index of the account screen's row whose label starts so."""
+    screen = app.screen
+    assert isinstance(screen, Account)
+    options = screen.query_one("#account-rows", OptionList)
+    for index in range(options.option_count):
+        if str(options.get_option_at_index(index).prompt).startswith(prefix):
+            return index
+    raise AssertionError(f"no row starting {prefix!r}")
+
+
+@pytest.mark.asyncio
+async def test_the_account_screen_shows_the_plan_keys_browsers_and_settings():
+    api = FakeAPI()
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("escape", "U")
+        await settle(app, pilot)
+        screen = app.screen
+        assert isinstance(screen, Account)
+        summary = str(screen.query_one("#account-summary", Static).render())
+        assert "Plan: Pro (active)" in summary and "Free $0, Pro $20" in summary
+        labels = [
+            str(screen.query_one("#account-rows", OptionList).get_option_at_index(i).prompt)
+            for i in range(screen.query_one("#account-rows", OptionList).option_count)
+        ]
+        assert any("mw_mine0000" in label and "this terminal" in label for label in labels)
+        assert any(label.startswith("Firefox") for label in labels)
+        assert "Usage alert emails: on" in labels and "Locale: not set" in labels
+
+
+@pytest.mark.asyncio
+async def test_account_writes_reach_their_routes_and_this_terminals_key_is_left_alone():
+    api = FakeAPI()
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("escape", "U")
+        await settle(app, pilot)
+        rows = app.screen.query_one("#account-rows", OptionList)
+        # This terminal's own key: not revoked, not rotated from here.
+        rows.highlighted = account_row(app, "matterwave-tui")
+        await pilot.press("x")
+        await settle(app, pilot)
+        assert api.keys_revoked == []
+        assert any("logout" in s for s in shown)
+        # Another key: rotated (its secret shown once), then revoked.
+        rows.highlighted = account_row(app, "CI")
+        await pilot.press("o")
+        await settle(app, pilot)
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.keys_rotated == ["k2"]
+        assert isinstance(app.screen, SecretShown)
+        assert "mw_rotated1_testsecret" in str(app.screen.query_one("#secret", Static).render())
+        await pilot.press("escape")
+        await settle(app, pilot)
+        rows.highlighted = account_row(app, "CI")
+        await pilot.press("x")
+        await settle(app, pilot)
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.keys_revoked == ["k2"]
+        # A browser signed out.
+        rows.highlighted = account_row(app, "Firefox")
+        await pilot.press("x")
+        await settle(app, pilot)
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.sessions_revoked == ["s1"]
+        # A switch toggled: the whole shape goes back.
+        rows.highlighted = account_row(app, "Product update emails")
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.preferences_puts[-1]["email"]["product_updates"] is True
+        assert api.preferences_puts[-1]["email"]["billing_receipts"] is True
+        # The locale, by a prompt.
+        rows.highlighted = account_row(app, "Locale")
+        await pilot.press("enter")
+        await settle(app, pilot)
+        app.screen.query_one("#prompt-input", Input).value = "en-GB"
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.preferences_puts[-1]["locale"] == "en-GB"
+        # The person's own instructions.
+        rows.highlighted = account_row(app, "About you")
+        await pilot.press("enter")
+        await settle(app, pilot)
+        app.screen.query_one("#text", TextArea).text = "I write Rust."
+        await pilot.press("ctrl+t")
+        await settle(app, pilot)
+        assert api.user_instructions_puts == [("I write Rust.", "")]
+        assert account_row(app, "About you: I write Rust.") >= 0
+
+
+@pytest.mark.asyncio
+async def test_each_answer_shows_its_tokens_and_cost():
+    api = FakeAPI(happy_script("Hello there"))
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        app.query_one("#composer", TextArea).text = "hi"
+        app.action_send()
+        await settle(app, pilot)
+        view = [v for v in app.query(MessageView) if v.message.role == "assistant"][-1]
+        line = str(view.query_one(".usage", Static).render())
+        # ContextFrame(150, 20): 150 x $0.50 + 20 x $1.50 per million.
+        assert line == "150 tokens in · 20 out · $0.0001 at list price"
+    hidden = MatterWaveApp(FakeAPI(happy_script()), show_answer_usage=False)
+    async with hidden.run_test() as pilot:
+        await settle(hidden, pilot)
+        hidden.query_one("#composer", TextArea).text = "hi"
+        hidden.action_send()
+        await settle(hidden, pilot)
+        assert not hidden.query(".usage")
+
+
+def test_the_usage_line_without_a_price_or_tokens():
+    from matterwave_tui.models import answer_usage
+
+    assert answer_usage([], "m", None, None) is None
+    assert answer_usage([], "m", 1200, 30) == "1,200 tokens in · 30 out"
+    priced = [{"id": "m", "input_usd_per_m": 3.0, "output_usd_per_m": 15.0}]
+    assert answer_usage(priced, "m", 1_000_000, 100_000) == (
+        "1,000,000 tokens in · 100,000 out · $4.5000 at list price"
+    )
 
 
 @pytest.mark.asyncio
@@ -1327,10 +1977,22 @@ async def test_a_report_targets_the_selected_reply_or_the_conversation():
 async def test_the_account_switcher_offers_the_parked_and_reloads():
     api = FakeAPI()
     api.account_rows = [
-        {"slot": 0, "current": True, "subject": "a", "email": "a@x.test",
-         "name": "A", "org_name": "Work"},
-        {"slot": 1, "current": False, "subject": "b", "email": "b@x.test",
-         "name": "B", "org_name": "Home"},
+        {
+            "slot": 0,
+            "current": True,
+            "subject": "a",
+            "email": "a@x.test",
+            "name": "A",
+            "org_name": "Work",
+        },
+        {
+            "slot": 1,
+            "current": False,
+            "subject": "b",
+            "email": "b@x.test",
+            "name": "B",
+            "org_name": "Home",
+        },
     ]
     app = MatterWaveApp(api)
     shown = capture_notify(app)
@@ -1364,8 +2026,14 @@ async def test_the_account_switcher_offers_the_parked_and_reloads():
 async def test_the_switcher_says_when_nothing_is_parked():
     api = FakeAPI()
     api.account_rows = [
-        {"slot": 0, "current": True, "subject": "a", "email": "a@x.test",
-         "name": "A", "org_name": "Work"},
+        {
+            "slot": 0,
+            "current": True,
+            "subject": "a",
+            "email": "a@x.test",
+            "name": "A",
+            "org_name": "Work",
+        },
     ]
     app = MatterWaveApp(api)
     shown = capture_notify(app)
@@ -1406,8 +2074,9 @@ async def test_an_import_is_uploaded_watched_and_summarised(tmp_path, monkeypatc
 
         # A job that fails names the error it reported.
         api.import_done_after = None
-        api.import_rows = [{"id": "imp2", "status": "failed",
-                            "error": "This export holds no conversations."}]
+        api.import_rows = [
+            {"id": "imp2", "status": "failed", "error": "This export holds no conversations."}
+        ]
         app._watch_import("imp2")
         await settle(app, pilot)
         assert any("Import failed: This export holds no conversations." in s for s in shown)
@@ -1428,9 +2097,7 @@ async def test_an_account_export_is_polled_and_saved(tmp_path, monkeypatch):
         await settle(app, pilot)
         assert api.exports_started == ["asked"]
         assert api.export_status_calls == ["exp1"]
-        assert api.export_downloads == [
-            "/api/me/export/exp1/download?expires=1&sig=signed"
-        ]
+        assert api.export_downloads == ["/api/me/export/exp1/download?expires=1&sig=signed"]
         saved = tmp_path / "matterwave-export-2026-10-30.json"
         assert saved.read_bytes() == b'{"conversations": ["one"]}'
         assert any("Export starting" in s for s in shown)
@@ -1446,9 +2113,7 @@ async def test_an_account_export_is_polled_and_saved(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_dictation_without_the_microphone_extra_transcribes_a_file(
-    tmp_path, monkeypatch
-):
+async def test_dictation_without_the_microphone_extra_transcribes_a_file(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("matterwave_tui.app.mic_available", lambda: False)
     api = FakeAPI()
@@ -1481,7 +2146,21 @@ async def test_dictation_without_the_microphone_extra_transcribes_a_file(
 
 @pytest.mark.asyncio
 async def test_dictation_with_the_microphone_posts_the_clip(monkeypatch):
+    # The microphone itself is stood in for before the screen starts it:
+    # enter "stops" it with a clip, which goes to the route and lands as
+    # text in the composer. No test opens a real microphone.
+    class FakeRecorder:
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> bytes:
+            return b"RIFF"
+
+        def discard(self) -> None:
+            return None
+
     monkeypatch.setattr("matterwave_tui.app.mic_available", lambda: True)
+    monkeypatch.setattr("matterwave_tui.app.MicRecorder", FakeRecorder)
     api = FakeAPI()
     app = MatterWaveApp(api)
     shown = capture_notify(app)
@@ -1491,17 +2170,6 @@ async def test_dictation_with_the_microphone_posts_the_clip(monkeypatch):
         await settle(app, pilot)
         recorder_screen = app.screen
         assert isinstance(recorder_screen, Dictation)
-
-        # The microphone itself is stubbed: enter "stops" it with a clip,
-        # which goes to the route and lands as text in the composer.
-        class FakeRecorder:
-            def stop(self) -> bytes:
-                return b"RIFF"
-
-            def discard(self) -> None:
-                return None
-
-        recorder_screen.recorder = FakeRecorder()
         await pilot.press("enter")
         await settle(app, pilot)
         assert api.transcribes[-1][:3] == ("dictation.wav", "audio/wav", None)
@@ -1530,9 +2198,19 @@ async def test_an_image_part_is_loaded_when_the_terminal_can_draw_it(monkeypatch
     api.tree_messages = [
         message("u1", "user", "q"),
         message(
-            "a1", "assistant", "look", parent="u1", created_at="2",
-            parts=[{"type": "image", "attachment_id": "att1", "filename": "pic.png",
-                    "content_type": "image/png"}],
+            "a1",
+            "assistant",
+            "look",
+            parent="u1",
+            created_at="2",
+            parts=[
+                {
+                    "type": "image",
+                    "attachment_id": "att1",
+                    "filename": "pic.png",
+                    "content_type": "image/png",
+                }
+            ],
         ),
     ]
     app = MatterWaveApp(api)
@@ -1561,15 +2239,58 @@ async def test_an_image_part_is_loaded_when_the_terminal_can_draw_it(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_an_image_part_draws_inline_on_iterm2(monkeypatch):
+    monkeypatch.setenv("MATTERWAVE_IMAGES", "auto")
+    monkeypatch.setenv("TERM_PROGRAM", "iTerm.app")
+    for name in ("KITTY_WINDOW_ID", "KITTY_PID", "GHOSTTY_RESOURCES_DIR", "WT_SESSION"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    api = FakeAPI()
+    png = b"\x89PNG\r\n\x1a\n" + b"pixels"
+    api.attachments_store["att1"] = png
+    api.tree_messages = [
+        message(
+            "u1",
+            "user",
+            "q",
+            parts=[
+                {
+                    "type": "image",
+                    "attachment_id": "att1",
+                    "filename": "pic.png",
+                    "content_type": "image/png",
+                }
+            ],
+        ),
+    ]
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert app.image_backend == "iterm2"
+        assert app.query(ImageView).first().data == png
+        app._image_placements.clear()
+        app._refresh_images()
+        assert any("\x1b]1337;File=inline=1" in op for op in app._image_ops)
+
+
+@pytest.mark.asyncio
 async def test_an_image_part_stays_a_placeholder_without_a_backend(monkeypatch):
     monkeypatch.setenv("MATTERWAVE_IMAGES", "off")
     api = FakeAPI()
     api.attachments_store["att1"] = b"\x89PNG\r\n\x1a\npixels"
     api.tree_messages = [
         message(
-            "u1", "user", "q",
-            parts=[{"type": "image", "attachment_id": "att1", "filename": "pic.png",
-                    "content_type": "image/png"}],
+            "u1",
+            "user",
+            "q",
+            parts=[
+                {
+                    "type": "image",
+                    "attachment_id": "att1",
+                    "filename": "pic.png",
+                    "content_type": "image/png",
+                }
+            ],
         ),
     ]
     app = MatterWaveApp(api)

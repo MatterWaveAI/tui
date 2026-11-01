@@ -57,7 +57,11 @@ async def test_pending_then_slow_down_then_token():
             (400, {"error": "slow_down"}),
             (
                 200,
-                {"token_type": "bearer", "access_token": "mw_test_key", "scopes": ["chat:read", "chat:write"]},
+                {
+                    "token_type": "bearer",
+                    "access_token": "mw_test_key",
+                    "scopes": ["chat:read", "chat:write"],
+                },
             ),
         ]
     )

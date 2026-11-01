@@ -4,6 +4,7 @@ instructions editor uses)."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -14,7 +15,7 @@ from matterwave_tui.app import MatterWaveApp
 from matterwave_tui.roles import load_roles, save_roles
 from matterwave_tui.screens import Confirm, Prompt, RoleEditor, Roles
 
-from .fake_api import FakeAPI
+from .fake_api import FakeAPI, happy_script
 
 
 @pytest.fixture
@@ -114,6 +115,55 @@ async def test_role_commands_are_refused_cleanly(state_dir):
         await settle(app, pilot)
         assert any("Unknown command" in s for s in shown)
         assert api.sent == []
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_command_keeps_the_text_and_says_how_to_send_it(state_dir):
+    api = FakeAPI(happy_script())
+    app = MatterWaveApp(api)
+    shown = []
+    app.notify = lambda message, **_: shown.append(str(message))  # type: ignore[method-assign]
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        composer = app.query_one("#composer", TextArea)
+        composer.text = "/etc/hosts is empty, why?"
+        app.action_send()
+        await settle(app, pilot)
+        assert composer.text == "/etc/hosts is empty, why?"
+        assert api.sent == []
+        assert any("Start with // to send" in s for s in shown)
+
+
+@pytest.mark.asyncio
+async def test_a_double_slash_sends_the_text_with_one_slash(state_dir):
+    api = FakeAPI(happy_script())
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        composer = app.query_one("#composer", TextArea)
+        composer.text = "//etc/hosts is empty, why?"
+        app.action_send()
+        await settle(app, pilot)
+        assert api.sent == [("c1", "/etc/hosts is empty, why?", "grt-nano")]
+        assert composer.text == ""
+        # The escape survives the queue: a `//` typed while an answer
+        # streams still goes with a single slash.
+        api.gate = asyncio.Event()
+        composer.text = "first"
+        app.action_send()
+        await pilot.pause()
+        assert app.streaming
+        composer.text = "//role is not a command here"
+        app.action_send()
+        assert app.queued_prompt == "//role is not a command here"
+        api.gate.set()
+        await settle(app, pilot)
+        await settle(app, pilot)
+        assert [content for _, content, _ in api.sent] == [
+            "/etc/hosts is empty, why?",
+            "first",
+            "/role is not a command here",
+        ]
 
 
 @pytest.mark.asyncio

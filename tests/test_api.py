@@ -318,6 +318,10 @@ async def test_fork_share_and_usage_go_through_the_sdk():
     assert json.loads(seen[0].content) == {"message_id": "m1"}
     assert seen[0].url.path == "/api/conversations/c1/fork"
     assert await api.share_conversation("c1") == BASE + "/share/tok"
+    assert json.loads(seen[1].content) == {"expires_in_s": None, "include_attachments": False}
+    await api.share_conversation("c1", expires_in_s=86400, include_attachments=True)
+    assert json.loads(seen[2].content) == {"expires_in_s": 86400, "include_attachments": True}
+    assert (seen[2].method, seen[2].url.path) == ("POST", "/api/conversations/c1/share")
     balance = await api.usage()
     assert (balance.used, balance.included, balance.percent) == (1234, 100000, 1.234)
 
@@ -672,6 +676,40 @@ def test_a_key_is_listed_by_its_prefix():
 
 
 @pytest.mark.asyncio
+async def test_a_temperature_rides_the_turn_and_limits_are_read():
+    bodies: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/attachments/limits/me":
+            return httpx.Response(
+                200,
+                json={
+                    "max_upload_bytes": 20,
+                    "quota_bytes": 100,
+                    "quota_used_bytes": 10,
+                    "quota_remaining_bytes": 90,
+                },
+            )
+        bodies.append((request.url.path, json.loads(request.content)))
+        return sse(200, DONE_ONLY, len(bodies))
+
+    api = make(handler)
+    limits = await api.attachment_limits()
+    assert (limits.max_upload_bytes, limits.quota_remaining_bytes) == (20, 90)
+    [i async for i in api.send("c1", "hi", "m", temperature=0.2)]
+    [i async for i in api.edit("c1", "u1", "hi", "m", temperature=1.5)]
+    [i async for i in api.regenerate("c1", "a1", "m", temperature=0.0)]
+    [i async for i in api.send("c1", "hi", "m")]
+    assert [(path, body.get("temperature")) for path, body in bodies] == [
+        ("/api/conversations/c1/messages", 0.2),
+        ("/api/conversations/c1/messages/u1/edit", 1.5),
+        ("/api/conversations/c1/messages/a1/regenerate", 0.0),
+        ("/api/conversations/c1/messages", None),
+    ]
+    assert "temperature" not in bodies[-1][1]
+
+
+@pytest.mark.asyncio
 async def test_a_detached_upload_is_deleted_once_and_never_retried():
     seen: list[tuple[str, str]] = []
 
@@ -1010,12 +1048,10 @@ async def test_an_import_is_uploaded_multipart_and_polled():
     api = make(handler)
     row = await api.start_import(b"CONVERSATIONS", "chats.json")
     assert (row["id"], row["status"]) == ("imp1", "pending")
-    assert [r["id"] for r in await api.list_imports()] == ["imp1"]
     done = await api.import_status("imp1")
     assert (done["status"], done["messages_created"]) == ("done", 42)
     assert [(r.method, r.url.path) for r in seen] == [
         ("POST", "/api/me/imports"),
-        ("GET", "/api/me/imports"),
         ("GET", "/api/me/imports/imp1"),
     ]
 
@@ -1038,8 +1074,6 @@ async def test_an_account_export_is_started_polled_and_downloaded():
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
         path, method = request.url.path, request.method
-        if path == "/api/me/export" and method == "GET":
-            return httpx.Response(200, json={"exported_at": "2026-10-30T00:00:00Z"})
         if path == "/api/me/export" and method == "POST":
             return httpx.Response(202, json={"id": "exp1", "status": "pending"})
         if path == "/api/me/export/exp1" and method == "GET":
@@ -1063,15 +1097,12 @@ async def test_an_account_export_is_started_polled_and_downloaded():
         return httpx.Response(404, json={"detail": path})
 
     api = make(handler)
-    document = await api.export_inline()
-    assert document["exported_at"] == "2026-10-30T00:00:00Z"
     row = await api.start_export()
     assert (row["id"], row["status"]) == ("exp1", "pending")
     ready = await api.export_status("exp1")
     assert ready["status"] == "ready"
     assert await api.export_download(str(ready["download_url"])) == b'{"conv": 1}'
     assert [(r.method, r.url.path) for r in seen] == [
-        ("GET", "/api/me/export"),
         ("POST", "/api/me/export"),
         ("GET", "/api/me/export/exp1"),
         ("GET", "/api/me/export/exp1/download"),

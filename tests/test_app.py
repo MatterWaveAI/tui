@@ -37,6 +37,7 @@ from matterwave_tui.screens import (
     PendingAttachments,
     Prompt,
     SecretShown,
+    ShareDialog,
     Shares,
 )
 from matterwave_tui.widgets import DividerView, ImageView, MessageView
@@ -711,16 +712,86 @@ async def test_fork_copies_from_the_selected_message_and_opens_the_copy():
 
 
 @pytest.mark.asyncio
-async def test_share_hands_back_a_link():
+async def test_the_share_dialog_sets_expiry_and_attachments_copies_and_revokes():
+    api = FakeAPI()
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    copied: list[str] = []
+    app.copy_to_clipboard = copied.append  # type: ignore[method-assign]
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("escape", "s")
+        await settle(app, pilot)
+        dialog = app.screen
+        assert isinstance(dialog, ShareDialog)
+        options = dialog.query_one("#share-options", OptionList)
+        # Expires: never -> in 1 hour -> in 1 day.
+        options.highlighted = 0
+        await pilot.press("enter", "enter")
+        options.highlighted = 1
+        await pilot.press("enter")
+        options.highlighted = 2
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.share_options == [(86400, True)]
+        assert copied == ["https://matterwave.test/share/tok-c1"]
+        assert any("Share link copied" in s for s in shown)
+        assert "tok-c1" in str(dialog.query_one("#share-link", Static).render())
+        # The new link is listed, and revoked from here.
+        assert options.option_count == 5
+        options.highlighted = 4
+        await pilot.press("x")
+        await settle(app, pilot)
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.shares_revoked == ["s1"]
+        assert "revoked" in str(options.get_option_at_index(4).prompt)
+
+
+@pytest.mark.asyncio
+async def test_slash_temp_sets_the_conversations_temperature():
+    api = FakeAPI(happy_script())
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        composer = app.query_one("#composer", TextArea)
+        for command in ("/temp 3", "/temp warm"):
+            composer.text = command
+            app.action_send()
+        assert sum("A temperature is a number from 0 to 2" in s for s in shown) == 2
+        composer.text = "/temp 0.2"
+        app.action_send()
+        assert "temperature 0.2" in status(app)
+        composer.text = "hi"
+        app.action_send()
+        await settle(app, pilot)
+        composer.text = "/temp default"
+        app.action_send()
+        composer.text = "again"
+        app.action_send()
+        await settle(app, pilot)
+        assert api.temperatures_sent == [0.2, None]
+        assert "temperature" not in status(app)
+
+
+@pytest.mark.asyncio
+async def test_a_file_over_the_limits_is_refused_before_it_is_sent(tmp_path):
+    (tmp_path / "big.bin").write_bytes(b"x" * 1500)
+    (tmp_path / "fits.bin").write_bytes(b"x" * 900)
     api = FakeAPI()
     app = MatterWaveApp(api)
     shown = capture_notify(app)
     async with app.run_test() as pilot:
         await settle(app, pilot)
-        await pilot.press("escape", "s")
+        app.apply_attach(str(tmp_path / "big.bin"))
         await settle(app, pilot)
-        assert api.shares == ["c1"]
-        assert any("https://matterwave.test/share/tok-c1" in s for s in shown)
+        assert "big.bin is 1.5 KB; one upload may be at most 1000 B." in shown
+        api.limits = replace(api.limits, quota_remaining_bytes=500)
+        app.apply_attach(str(tmp_path / "fits.bin"))
+        await settle(app, pilot)
+        assert any("only 500 B of your 4.9 KB storage is left" in s for s in shown)
+        assert api.uploads == []
 
 
 @pytest.mark.asyncio

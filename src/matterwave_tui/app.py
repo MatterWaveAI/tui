@@ -52,6 +52,7 @@ from .screens import (
     Prompt,
     RoleEditor,
     Roles,
+    ShareDialog,
     Shares,
 )
 from .shell import detect_shell, run_shell_command, shell_command, shell_request
@@ -157,6 +158,16 @@ def typed_path(path_text: str) -> Path:
     if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
         text = text[1:-1].strip()
     return Path(text).expanduser()
+
+
+def human_size(size: int) -> str:
+    """Bytes as a person reads them: 512 B, 3.2 KB, 20 MB."""
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.0f} {unit}" if unit == "B" or value >= 10 else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GB"
 
 
 def attachment_label(attachment: Attachment) -> str:
@@ -450,6 +461,9 @@ class MatterWaveApp(App[None]):
         # which is after an earlier release's files have moved over.
         migrate_legacy_state()
         self.roles = load_roles(roles_path())
+        # The temperature a conversation's turns are sent with, set by
+        # /temp; absent, the server's default.
+        self.temperatures: dict[str, float] = {}
         # Shell assistant mode: each turn tells the model the OS and shell,
         # and each finished answer is a proposed command, run only after
         # the person confirms. `--shell` starts with it on; /shell toggles.
@@ -567,6 +581,9 @@ class MatterWaveApp(App[None]):
             bits.append("shell: answers are commands to confirm")
         if self.library_filter is not None:
             bits.append(f"showing only {self._library_filter_name()} (o shows all)")
+        temperature = self.temperatures.get(self._draft_key())
+        if temperature is not None:
+            bits.append(f"temperature {temperature:g}")
         return " │ ".join(bits)
 
     def render_status(self) -> None:
@@ -1173,10 +1190,13 @@ class MatterWaveApp(App[None]):
             )
             return
         cid = self.conversation.id
+        temperature = self.temperatures.get(cid)
         if self.editing:
-            stream = self.api.edit(cid, self.editing, text, self.model)
+            stream = self.api.edit(cid, self.editing, text, self.model, temperature=temperature)
         else:
-            stream = self.api.send(cid, text, self.model, attachment_ids=attachment_ids)
+            stream = self.api.send(
+                cid, text, self.model, attachment_ids=attachment_ids, temperature=temperature
+            )
         composer.text = ""
         self.drafts.pop(cid, None)
         self.editing = None
@@ -1192,10 +1212,18 @@ class MatterWaveApp(App[None]):
         # The files attached before the conversation existed go with this
         # turn; they are no longer waiting for one.
         self.attachment_drafts.pop("", None)
+        # A temperature set before the conversation existed is its own now.
+        temperature = self.temperatures.pop("", None)
+        if temperature is not None:
+            self.temperatures[conv.id] = temperature
         await self.refresh_conversations()
         await self.open_conversation(conv.id)
         self.query_one("#composer", TextArea).text = ""
-        await self._consume(self.api.send(conv.id, text, self.model, attachment_ids=attachment_ids))
+        await self._consume(
+            self.api.send(
+                conv.id, text, self.model, attachment_ids=attachment_ids, temperature=temperature
+            )
+        )
 
     def action_edit(self) -> None:
         message = self.selected_message()
@@ -1219,7 +1247,14 @@ class MatterWaveApp(App[None]):
             message = self.thread.last("assistant")
         if message is None:
             return
-        self.consume(self.api.regenerate(self.conversation.id, message.id, self.model))
+        self.consume(
+            self.api.regenerate(
+                self.conversation.id,
+                message.id,
+                self.model,
+                temperature=self.temperatures.get(self.conversation.id),
+            )
+        )
 
     @work(group="action")
     async def action_branch(self, delta: int) -> None:
@@ -1398,17 +1433,52 @@ class MatterWaveApp(App[None]):
 
     @work(group="action")
     async def action_share(self) -> None:
+        """`s`: the share dialog for the open conversation, with the links
+        already made for it."""
         if self.conversation is None:
             return
+        target = self.conversation
         try:
-            url = await self.api.share_conversation(self.conversation.id)
-        except ConflictError as exc:
-            self.notify(exc.message or "This conversation cannot be shared.")
-            return
+            rows = await self.api.conversation_shares(target.id)
         except Exception as exc:
             self.fail_from_exception(exc)
             return
-        self.notify(f"Share link: {url}")
+
+        async def create(
+            expires_in_s: int | None, include_attachments: bool
+        ) -> tuple[str, list[dict[str, Any]]] | None:
+            return await self.apply_share(target.id, expires_in_s, include_attachments)
+
+        async def revoke(share_id: str) -> list[dict[str, Any]]:
+            await self.apply_share_revoke(share_id)
+            return await self.api.conversation_shares(target.id)
+
+        self.push_screen(ShareDialog(target.title, rows, create=create, revoke=revoke))
+
+    async def apply_share(
+        self, conversation_id: str, expires_in_s: int | None, include_attachments: bool
+    ) -> tuple[str, list[dict[str, Any]]] | None:
+        """A new link, copied to the clipboard; the dialog's list is read
+        again so it shows it."""
+        try:
+            url = await self.api.share_conversation(
+                conversation_id,
+                expires_in_s=expires_in_s,
+                include_attachments=include_attachments,
+            )
+        except ConflictError as exc:
+            self.notify(exc.message or "This conversation cannot be shared.")
+            return None
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return None
+        self.copy_to_clipboard(url)
+        self.notify(f"Share link copied: {url}")
+        try:
+            rows = await self.api.conversation_shares(conversation_id)
+        except Exception:
+            rows = []
+        return url, rows
 
     @work(group="action")
     async def action_export_markdown(self) -> None:
@@ -1457,6 +1527,10 @@ class MatterWaveApp(App[None]):
                 f"{model_id or 'This model'} cannot read images. Vision-capable models: {names}.",
                 severity="warning",
             )
+            return
+        refusal = await self._over_the_limits(filename, len(data))
+        if refusal:
+            self.notify(refusal, severity="warning")
             return
         conversation_id = self.conversation.id if self.conversation else None
         # The file belongs to the conversation it was attached in, even if
@@ -1528,6 +1602,28 @@ class MatterWaveApp(App[None]):
         ):
             self.send_after_scan = False
             self.action_send()
+
+    async def _over_the_limits(self, filename: str, size: int) -> str | None:
+        """Why the server would refuse this upload for its size, said before
+        the bytes go: bigger than one upload may be, or than what is left of
+        the quota. A deployment without the limits route checks nothing
+        here, and the server's own refusal stays the backstop."""
+        try:
+            limits = await self.api.attachment_limits()
+        except Exception:
+            return None
+        if limits.max_upload_bytes and size > limits.max_upload_bytes:
+            return (
+                f"{filename} is {human_size(size)}; one upload may be at most "
+                f"{human_size(limits.max_upload_bytes)}."
+            )
+        if limits.quota_bytes and size > limits.quota_remaining_bytes:
+            return (
+                f"{filename} is {human_size(size)}, and only "
+                f"{human_size(limits.quota_remaining_bytes)} of your "
+                f"{human_size(limits.quota_bytes)} storage is left."
+            )
+        return None
 
     def _attachment_key(self, attachment_id: str) -> str | None:
         """Which conversation's pending files hold this upload, if any."""
@@ -2470,13 +2566,16 @@ class MatterWaveApp(App[None]):
         False for an unknown one, whose text stays in the composer."""
         body = text[1:]
         first = body.split(" ", 1)[0]
-        if first not in ("role", "shell"):
+        if first not in ("role", "shell", "temp"):
             self.notify(
-                f"Unknown command /{first}: /role and /shell are the commands. "
+                f"Unknown command /{first}: /role, /shell and /temp are the commands. "
                 "Start with // to send a message that begins with /.",
                 severity="warning",
             )
             return False
+        if first == "temp":
+            self.set_temperature(body[len("temp") :].strip())
+            return True
         if first == "shell":
             if body.strip() != "shell":
                 self.notify("/shell takes no arguments; it only toggles.", severity="warning")
@@ -2548,6 +2647,35 @@ class MatterWaveApp(App[None]):
         self.notify(f"Role {name} applied.")
 
     # --- shell assistant -------------------------------------------------------------
+
+    def set_temperature(self, value: str) -> None:
+        """`/temp 0.3` sets the open conversation's temperature (0 to 2, the
+        platform's bounds) for its turns from now on; `/temp default` goes
+        back to the server's; `/temp` alone says which is in force."""
+        key = self._draft_key()
+        if not value:
+            current = self.temperatures.get(key)
+            self.notify(
+                f"Temperature {current:g} for this conversation."
+                if current is not None
+                else "The server's default temperature; /temp 0.3 sets one."
+            )
+            return
+        if value == "default":
+            self.temperatures.pop(key, None)
+            self.notify("Back to the server's default temperature.")
+            self.render_status()
+            return
+        try:
+            temperature = float(value)
+        except ValueError:
+            temperature = -1.0
+        if not 0.0 <= temperature <= 2.0:
+            self.notify("A temperature is a number from 0 to 2: /temp 0.3.", severity="warning")
+            return
+        self.temperatures[key] = temperature
+        self.notify(f"Temperature {temperature:g} for this conversation's turns.")
+        self.render_status()
 
     def toggle_shell(self) -> None:
         self.shell_mode = not self.shell_mode

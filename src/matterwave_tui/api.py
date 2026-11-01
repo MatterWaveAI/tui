@@ -30,9 +30,11 @@ from matterwave_sdk.errors import APIConnectionError, AuthenticationError
 from matterwave_sdk.frames import TERMINAL_FRAMES, ConversationFrame
 from matterwave_sdk.models import (
     Attachment,
+    AttachmentLimits,
     Conversation,
     ConversationContext,
     ConversationMessage,
+    CreatedShare,
     FiledReport,
     Me,
     MessageFeedback,
@@ -117,7 +119,13 @@ class ChatAPI(Protocol):
         self, conversation_id: str, message_id: str, title: str | None = None
     ) -> Conversation: ...
 
-    async def share_conversation(self, conversation_id: str) -> str: ...
+    async def share_conversation(
+        self,
+        conversation_id: str,
+        *,
+        expires_in_s: int | None = None,
+        include_attachments: bool = False,
+    ) -> str: ...
 
     async def conversation_instructions(self, conversation_id: str) -> dict[str, Any]: ...
 
@@ -213,11 +221,7 @@ class ChatAPI(Protocol):
 
     async def start_import(self, data: bytes, filename: str) -> dict[str, Any]: ...
 
-    async def list_imports(self) -> list[dict[str, Any]]: ...
-
     async def import_status(self, import_id: str) -> dict[str, Any]: ...
-
-    async def export_inline(self) -> dict[str, Any]: ...
 
     async def start_export(self) -> dict[str, Any]: ...
 
@@ -237,6 +241,8 @@ class ChatAPI(Protocol):
         self, data: bytes, filename: str, conversation_id: str | None = None
     ) -> Attachment: ...
 
+    async def attachment_limits(self) -> AttachmentLimits: ...
+
     async def attachment_scan_status(self, attachment_id: str) -> str: ...
 
     async def delete_attachment(self, attachment_id: str) -> None: ...
@@ -251,14 +257,24 @@ class ChatAPI(Protocol):
         content: str,
         model: str | None = None,
         attachment_ids: list[str] | None = None,
+        temperature: float | None = None,
     ) -> AsyncIterator[StreamItem]: ...
 
     def edit(
-        self, conversation_id: str, message_id: str, content: str, model: str | None = None
+        self,
+        conversation_id: str,
+        message_id: str,
+        content: str,
+        model: str | None = None,
+        temperature: float | None = None,
     ) -> AsyncIterator[StreamItem]: ...
 
     def regenerate(
-        self, conversation_id: str, message_id: str, model: str | None = None
+        self,
+        conversation_id: str,
+        message_id: str,
+        model: str | None = None,
+        temperature: float | None = None,
     ) -> AsyncIterator[StreamItem]: ...
 
     async def aclose(self) -> None: ...
@@ -491,10 +507,26 @@ class HttpChatAPI:
         message, which the caller then opens like any other."""
         return await self._writes.conversations.fork(conversation_id, message_id, title=title)
 
-    async def share_conversation(self, conversation_id: str) -> str:
-        """A read-only link to a snapshot of the active path, as a full URL
-        against this deployment."""
-        created = await self._writes.shares.create(conversation_id)
+    async def share_conversation(
+        self,
+        conversation_id: str,
+        *,
+        expires_in_s: int | None = None,
+        include_attachments: bool = False,
+    ) -> str:
+        """`POST /api/conversations/{id}/share`: a read-only link to a
+        snapshot of the active path, as a full URL against this deployment.
+        `expires_in_s` None lives until revoked; `include_attachments` lets
+        a reader open the files, where otherwise they see only the names.
+        The SDK's `create` has no `include_attachments`, so the body is
+        built here. A write: no retries."""
+        body = await self._app_json(
+            self._writes,
+            "POST",
+            _path("conversations", conversation_id, "share"),
+            {"expires_in_s": expires_in_s, "include_attachments": include_attachments},
+        )
+        created = CreatedShare.from_dict(body)
         return str(self._reads.base_url).rstrip("/") + created.path
 
     async def conversation_instructions(self, conversation_id: str) -> dict[str, Any]:
@@ -726,26 +758,12 @@ class HttpChatAPI:
             files={"file": (filename, data, "application/octet-stream")},
         )
 
-    async def list_imports(self) -> list[dict[str, Any]]:
-        """`GET /api/me/imports`: the caller's recent imports, newest
-        first."""
-        body = await self._app_json(self._reads, "GET", _path("me", "imports"))
-        rows = body.get("data")
-        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
-
     async def import_status(self, import_id: str) -> dict[str, Any]:
         """`GET /api/me/imports/{id}`: where one import stands — `pending`,
         `running`, `done` or `failed`, with the counts of what it did."""
         return await self._app_json(self._reads, "GET", _path("me", "imports", import_id))
 
     # --- the account's data export ---------------------------------------------
-
-    async def export_inline(self) -> dict[str, Any]:
-        """`GET /api/me/export`: everything this account holds, as one
-        JSON document built inside the request. A big account holds the
-        request open for a while; the app drives the job-based
-        `start_export` instead, this one for the small and the scripted."""
-        return await self._app_json(self._reads, "GET", _path("me", "export"))
 
     async def start_export(self) -> dict[str, Any]:
         """`POST /api/me/export` (202): the same document, built by the
@@ -814,6 +832,12 @@ class HttpChatAPI:
         return await self._writes.attachments.upload(
             data, filename, conversation_id=conversation_id
         )
+
+    async def attachment_limits(self) -> AttachmentLimits:
+        """`GET /api/attachments/limits/me` by way of the SDK: the most one
+        upload may be and what is left of the caller's quota, so a file
+        too big is said before its bytes are sent."""
+        return await self._reads.attachments.limits()
 
     async def attachment_scan_status(self, attachment_id: str) -> str:
         """`GET /api/attachments/{id}/scan`: where the malware scan of one of
@@ -891,25 +915,44 @@ class HttpChatAPI:
         content: str,
         model: str | None = None,
         attachment_ids: list[str] | None = None,
+        temperature: float | None = None,
     ) -> AsyncIterator[StreamItem]:
+        """A turn; `temperature` None leaves the server's default."""
         return self._stream(
             self._writes.conversations.send(
-                conversation_id, content, model=model, attachment_ids=attachment_ids
+                conversation_id,
+                content,
+                model=model,
+                attachment_ids=attachment_ids,
+                temperature=temperature,
             )
         )
 
     def edit(
-        self, conversation_id: str, message_id: str, content: str, model: str | None = None
+        self,
+        conversation_id: str,
+        message_id: str,
+        content: str,
+        model: str | None = None,
+        temperature: float | None = None,
     ) -> AsyncIterator[StreamItem]:
         return self._stream(
-            self._writes.conversations.edit(conversation_id, message_id, content, model=model)
+            self._writes.conversations.edit(
+                conversation_id, message_id, content, model=model, temperature=temperature
+            )
         )
 
     def regenerate(
-        self, conversation_id: str, message_id: str, model: str | None = None
+        self,
+        conversation_id: str,
+        message_id: str,
+        model: str | None = None,
+        temperature: float | None = None,
     ) -> AsyncIterator[StreamItem]:
         return self._stream(
-            self._writes.conversations.regenerate(conversation_id, message_id, model=model)
+            self._writes.conversations.regenerate(
+                conversation_id, message_id, model=model, temperature=temperature
+            )
         )
 
     # --- the stream ----------------------------------------------------------

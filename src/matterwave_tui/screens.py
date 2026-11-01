@@ -1274,6 +1274,141 @@ class Shares(ModalScreen[None]):
         self.dismiss(None)
 
 
+# How long a new share link lives, as the dialog offers it: (label, seconds,
+# None for until revoked). The platform takes any span from a minute to a
+# year.
+SHARE_EXPIRIES: tuple[tuple[str, int | None], ...] = (
+    ("never (until revoked)", None),
+    ("in 1 hour", 60 * 60),
+    ("in 1 day", 24 * 60 * 60),
+    ("in 7 days", 7 * 24 * 60 * 60),
+    ("in 30 days", 30 * 24 * 60 * 60),
+)
+
+
+class ShareDialog(ModalScreen[None]):
+    """Sharing the open conversation: Enter on "Expires" cycles how long a
+    new link lives, on "Attachments" toggles whether readers can open the
+    files, on "Create the link" makes it -- the link is shown and copied
+    -- and `x` revokes the highlighted one of the links made for this
+    conversation, after a confirm. Esc closes."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss_none", "Close"),
+        Binding("x,delete", "revoke", "Revoke"),
+    ]
+    DEFAULT_CSS = """
+    ShareDialog { align: center middle; }
+    ShareDialog > Vertical { width: 80; height: auto; max-height: 85%;
+        border: round $accent; background: $surface; padding: 0 1; }
+    """
+
+    def __init__(
+        self,
+        title: str,
+        rows: list[dict[str, Any]],
+        *,
+        create: Callable[[int | None, bool], Awaitable[tuple[str, list[dict[str, Any]]] | None]],
+        revoke: Callable[[str], Awaitable[list[dict[str, Any]]]],
+    ) -> None:
+        super().__init__()
+        self.title_text = title
+        self.rows = rows
+        self._create = create
+        self._revoke = revoke
+        self.expiry = 0
+        self.include_attachments = False
+        self.link = ""
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(f"Share “{self.title_text}”", markup=False)
+            yield OptionList(*self._options(), id="share-options")
+            yield Static("", id="share-link", markup=False)
+            yield Static(
+                "Enter changes or creates, x revokes a link, Esc closes.",
+                classes="hint",
+                markup=False,
+            )
+
+    def on_mount(self) -> None:
+        self.query_one("#share-options", OptionList).focus()
+
+    def _options(self) -> list[Option]:
+        options = [
+            Option(f"Expires: {SHARE_EXPIRIES[self.expiry][0]}", id="expiry"),
+            Option(
+                "Attachments: "
+                + ("readers can open them" if self.include_attachments else "names only"),
+                id="attachments",
+            ),
+            Option("Create the link", id="create"),
+            Option("— Links to this conversation —", id="head", disabled=True),
+        ]
+        for i, row in enumerate(self.rows):
+            status = str(row.get("status") or "active")
+            views = row.get("view_count")
+            label = f"{str(row.get('created_at') or '')[:10]} · {status}"
+            if isinstance(views, int):
+                label += f" · {views} views"
+            if row.get("expires_at"):
+                label += f" · expires {str(row.get('expires_at'))[:10]}"
+            options.append(Option(label, id=f"share-{i}"))
+        return options
+
+    def _redraw(self) -> None:
+        option_list = self.query_one("#share-options", OptionList)
+        keep = option_list.highlighted
+        option_list.set_options(self._options())
+        if keep is not None and option_list.option_count:
+            option_list.highlighted = min(keep, option_list.option_count - 1)
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        option_id = event.option.id or ""
+        if option_id == "expiry":
+            self.expiry = (self.expiry + 1) % len(SHARE_EXPIRIES)
+            self._redraw()
+        elif option_id == "attachments":
+            self.include_attachments = not self.include_attachments
+            self._redraw()
+        elif option_id == "create":
+            self.run_worker(self._created(), exclusive=True)
+
+    async def _created(self) -> None:
+        made = await self._create(SHARE_EXPIRIES[self.expiry][1], self.include_attachments)
+        if made is None:
+            return
+        self.link, self.rows = made
+        self.query_one("#share-link", Static).update(f"Link (copied): {self.link}")
+        self._redraw()
+
+    def action_revoke(self) -> None:
+        option_list = self.query_one("#share-options", OptionList)
+        index = option_list.highlighted
+        option_id = option_list.get_option_at_index(index).id if index is not None else ""
+        if not option_id or not option_id.startswith("share-"):
+            self.notify("Highlight a link to revoke it.")
+            return
+        row = self.rows[int(option_id.removeprefix("share-"))]
+        share_id = str(row.get("id") or "")
+        if row.get("status") != "active" or not share_id:
+            self.notify("That link is not live.")
+            return
+
+        def chosen(confirmation: bool | None) -> None:
+            if confirmation:
+                self.run_worker(self._revoked(share_id), exclusive=True)
+
+        self.app.push_screen(Confirm("Revoke this link? It stops working at once."), chosen)
+
+    async def _revoked(self, share_id: str) -> None:
+        self.rows = await self._revoke(share_id)
+        self._redraw()
+
+    def action_dismiss_none(self) -> None:
+        self.dismiss(None)
+
+
 class Library(ModalScreen[tuple[str, str] | None]):
     """The folders and tags, and the open conversation's place among them:
     `f` makes a folder, `t` makes a tag, `m` files the conversation in the

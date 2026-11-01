@@ -98,7 +98,7 @@ PowerShell or cmd.exe on Windows (whichever started the TUI) and `$SHELL` elsewh
 | `a` | anywhere | archive / unarchive the open conversation |
 | `d` | anywhere | delete the open conversation (asks first) |
 | `f` | transcript | fork the conversation from the selected message |
-| `s` | anywhere | create a share link for the conversation |
+| `s` | anywhere | share the conversation: how long the link lives, whether readers can open the attachments, the link copied; and its links, to revoke |
 | `S` | anywhere | every share link you made, to revoke |
 | `w` | anywhere | export the conversation to a Markdown file in the working directory; an existing file is never overwritten (`name (2).md`) |
 | `i` | anywhere | attach a file (its path, quoted or not, `~` allowed); it goes with this conversation's next message |
@@ -126,6 +126,7 @@ Inside the dialogs:
 | Library (`l`) | `f` new folder, `t` new tag, `m` file the chat in the highlighted folder (again: take it out), `Space` toggle the highlighted tag, `r` rename the highlighted folder, `x` or `Delete` delete the highlighted folder or tag (asks first), `Enter` show only that folder or tag in the sidebar (again: all) |
 | Shares (`S`) | `x` revoke the highlighted link |
 | Prompt roles (`L`) | `Enter` apply, `a` add, `d` delete |
+| Share (`s`) | `Enter` change the expiry or the attachments, or create the link; `x` or `Delete` revoke the highlighted link (asks first) |
 | Pending files (`I`) | `Enter`, `x` or `Delete` take the highlighted file off |
 | Account (`U`) | `Enter` toggle a preference or edit the locale or an instruction, `x` or `Delete` revoke the highlighted key or browser (asks first), `o` rotate the highlighted key and show its new secret once; this terminal's own key is left to `logout` |
 | Instructions (`t`), feedback (`b`) | `Ctrl+T` save |
@@ -144,7 +145,8 @@ among them):
 Typing while an answer streams queues the prompt; it sends itself when the answer finishes, and
 `Esc` stops the stream and puts it back in the composer. A leading `/` in the composer is a
 command, not a message: `/role name` applies a saved prompt role, `/role --add name` makes one,
-`/shell` toggles the shell assistant. An unknown command stays in the composer; start a message
+`/shell` toggles the shell assistant, `/temp 0.3` sets this conversation's temperature (0 to 2;
+`/temp default` goes back to the server's, `/temp` says which is in force). An unknown command stays in the composer; start a message
 with `//` to send it with a single leading slash (`//etc/hosts is empty` sends `/etc/hosts is empty`).
 
 ## What the screen shows

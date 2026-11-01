@@ -12,6 +12,7 @@ from matterwave_sdk import frames as fr
 from matterwave_sdk.errors import ConflictError
 from matterwave_sdk.models import (
     Attachment,
+    AttachmentLimits,
     Conversation,
     ConversationContext,
     ConversationMessage,
@@ -205,6 +206,11 @@ class FakeAPI:
         self.archives: list[tuple[str, bool]] = []
         self.forks: list[tuple[str, str]] = []
         self.shares: list[str] = []
+        self.share_options: list[tuple[int | None, bool]] = []
+        self.temperatures_sent: list[float | None] = []
+        self.limits = AttachmentLimits(
+            max_upload_bytes=1000, quota_bytes=5000, quota_used_bytes=0, quota_remaining_bytes=5000
+        )
         self.uploads: list[tuple[str, bytes]] = []
         # The malware scan: what an upload answers, then what each poll of
         # its scan answers in turn (the last one repeats); `scan_gate`, when
@@ -422,9 +428,16 @@ class FakeAPI:
         self.conversations.insert(0, forked)
         return forked
 
-    async def share_conversation(self, conversation_id: str) -> str:
+    async def share_conversation(
+        self,
+        conversation_id: str,
+        *,
+        expires_in_s: int | None = None,
+        include_attachments: bool = False,
+    ) -> str:
         self._refuse_temporary(conversation_id, "shared")
         self.shares.append(conversation_id)
+        self.share_options.append((expires_in_s, include_attachments))
         self.share_rows.insert(
             0,
             share_row(
@@ -490,6 +503,9 @@ class FakeAPI:
                 "created_at": "1",
             }
         )
+
+    async def attachment_limits(self) -> AttachmentLimits:
+        return self.limits
 
     async def attachment_scan_status(self, attachment_id: str) -> str:
         if self.scan_gate is not None:
@@ -681,9 +697,6 @@ class FakeAPI:
         self.import_rows.append(row)
         return dict(row)
 
-    async def list_imports(self) -> list[dict[str, Any]]:
-        return [dict(row) for row in self.import_rows]
-
     async def import_status(self, import_id: str) -> dict[str, Any]:
         self.import_status_calls.append(import_id)
         for row in self.import_rows:
@@ -699,9 +712,6 @@ class FakeAPI:
                     row["messages_created"] = 9
                 return dict(row)
         raise LookupError(import_id)
-
-    async def export_inline(self) -> dict[str, Any]:
-        return {"exported_at": "2026-10-30T00:00:00Z", "conversations": []}
 
     async def start_export(self) -> dict[str, Any]:
         self.exports_started.append("asked")
@@ -867,18 +877,25 @@ class FakeAPI:
             self.streams_closed += 1
 
     def send(
-        self, conversation_id, content, model=None, attachment_ids=None
+        self, conversation_id, content, model=None, attachment_ids=None, temperature=None
     ) -> AsyncIterator[StreamItem]:
         self.sent.append((conversation_id, content, model))
         self.sent_attachment_ids.append(attachment_ids)
+        self.temperatures_sent.append(temperature)
         return self._play()
 
-    def edit(self, conversation_id, message_id, content, model=None) -> AsyncIterator[StreamItem]:
+    def edit(
+        self, conversation_id, message_id, content, model=None, temperature=None
+    ) -> AsyncIterator[StreamItem]:
         self.sent.append((conversation_id, f"edit:{message_id}:{content}", model))
+        self.temperatures_sent.append(temperature)
         return self._play()
 
-    def regenerate(self, conversation_id, message_id, model=None) -> AsyncIterator[StreamItem]:
+    def regenerate(
+        self, conversation_id, message_id, model=None, temperature=None
+    ) -> AsyncIterator[StreamItem]:
         self.sent.append((conversation_id, f"regen:{message_id}", model))
+        self.temperatures_sent.append(temperature)
         return self._play()
 
     async def aclose(self) -> None:

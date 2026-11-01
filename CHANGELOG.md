@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Every option the platform takes for a turn, a share and an upload:
+  `/temp 0.3` sets the open conversation's temperature for its turns
+  (`/temp default` goes back to the server's); `s` opens a share dialog
+  that sets how long the link lives and whether readers can open the
+  attachments, copies the new link, and lists the conversation's links to
+  revoke; a file larger than one upload may be, or than the storage left,
+  is refused by name before its bytes are sent.
 - An account screen (`U`, or "Account…" on the palette): the plan,
   billing and any moderation action in force; your API keys, to rotate
   (the new secret shown once) or revoke, with this terminal's own key

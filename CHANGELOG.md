@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The README documents every key, every dialog's keys, the palette
+  entries, the environment variables and the extras, and the tests check
+  it against the bindings and the code; the install section says how to
+  install from the repository, since neither package is on PyPI.
 - One version source: `pyproject.toml` reads it from the package, and the
   package ships `py.typed`, as its "Typing :: Typed" classifier claims.
 - `uv.lock` is committed, and `matterwave-sdk` (0.5.0 or later; it is not
@@ -102,9 +106,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   folder, Space toggles a tag on it — and the sidebar's captions carry
   the ` 📁 folder · #tag` suffixes as the server reports them.
 - Notifications pagination and the unread filter: `u` shows only
-  the unread ones, `n`/`p` page and widen the limit window (capped at the
-  route's 100), and the status line's unread badge follows each answer.
-
+  the unread ones, and `n`/`p` page and widen the limit window (capped at
+  the route's 100). (This entry also said the unread badge followed each
+  answer; it was read only at start-up. It does now: see Unreleased.)
 - The account-wide export: "Export this account's data…" on the command
   palette queues `POST /api/me/export`, polls the job to `ready` the way
   an import is watched, and saves the bytes behind its fresh signed

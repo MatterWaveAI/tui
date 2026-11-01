@@ -5,44 +5,23 @@ the same `/api` routes and the same event stream.
 
 ## Install
 
-```sh
-uvx matterwave-tui                 # run without installing
-pipx install matterwave-tui        # or install it once
-```
+`matterwave-tui` and the `matterwave-sdk` it is built on are not on PyPI. Install it from its
+repository with [uv](https://docs.astral.sh/uv/), which also fetches the SDK from the commit the
+lockfile pins:
 
-Both install from the [MatterWaveAI](https://pypi.org/org/MatterWaveAI/) org on PyPI.
+```sh
+uv tool install "git+https://github.com/MatterWaveAI/tui"            # the matterwave-tui command
+uv tool install "matterwave-tui[images] @ git+https://github.com/MatterWaveAI/tui"   # with an extra
+```
 
 From a checkout of this repo: `uv sync && uv run matterwave-tui`.
 
-## One-shot and scripting
+Two extras add what a terminal may not need:
 
-Without the interface: `matterwave-tui -p "two plus two?"` prints the answer to stdout and exits
-(`-m` picks the model; in the app, `-m` is the model for every turn until you pick another). A flag
-the command does not use (`-m` with `logout`, say) is named on stderr rather than ignored silently. A piped-in stdin is the prompt, so scripts work the usual way:
-
-```sh
-cat notes.md | matterwave-tui -m grt-nano
-echo "explain this trace" | matterwave-tui -p > answer.txt
-```
-
-stdout carries the answer and nothing else: a device sign-in's URL and code, and every note, go to
-stderr. The exit status says how the turn ended:
-
-| Status | Meaning |
+| Extra | Adds |
 |---|---|
-| 0 | the whole answer is on stdout |
-| 1 | the turn failed (network, gateway, timeout, an unexpected answer) |
-| 2 | the command line was wrong, or there was nothing to send |
-| 3 | the platform refused: moderation, budget, plan, rate limit, sign-in |
-| 4 | the answer was cut short; what arrived is on stdout |
-
-`--shell` starts the shell assistant (`/shell` toggles it in the app). Each message tells the
-model which OS and shell the command is for — the message starts with `[shell assistant]` and
-says so, in the history too — and the answer is a proposed command, shown in a confirm that runs
-it only when you press Enter. Nothing is ever executed without that. With `-p` the confirm is a
-`[y/N]` on the terminal; a prompt piped in leaves no terminal to ask, so nothing runs. The shell is
-PowerShell or cmd.exe on Windows (whichever started the TUI) and `$SHELL` elsewhere;
-`MATTERWAVE_SHELL=pwsh` (or `cmd`, `/bin/zsh`, …) names it outright.
+| `images` | Pillow: sixel images, and JPEG/GIF/WebP on the kitty protocol (PNG needs nothing) |
+| `dictation` | sounddevice: dictation from the microphone (without it, dictation transcribes a file) |
 
 ## Sign in
 
@@ -66,6 +45,37 @@ On a 401 the client tries once more with a fresh credential (one another termina
 device sign-in shown in the app), then reports the session as expired. A key passed with `--key`
 or the environment is never replaced behind your back.
 
+## One-shot and scripting
+
+Without the interface: `matterwave-tui -p "two plus two?"` prints the answer to stdout and exits
+(`-m` picks the model; in the app, `-m` is the model for every turn until you pick another). A
+piped-in stdin is the prompt, so scripts work the usual way:
+
+```sh
+cat notes.md | matterwave-tui -m grt-nano
+echo "explain this trace" | matterwave-tui > answer.txt
+```
+
+stdout carries the answer and nothing else: a device sign-in's URL and code, and every note, go to
+stderr. A flag the command does not use (`-m` with `logout`, say) is named there rather than
+ignored silently. The exit status says how the turn ended:
+
+| Status | Meaning |
+|---|---|
+| 0 | the whole answer is on stdout |
+| 1 | the turn failed (network, gateway, timeout, an unexpected answer) |
+| 2 | the command line was wrong, or there was nothing to send |
+| 3 | the platform refused: moderation, budget, plan, rate limit, sign-in |
+| 4 | the answer was cut short; what arrived is on stdout |
+
+`--shell` starts the shell assistant (`/shell` toggles it in the app). Each message tells the
+model which OS and shell the command is for — the message starts with `[shell assistant]` and
+says so, in the history too — and the answer is a proposed command, shown in a confirm that runs
+it only when you press Enter. Nothing is ever executed without that. With `-p` the confirm is a
+`[y/N]` on the terminal; a prompt piped in leaves no terminal to ask, so nothing runs. The shell is
+PowerShell or cmd.exe on Windows (whichever started the TUI) and `$SHELL` elsewhere;
+`MATTERWAVE_SHELL=pwsh` (or `cmd`, `/bin/zsh`, …) names it outright.
+
 ## Keys
 
 | Key | Where | Does |
@@ -81,21 +91,52 @@ or the environment is never replaced behind your back.
 | `m` | transcript | model picker |
 | `n` | transcript | new conversation: Enter a regular one, `t` a temporary one (deleted 24 h after its last message), Esc none |
 | `/` | transcript | search conversations |
+| `t` | anywhere | this conversation's own instructions, edited against the effective prompt |
+| `b` | transcript | reasons and a comment for the selected (or last) answer's rating |
 | `F2` | anywhere | rename the open conversation |
 | `p` | anywhere | pin / unpin the open conversation |
 | `a` | anywhere | archive / unarchive the open conversation |
 | `d` | anywhere | delete the open conversation (asks first) |
 | `f` | transcript | fork the conversation from the selected message |
 | `s` | anywhere | create a share link for the conversation |
+| `S` | anywhere | every share link you made, to revoke |
 | `w` | anywhere | export the conversation to a Markdown file in the working directory; an existing file is never overwritten (`name (2).md`) |
 | `i` | anywhere | attach a file (its path, quoted or not, `~` allowed); it goes with this conversation's next message |
 | `I` | anywhere | take a pending file off the next message (and delete the upload) |
+| `v` | anywhere | dictate into the composer: the microphone with the `dictation` extra, an audio file without |
 | `o` | anywhere | cycle the sidebar list: default → pinned → archived → all |
 | `l` | anywhere | the library: folders and tags for the open conversation |
 | `L` | anywhere | prompt roles: apply, add or delete a named system prompt |
+| `R` | anywhere | report the conversation, or the selected answer, as unsafe or unhelpful |
+| `N` | anywhere | the notifications inbox |
+| `A` | anywhere | dismiss the announcements banner (a critical one stays) |
 | `y` | transcript | copy the selected message (or the last answer) to the clipboard |
 | `Y` | transcript | copy just the fenced code blocks of that message |
 | `Ctrl+Q` | anywhere | quit |
+
+Letter keys apply when focus is not in the composer or the search box; `Esc` gets you there. Each
+answer also carries two thumbs: a click rates it, a second click on the same thumb takes it back.
+
+Inside the dialogs:
+
+| Dialog | Keys |
+|---|---|
+| Notifications (`N`) | `r` read the highlighted one, `a` read all, `u` unread only, `n` / `p` next and previous page |
+| Library (`l`) | `f` new folder, `t` new tag, `m` file the chat in the highlighted folder (again: take it out), `Space` toggle the highlighted tag |
+| Shares (`S`) | `x` revoke the highlighted link |
+| Prompt roles (`L`) | `Enter` apply, `a` add, `d` delete |
+| Pending files (`I`) | `Enter`, `x` or `Delete` take the highlighted file off |
+| Instructions (`t`), feedback (`b`) | `Ctrl+T` save |
+| Every dialog | `Esc` closes it without a change |
+
+The command palette (`Ctrl+P`) adds what has no key of its own, beside Textual's own (the theme
+among them):
+
+- **Switch account…**
+- **Import a ChatGPT or Claude export…**
+- **Export this account's data…** — the whole account as one JSON file, saved beside the terminal
+- **Dictate audio…**
+- **Prompt roles…**
 
 Typing while an answer streams queues the prompt; it sends itself when the answer finishes, and
 `Esc` stops the stream and puts it back in the composer. A leading `/` in the composer is a
@@ -103,33 +144,44 @@ command, not a message: `/role name` applies a saved prompt role, `/role --add n
 `/shell` toggles the shell assistant. An unknown command stays in the composer; start a message
 with `//` to send it with a single leading slash (`//etc/hosts is empty` sends `/etc/hosts is empty`).
 
-Letter keys apply when focus is not in the composer or the search box; `Esc` gets you there.
+## What the screen shows
 
-The status line also carries the org's balance for the period (`usage used/included (%)`, from
-`/api/me/usage`, read again after every answer along with the overage and the unread count) and any files attached but not sent yet. On a deployment
-that scans uploads, a file shows `(scanning…)` until the scan is clean; a message sent before then
-waits for it, and a file the scan rejects is dropped with its name said. An image in a
-message is drawn in the transcript where the terminal can show pictures: kitty, Ghostty and
-WezTerm (the kitty protocol), iTerm2 (its inline images), and foot, mlterm, Konsole, contour and
-Windows Terminal (sixel, which needs the `images` extra: `pip install matterwave-tui[images]`).
-`MATTERWAVE_IMAGES=off` turns it off and `kitty`, `iterm2` or `sixel` forces one. Anywhere else,
-and whenever a picture cannot be drawn, it is an `[image: filename]` placeholder line — the same
-line the Markdown export writes. A document is always its `[document: filename]` line.
+The status line shows the model, the context meter (`used/window` from the last turn plus an
+estimate of the draft), the org's usage for the period and any overage against its cap, the unread
+notifications, the files attached but not sent yet, online / offline, the wait left on a rate
+limit, and the reference of the last error. Usage, overage and the unread count are read again
+after every answer. A failure shows the same copy as the web app and always the request reference
+to quote; a key's per-minute limit (429) and a model the plan does not include (402) are states of
+their own, since neither is the budget.
+
+On a deployment that scans uploads, a file shows `(scanning…)` until the scan is clean; a message
+sent before then waits for it, and a file the scan rejects is dropped with its name said.
+
+An image in a message is drawn in the transcript where the terminal can show pictures: kitty,
+Ghostty and WezTerm (the kitty protocol), iTerm2 (its inline images), and foot, mlterm, Konsole,
+contour and Windows Terminal (sixel, which needs the `images` extra). Anywhere else, and whenever a
+picture cannot be drawn, it is an `[image: filename]` placeholder line — the same line the Markdown
+export writes. A document is always its `[document: filename]` line.
 
 A draft is kept per conversation while the app runs. The model picker groups models as the web
 does — GRT, partner, research preview — and shows a model your plan does not include with the plan
 that has it, without letting you pick it. A model you pick is kept on the conversation
-(`PATCH /api/conversations/{id}`), so the web app opens it on the same model.
-
-The status line shows the model, the context meter (`used/window` from the last turn plus an
-estimate of the draft), online / offline, the wait left on a rate limit, and the reference of the
-last error. A failure shows the same copy as the web app and always the request reference to
-quote; a key's per-minute limit (429) and a model the plan does not include (402) are states of
-their own, since neither is the budget.
+(`PATCH /api/conversations/{id}`), so the web app opens it on the same model. Announcements show
+as a banner at start-up; the ones you dismiss stay dismissed on this device.
 
 Stopping an answer with `Esc` closes the stream; the server keeps what it had sent as a truncated
 turn, which is read back. A stream that drops is resumed once by `Last-Event-ID` (the SDK's own
 resume) before it is reported as cut off.
+
+## Environment
+
+| Variable | Does |
+|---|---|
+| `MATTERWAVE_BASE_URL` | the deployment, when `--base-url` is not given |
+| `MATTERWAVE_API_KEY` | an `mw_` key for this shell, used instead of the keyring and never stored |
+| `MATTERWAVE_IMAGES` | `off` never draws images; `kitty`, `iterm2` or `sixel` forces a protocol; unset or `auto` detects |
+| `MATTERWAVE_SHELL` | the shell the shell assistant writes and runs commands for (`pwsh`, `cmd`, `/bin/zsh`, …) |
+| `MATTERWAVE_STATE_DIR` | where the dismissed announcements and the prompt roles are kept (else `$XDG_STATE_HOME`, else `~/.local/state`) |
 
 ## Development
 
@@ -141,9 +193,9 @@ pre-commit install   # once per clone: gitleaks refuses a commit that adds a sec
 
 CI runs the same checks, the suite on Linux and Windows, and a gitleaks scan of the whole history.
 
-The wire is the Python SDK's (`matterwave-sdk` from your package index): `client.conversations.*`,
-its typed frames and its stream resume, plus `client.attachments`, `client.shares` and
-`client.usage` for the rest. The routes the SDK has no method for yet (`/api/models`, the
-conversation delete, pin and archive) go through the same client. This package keeps what is
-terminal-specific: the tree in memory, the failure copy, and the one re-login a 401 gets before
-it stands.
+The wire is the Python SDK's: `client.conversations.*` with its typed frames and its stream
+resume, and the typed resources for the rest (models, attachments, shares, library, notifications,
+announcements, budget, usage, keys, feedback). The few routes the SDK has no method for (an
+upload's scan status, accounts, imports, speech, the account export) go through the same client.
+This package keeps what is terminal-specific: the tree in memory, the failure copy, and the one
+re-login a 401 gets before it stands.

@@ -110,6 +110,7 @@ PowerShell or cmd.exe on Windows (whichever started the TUI) and `$SHELL` elsewh
 | `x` | transcript | show / hide the messages a summary replaced |
 | `c` | transcript | compact the conversation now |
 | `m` | transcript | model picker |
+| `M` | transcript | preset picker (when the organisation offers presets) |
 | `n` | transcript | new conversation: Enter a regular one, `t` a temporary one (deleted 24 h after its last message), Esc none |
 | `/` | transcript | search conversations, titles and messages, best match first; the last row, **More results…**, reads the next page |
 | `t` | anywhere | this conversation's own instructions, edited against the effective prompt |
@@ -161,6 +162,8 @@ Inside the dialogs:
 The command palette (`Ctrl+P`) adds what has no key of its own, beside Textual's own (the theme
 among them):
 
+- **Choose model…** — the same picker as `m`
+- **Choose preset…** — the same picker as `M`, when the organisation offers presets
 - **Account…** — the same screen as `U`
 - **Switch account…**
 - **Import a ChatGPT or Claude export…**

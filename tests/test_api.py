@@ -1149,3 +1149,93 @@ async def test_a_transcribe_clip_is_multipart_with_the_language_beside_it():
 
     await make(bare).transcribe(b"CLIP", "clip.wav", "audio/wav")
     assert 'name="language"' not in seen[0].content.decode("utf-8", "replace")
+
+
+PRESET_ROW = {
+    "id": "p_support",
+    "org_id": "o1",
+    "slug": "support",
+    "name": "Support triage",
+    "description": "Answers billing and account questions.",
+    "welcome_message": "What account or invoice is this about?",
+    "model": "grt-max",
+    "instructions": "Be brief.",
+    "tools": [],
+    "limits": {},
+    "created_at": "2026-11-01T00:00:00Z",
+    "updated_at": "2026-11-01T00:00:00Z",
+    "deleted_at": None,
+}
+
+
+@pytest.mark.asyncio
+async def test_presets_list_get_and_conversation_preset_go_through_the_sdk():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        path, method = request.url.path, request.method
+        if path == "/api/org/presets" and method == "GET":
+            return httpx.Response(200, json={"data": [PRESET_ROW]})
+        if path == "/api/org/presets/p_old" and method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    **PRESET_ROW,
+                    "id": "p_old",
+                    "name": "Retired helper",
+                    "deleted_at": "2026-11-01T01:00:00Z",
+                },
+            )
+        if path == "/api/conversations" and method == "POST":
+            body = json.loads(request.content)
+            return httpx.Response(
+                201,
+                json={
+                    **CONV,
+                    "preset_id": body.get("preset_id"),
+                    "preset": {"id": body["preset_id"], "name": "Support triage"}
+                    if body.get("preset_id")
+                    else None,
+                },
+            )
+        if path == "/api/conversations/c1" and method == "PATCH":
+            body = json.loads(request.content)
+            pid = body.get("preset_id")
+            return httpx.Response(
+                200,
+                json={
+                    **CONV,
+                    "preset_id": pid,
+                    "preset": {"id": pid, "name": "Support triage"} if pid else None,
+                },
+            )
+        return httpx.Response(404, json={"detail": path})
+
+    api = make(handler)
+    rows = await api.presets()
+    assert [r["id"] for r in rows] == ["p_support"]
+    assert "request_id" not in rows[0]
+    retired = await api.preset("p_old")
+    assert (retired["id"], retired["name"], retired["deleted_at"]) == (
+        "p_old",
+        "Retired helper",
+        "2026-11-01T01:00:00Z",
+    )
+    created = await api.create_conversation(preset_id="p_support")
+    assert created.preset_id == "p_support"
+    assert created.preset is not None and created.preset.name == "Support triage"
+    picked = await api.set_preset("c1", "p_support")
+    assert picked.preset_id == "p_support"
+    cleared = await api.set_preset("c1", None)
+    assert cleared.preset_id is None and cleared.preset is None
+    assert [(r.method, r.url.path) for r in seen] == [
+        ("GET", "/api/org/presets"),
+        ("GET", "/api/org/presets/p_old"),
+        ("POST", "/api/conversations"),
+        ("PATCH", "/api/conversations/c1"),
+        ("PATCH", "/api/conversations/c1"),
+    ]
+    assert json.loads(seen[2].content) == {"preset_id": "p_support"}
+    assert json.loads(seen[3].content) == {"preset_id": "p_support"}
+    assert json.loads(seen[4].content) == {"preset_id": None}

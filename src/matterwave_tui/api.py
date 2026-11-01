@@ -93,6 +93,10 @@ class ChatAPI(Protocol):
 
     async def models(self) -> dict[str, Any]: ...
 
+    async def presets(self) -> list[dict[str, Any]]: ...
+
+    async def preset(self, preset_id: str) -> dict[str, Any]: ...
+
     async def list_conversations(self, filter: str = "default") -> list[Conversation]: ...
 
     async def all_conversations(self, filter: str = "default") -> list[Conversation]: ...
@@ -100,7 +104,11 @@ class ChatAPI(Protocol):
     async def search(self, query: str, cursor: str | None = None) -> SearchPage: ...
 
     async def create_conversation(
-        self, title: str | None = None, model: str | None = None, temporary: bool = False
+        self,
+        title: str | None = None,
+        model: str | None = None,
+        temporary: bool = False,
+        preset_id: str | None = None,
     ) -> Conversation: ...
 
     async def tree(self, conversation_id: str) -> Conversation: ...
@@ -108,6 +116,8 @@ class ChatAPI(Protocol):
     async def set_active_leaf(self, conversation_id: str, message_id: str) -> Conversation: ...
 
     async def set_default_model(self, conversation_id: str, model: str | None) -> Conversation: ...
+
+    async def set_preset(self, conversation_id: str, preset_id: str | None) -> Conversation: ...
 
     async def rename_conversation(self, conversation_id: str, title: str) -> Conversation: ...
 
@@ -460,6 +470,17 @@ class HttpChatAPI:
             "default_model": listed.default_model,
         }
 
+    async def presets(self) -> list[dict[str, Any]]:
+        """`GET /api/org/presets` by way of the SDK: the org's live presets,
+        flattened to the dicts the picker reads."""
+        listed = await self._reads.presets.list()
+        return [_row_dict(preset) for preset in listed.data]
+
+    async def preset(self, preset_id: str) -> dict[str, Any]:
+        """`GET /api/org/presets/{id}` by way of the SDK: one preset, a
+        deleted one included (`deleted_at` says so)."""
+        return _row_dict(await self._reads.presets.get(preset_id))
+
     async def list_conversations(self, filter: str = "default") -> list[Conversation]:
         return (await self._reads.conversations.list(filter=filter)).data
 
@@ -479,13 +500,20 @@ class HttpChatAPI:
         return SearchPage([hit.conversation for hit in page.data], page.next_cursor)
 
     async def create_conversation(
-        self, title: str | None = None, model: str | None = None, temporary: bool = False
+        self,
+        title: str | None = None,
+        model: str | None = None,
+        temporary: bool = False,
+        preset_id: str | None = None,
     ) -> Conversation:
         """`POST /api/conversations` by way of the SDK. `temporary` is fixed
         at creation, and the key is sent only when it is on. A write: no
         retries."""
         return await self._writes.conversations.create(
-            title=title, model=model, temporary=True if temporary else None
+            title=title,
+            model=model,
+            temporary=True if temporary else None,
+            preset_id=preset_id,
         )
 
     async def tree(self, conversation_id: str) -> Conversation:
@@ -499,6 +527,12 @@ class HttpChatAPI:
         it on the same model. None clears it. A PATCH that lands twice sets
         the same value twice, so it may take the reads' retries."""
         return await self._reads.conversations.update(conversation_id, default_model=model)
+
+    async def set_preset(self, conversation_id: str, preset_id: str | None) -> Conversation:
+        """`PATCH /api/conversations/{id}` with `preset_id`: put the
+        conversation on a preset, or clear it (`None`). Idempotent, so it
+        may take the reads' retries."""
+        return await self._reads.conversations.update(conversation_id, preset_id=preset_id)
 
     async def rename_conversation(self, conversation_id: str, title: str) -> Conversation:
         """The SDK's update with a title: a PATCH that lands twice writes

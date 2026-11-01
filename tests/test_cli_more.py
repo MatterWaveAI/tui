@@ -8,6 +8,7 @@ import argparse
 import json
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -191,7 +192,11 @@ def test_completion_scripts_carry_every_flag_and_command(capsys):
         assert "powershell" in out  # the completion command's own choices
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="no bash here")
+# The Linux jobs check this. On Windows the bash on PATH is usually WSL's
+# launcher, which fails without a distribution installed.
+@pytest.mark.skipif(
+    sys.platform == "win32" or shutil.which("bash") is None, reason="needs a POSIX bash"
+)
 def test_the_bash_script_parses(capsys):
     cli.main(["completion", "bash"])
     # On stdin rather than by path: on Windows the bash found first may be

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator
 from dataclasses import replace
 
@@ -513,7 +514,9 @@ async def test_a_rate_limit_and_a_plan_refusal_are_their_own_states():
         await settle(app, pilot)
         assert app.failure is not None and app.failure.kind == "rate_limited"
         assert "Too many requests" in banner(app) and "Retry in 30s." in banner(app)
-        assert "rate limited · retry in 30s" in status(app)
+        # The status line counts down, so a slow runner can read 29s or 31s.
+        countdown = re.search(r"rate limited · retry in (\d+)s", status(app))
+        assert countdown is not None and 28 <= int(countdown.group(1)) <= 31
         assert "Reference: req-429" in banner(app)
 
     gated = APIError(

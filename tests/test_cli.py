@@ -309,7 +309,7 @@ def test_a_key_is_stored_in_the_test_keyring_never_the_os_one(memory_keyring, mo
     assert memory_keyring.entries == {}
 
 
-DEVICE_KEY = "mw_abcd1234_testdevicekey"
+DEVICE_KEY = "mw_abcd1234_testdevicekey"  # gitleaks:allow (made up)
 
 
 def keys_api(

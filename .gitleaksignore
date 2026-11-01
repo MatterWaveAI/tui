@@ -1,0 +1,2 @@
+# A made-up device key in a test (tests/test_cli.py), flagged by the generic-api-key rule
+68c6b4cf511bde74b6dde4343fc8124ab4c22cf1:tests/test_cli.py:generic-api-key:299

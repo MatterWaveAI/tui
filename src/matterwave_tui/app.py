@@ -6,9 +6,8 @@ import asyncio
 import contextlib
 import json
 import os
-import re
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -50,6 +49,7 @@ from .screens import (
     Roles,
     Shares,
 )
+from .shell import detect_shell, run_shell_command, shell_command, shell_request
 from .thread import Divider, Message, Thread
 from .widgets import DividerView, ImageView, MessageView, ThumbClicked, code_blocks
 
@@ -79,9 +79,6 @@ IMPORT_POLL_S = 1.5
 # Ten minutes of polls before the watch gives up saying so (the worker
 # keeps the row on the server, so nothing is lost, only unwatched).
 IMPORT_POLLS_MAX = 400
-# The shell assistant: how long a proposed command may run before it is
-# stopped, and the gate's wording.
-SHELL_TIMEOUT_S = 30.0
 # The sources an export names, as they are said to the person.
 IMPORT_SOURCE_NAMES = {"chatgpt": "ChatGPT", "claude": "Claude"}
 # The account export: a server job like an import, polled the same way;
@@ -135,32 +132,6 @@ def estimate_tokens(text: str) -> int:
     """The server's own rough count (characters / 4), so the meter and the
     server's compaction decision agree to within the estimate."""
     return (len(text) + 3) // 4
-
-
-def shell_command(text: str) -> str:
-    """The command an answer proposes: one fenced block's contents when the
-    answer is a single fenced block, the bare text otherwise."""
-    stripped = text.strip()
-    fence = re.fullmatch(r"```[^\n]*\n(.*)\n```\s*", stripped, re.DOTALL)
-    return (fence.group(1) if fence else stripped).strip()
-
-
-async def run_shell_command(command: str) -> str:
-    """A proposed command, run for real; its output (stderr folded in), or
-    the note that it outlived its half minute and was stopped."""
-    proc = await asyncio.create_subprocess_shell(
-        command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
-    try:
-        out, _ = await asyncio.wait_for(proc.communicate(), SHELL_TIMEOUT_S)
-    except TimeoutError:
-        proc.kill()
-        await proc.wait()
-        return "(stopped: the command ran past its thirty seconds)"
-    text = out.decode(errors="replace").strip()
-    return text or f"(no output; exit {proc.returncode})"
 
 
 def scan_pending(scan_status: str) -> bool:
@@ -440,11 +411,13 @@ class MatterWaveApp(App[None]):
         # The prompt library: named system texts on this device, applied
         # with /role or the `L` screen. Empty until roles.json is read.
         self.roles = load_roles(roles_path())
-        # Shell assistant mode: each finished answer is a proposed command,
-        # run only after the person confirms. `--shell` starts with it on;
-        # /shell toggles. The runner is an attribute so a test can stand in.
+        # Shell assistant mode: each turn tells the model the OS and shell,
+        # and each finished answer is a proposed command, run only after
+        # the person confirms. `--shell` starts with it on; /shell toggles.
+        # The runner is an attribute so a test can stand in.
         self.shell_mode = shell_mode
-        self._run_shell = run_shell_command
+        self.shell = detect_shell(os.environ)
+        self._run_shell: Callable[[str], Awaitable[str]] = self._run_in_shell
         # The answer the turn that just ended produced, for the shell gate.
         self._completed_answer: Message | None = None
         self._search_seq = 0
@@ -1086,6 +1059,8 @@ class MatterWaveApp(App[None]):
         # through here.
         if text.startswith("//"):
             text = text[1:]
+        if self.shell_mode:
+            text = shell_request(text, self.shell)
         attachment_ids = [a.id for a in self.pending_attachments] or None
         if self.conversation is None:
             self.run_worker(self._create_then_send(text, attachment_ids), group="stream",
@@ -2265,8 +2240,8 @@ class MatterWaveApp(App[None]):
         self.shell_mode = not self.shell_mode
         if self.shell_mode:
             self.notify(
-                "Shell assistant on. An answer becomes a proposed command; "
-                "nothing runs until you confirm it."
+                f"Shell assistant on, for {self.shell.name} on {self.shell.os_name}. An answer "
+                "becomes a proposed command; nothing runs until you confirm it."
             )
         else:
             self.notify("Shell assistant off.")
@@ -2499,11 +2474,21 @@ class MatterWaveApp(App[None]):
 
         self.push_screen(
             Confirm(
-                f"Run this command?\n\n{command}",
-                hint="Enter runs it in a shell; Esc leaves it alone.",
+                f"Run this command in {self.shell.name}?\n\n{command}",
+                hint="Enter runs it; Esc leaves it alone.",
             ),
             approved,
         )
+
+    async def _run_in_shell(self, command: str) -> str:
+        """The command in this terminal's shell, its output as the
+        transcript shows it."""
+        output, status = await run_shell_command(command, self.shell)
+        if status is None:
+            return output
+        if not output:
+            return f"(no output; exit {status})"
+        return output if status == 0 else f"{output}\n(exit {status})"
 
     async def _execute_shell(self, command: str) -> None:
         try:

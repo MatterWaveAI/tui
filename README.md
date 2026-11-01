@@ -35,8 +35,13 @@ stderr. The exit status says how the turn ended:
 | 3 | the platform refused: moderation, budget, plan, rate limit, sign-in |
 | 4 | the answer was cut short; what arrived is on stdout |
 
-`--shell` starts the shell assistant: each answer is treated as a proposed command, shown
-in a confirm that runs it only when you press Enter — nothing is ever executed without that.
+`--shell` starts the shell assistant (`/shell` toggles it in the app). Each message tells the
+model which OS and shell the command is for — the message starts with `[shell assistant]` and
+says so, in the history too — and the answer is a proposed command, shown in a confirm that runs
+it only when you press Enter. Nothing is ever executed without that. With `-p` the confirm is a
+`[y/N]` on the terminal; a prompt piped in leaves no terminal to ask, so nothing runs. The shell is
+PowerShell or cmd.exe on Windows (whichever started the TUI) and `$SHELL` elsewhere;
+`MATTERWAVE_SHELL=pwsh` (or `cmd`, `/bin/zsh`, …) names it outright.
 
 ## Sign in
 

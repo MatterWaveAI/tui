@@ -2,6 +2,7 @@
 
     matterwave-tui                     open (signs in by device code if needed)
     matterwave-tui -p "prompt" [-m M]  one-shot: the answer, then exit
+    matterwave-tui --shell -p "..."    one-shot shell assistant: a command, run on y
     cat notes | matterwave-tui         a piped-in prompt is the prompt
     matterwave-tui login [--key [K]]   store a key, or sign in by device code
     matterwave-tui logout              forget the stored credential
@@ -16,6 +17,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
+import os
 import sys
 from collections.abc import Callable
 
@@ -35,6 +37,7 @@ from .auth import (
     save_token,
 )
 from .failures import Kind, classify
+from .shell import Shell, detect_shell, run_shell_command, shell_command, shell_request
 
 # Asked for interactively when `--key` is given with no value, so the key is
 # not left in the shell history or the process list.
@@ -140,20 +143,31 @@ def _oneshot_prompt(args: argparse.Namespace) -> str | None:
 
 
 async def run_oneshot(
-    base_url: str, credential: Credential, prompt: str, model: str | None = None
+    base_url: str,
+    credential: Credential,
+    prompt: str,
+    model: str | None = None,
+    *,
+    shell: Shell | None = None,
 ) -> int:
     """One answer, no interface: a conversation is made, the prompt sent
     through the SDK's stream, and the text deltas printed as they arrive.
     The exit status says how it ended (EXIT_HELP); whatever arrived before
-    a failure is already on stdout."""
+    a failure is already on stdout. With `shell`, the model is told the OS
+    and shell, and the command it answers is run after a yes on the
+    terminal."""
     api = HttpChatAPI(base_url=base_url, token=credential.token)
     wrote = False
+    answer: list[str] = []
+    if shell is not None:
+        prompt = shell_request(prompt, shell)
     try:
         conversation = await api.create_conversation(model=model)
         async for item in api.send(conversation.id, prompt, model):
             if isinstance(item, fr.DeltaFrame) and not item.reasoning:
                 sys.stdout.write(item.content or "")
                 sys.stdout.flush()
+                answer.append(item.content or "")
                 wrote = wrote or bool(item.content)
             elif isinstance(item, Cut) or (
                 isinstance(item, fr.DoneFrame) and item.message.truncated
@@ -176,7 +190,31 @@ async def run_oneshot(
         if wrote:
             sys.stdout.write("\n")
         await api.aclose()
+    if shell is not None:
+        await _confirm_and_run(shell_command("".join(answer)), shell)
     return EXIT_OK
+
+
+async def _confirm_and_run(command: str, shell: Shell) -> None:
+    """The one-shot's gate: the command runs only on a typed yes at a
+    terminal. A prompt piped in leaves no terminal to ask, so nothing runs.
+    The command's own output follows the answer on stdout; its exit status
+    is a note, the one-shot's status being the turn's."""
+    if not command:
+        _note("The answer proposed no command.")
+        return
+    if sys.stdin is None or not sys.stdin.isatty():
+        _note("Not run: there is no terminal to confirm it on.")
+        return
+    sys.stderr.write(f"Run this in {shell.name}? [y/N] ")
+    sys.stderr.flush()
+    if sys.stdin.readline().strip().lower() not in ("y", "yes"):
+        _note("Not run.")
+        return
+    output, status = await run_shell_command(command, shell)
+    if output:
+        print(output)
+    _note(f"(exit {status})" if status is not None else "(stopped after thirty seconds)")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -208,7 +246,8 @@ def main(argv: list[str] | None = None) -> int:
         if not prompt:
             _note("Nothing to send: give -p a prompt or pipe one in.")
             return EXIT_USAGE
-        return asyncio.run(run_oneshot(base_url, credential, prompt, args.model))
+        shell = detect_shell(os.environ) if args.shell else None
+        return asyncio.run(run_oneshot(base_url, credential, prompt, args.model, shell=shell))
     run_app(base_url, credential, shell_mode=args.shell)
     return EXIT_OK
 

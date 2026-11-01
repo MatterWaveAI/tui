@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Shell assistant mode tells the model it is one: each message names the
+  OS and the shell (PowerShell or cmd.exe on Windows, `$SHELL` elsewhere;
+  `MATTERWAVE_SHELL` overrides), and a confirmed command runs in that
+  shell rather than always in `cmd.exe` or `/bin/sh`. `--shell` works with
+  `-p`: the command is offered with a `[y/N]` on the terminal, and never
+  run when the prompt was piped in.
 - A message sent right after attaching a file waits for the deployment's
   malware scan (`GET /api/attachments/{id}/scan`) instead of being refused
   with "One of those attachments is not available": the status line shows

@@ -1,8 +1,11 @@
-"""Shell assistant mode: a finished answer is a proposed command, shown in
-a gate that runs it only on an explicit yes. The runner is stood in for,
-so no test runs a real shell command."""
+"""Shell assistant mode: each turn tells the model the OS and shell, and a
+finished answer is a proposed command, shown in a gate that runs it only on
+an explicit yes. The gate's tests stand the runner in; one test runs `echo`
+in this machine's own shell, so the runner itself is proven."""
 
 from __future__ import annotations
+
+import os
 
 import pytest
 from matterwave_sdk import frames as fr
@@ -10,6 +13,13 @@ from textual.widgets import Static, TextArea
 
 from matterwave_tui.app import MatterWaveApp, shell_command
 from matterwave_tui.screens import Confirm
+from matterwave_tui.shell import (
+    SHELL_MARK,
+    Shell,
+    detect_shell,
+    run_shell_command,
+    shell_request,
+)
 
 from .fake_api import FakeAPI, happy_script, message
 
@@ -58,7 +68,7 @@ async def test_the_gate_refuses_without_a_yes():
         await settle(app, pilot)
         assert ran == []
         assert not isinstance(app.screen, Confirm)
-        assert api.sent == [("c1", "list the files", "grt-nano")]
+        assert api.sent == [("c1", shell_request("list the files", app.shell), "grt-nano")]
 
 
 @pytest.mark.asyncio
@@ -150,6 +160,61 @@ async def test_a_turn_without_shell_mode_asks_nothing():
         await settle(app, pilot)
         assert ran == []
         assert not isinstance(app.screen, Confirm)
+
+
+@pytest.mark.asyncio
+async def test_a_shell_turn_names_the_os_and_shell():
+    api = FakeAPI(happy_script())
+    app = MatterWaveApp(api, shell_mode=True)
+    app._run_shell = lambda command: _never(command)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        app.shell = Shell("Windows", "PowerShell", ("powershell", "-NoProfile", "-Command"))
+        app.query_one("#composer", TextArea).text = "free disk space"
+        app.action_send()
+        await settle(app, pilot)
+        sent = api.sent[0][1]
+        assert sent.startswith(SHELL_MARK)
+        assert "one PowerShell command for Windows" in sent
+        assert sent.endswith("\n\nfree disk space")
+        assert "in PowerShell?" in str(app.screen.query_one(Static).render())
+
+
+async def _never(command: str) -> str:
+    raise AssertionError(f"ran {command!r} without a yes")
+
+
+def test_the_shell_is_detected_per_platform():
+    ps = os.pathsep.join(["user", "machine", "install"])
+    powershell = detect_shell({"PSModulePath": ps}, "Windows")
+    assert (powershell.name, powershell.argv[0]) == ("PowerShell", "powershell")
+    pwsh = detect_shell({"PSModulePath": ps, "POWERSHELL_DISTRIBUTION_CHANNEL": "MSI"}, "Windows")
+    assert pwsh.argv[0] == "pwsh"
+    cmd = detect_shell({"PSModulePath": "machine", "COMSPEC": "C:\\Windows\\cmd.exe"}, "Windows")
+    assert (cmd.os_name, cmd.name, cmd.argv) == ("Windows", "cmd.exe", ("C:\\Windows\\cmd.exe", "/c"))
+    zsh = detect_shell({"SHELL": "/bin/zsh"}, "Darwin")
+    assert (zsh.os_name, zsh.name, zsh.argv) == ("macOS", "zsh", ("/bin/zsh", "-c"))
+    assert detect_shell({}, "Linux") == Shell("Linux", "sh", ("/bin/sh", "-c"))
+    # Named outright, detection is not asked.
+    forced = detect_shell({"PSModulePath": ps, "MATTERWAVE_SHELL": "cmd"}, "Windows")
+    assert (forced.name, forced.argv) == ("cmd.exe", ("cmd", "/c"))
+    forced = detect_shell({"MATTERWAVE_SHELL": "pwsh"}, "Linux")
+    assert (forced.name, forced.argv) == ("PowerShell", ("pwsh", "-NoProfile", "-Command"))
+    assert detect_shell({"MATTERWAVE_SHELL": "/usr/bin/fish"}, "Linux").name == "fish"
+
+
+def test_a_shell_request_is_wrapped_once():
+    bash = Shell("Linux", "bash", ("/bin/bash", "-c"))
+    once = shell_request("list the files", bash)
+    assert once.startswith(SHELL_MARK) and "one bash command for Linux" in once
+    assert shell_request(once, bash) == once
+
+
+@pytest.mark.asyncio
+async def test_the_runner_runs_in_this_machines_shell():
+    output, status = await run_shell_command("echo hello", detect_shell(os.environ))
+    assert "hello" in output
+    assert status == 0
 
 
 def test_shell_command_takes_a_single_fenced_block():

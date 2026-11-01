@@ -216,6 +216,61 @@ def test_a_device_sign_in_prints_nothing_to_stdout_but_the_answer(capsys, monkey
     assert "ABCD-EFGH" in captured.err and "Signed in" in captured.err
 
 
+class Terminal:
+    """A stdin that is a terminal, answering the gate with `reply`."""
+
+    def __init__(self, reply: str) -> None:
+        self.reply = reply
+
+    def isatty(self) -> bool:
+        return True
+
+    def readline(self) -> str:
+        return self.reply
+
+
+FENCED = (
+    'event: message\ndata: {"id": "u1", "role": "user"}\n\n'
+    'id: g1:0\nevent: delta\ndata: {"content": "```sh\\nls -a\\n```", "index": 0}\n\n'
+    'event: done\ndata: {"id": "a1", "role": "assistant", "truncated": false}\n\n'
+)
+
+
+@pytest.mark.parametrize(("stdin", "runs"), [(Terminal("y\n"), True), (Terminal("\n"), False)])
+def test_shell_with_p_proposes_and_runs_only_on_yes(capsys, monkeypatch, stdin, runs):
+    seen: list[httpx.Request] = []
+    ran: list[str] = []
+    monkeypatch.setattr("matterwave_tui.api.httpx.AsyncClient", mock_api(seen, FENCED))
+    monkeypatch.setattr(cli.sys, "stdin", stdin)
+
+    async def runner(command: str, shell: object) -> tuple[str, int]:
+        ran.append(command)
+        return "a b c", 0
+
+    monkeypatch.setattr(cli, "run_shell_command", runner)
+    assert cli.main(["--base-url", BASE, "--key", "mw_k", "--shell", "-p", "list all"]) == 0
+    content = send_body(seen)["content"]
+    assert content.startswith("[shell assistant]") and content.endswith("list all")
+    captured = capsys.readouterr()
+    assert ran == (["ls -a"] if runs else [])
+    assert ("a b c" in captured.out) is runs
+    assert "[y/N]" in captured.err
+
+
+def test_shell_with_a_piped_prompt_never_runs(capsys, monkeypatch):
+    seen: list[httpx.Request] = []
+    monkeypatch.setattr("matterwave_tui.api.httpx.AsyncClient", mock_api(seen, FENCED))
+    pipe = argparse.Namespace(isatty=lambda: False, read=lambda: "list all\n")
+    monkeypatch.setattr(cli.sys, "stdin", pipe)
+
+    async def runner(command: str, shell: object) -> tuple[str, int]:
+        raise AssertionError("ran without a terminal to confirm on")
+
+    monkeypatch.setattr(cli, "run_shell_command", runner)
+    assert cli.main(["--base-url", BASE, "--key", "mw_k", "--shell"]) == 0
+    assert "no terminal to confirm" in capsys.readouterr().err
+
+
 def test_help_names_the_exit_statuses(capsys):
     with pytest.raises(SystemExit):
         cli.main(["--help"])

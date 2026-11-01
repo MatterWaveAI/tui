@@ -85,8 +85,7 @@ def conversation_markdown(
     stamp = moment.strftime("%Y-%m-%dT%H:%M:%SZ")
     title = conversation.title or "MatterWave conversation"
     out = [
-        f"# {title}\n\n"
-        f"Exported from MatterWave on {stamp}. Conversation `{conversation.id}`.\n\n"
+        f"# {title}\n\nExported from MatterWave on {stamp}. Conversation `{conversation.id}`.\n\n"
     ]
     for item in thread.view():
         # A `Divider` is a summary's fold, and a summary message itself is
@@ -101,7 +100,8 @@ def _filename_stem(title: str) -> str:
     """The title as a safe stem, exactly as the web exporter derives it."""
     text = unicodedata.normalize("NFKC", title)
     text = "".join(
-        " " if (unicodedata.category(character)[0] == "C" or character in UNSAFE_CHARACTERS)
+        " "
+        if (unicodedata.category(character)[0] == "C" or character in UNSAFE_CHARACTERS)
         else character
         for character in text
     )

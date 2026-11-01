@@ -22,16 +22,44 @@ from matterwave_sdk.models import (
 from matterwave_tui.api import NOTIFICATIONS_PAGE, Opened, StreamItem
 
 MODELS: list[dict[str, Any]] = [
-    {"id": "grt-nano", "label": "GRT Nano", "partner": False, "research_preview": False,
-     "included": True, "upgrade_to": None, "context_window": 8192},
-    {"id": "grt-max", "label": "GRT Max", "partner": False, "research_preview": False,
-     "included": False, "upgrade_to": "Pro", "context_window": 131072,
-     "supports_vision": False},
-    {"id": "other-7b", "label": "Other 7B", "partner": True, "research_preview": False,
-     "included": True, "upgrade_to": None, "context_window": None,
-     "supports_vision": True},
-    {"id": "lab-x", "label": "Lab X", "partner": False, "research_preview": True,
-     "included": True, "upgrade_to": None, "context_window": 32768},
+    {
+        "id": "grt-nano",
+        "label": "GRT Nano",
+        "partner": False,
+        "research_preview": False,
+        "included": True,
+        "upgrade_to": None,
+        "context_window": 8192,
+    },
+    {
+        "id": "grt-max",
+        "label": "GRT Max",
+        "partner": False,
+        "research_preview": False,
+        "included": False,
+        "upgrade_to": "Pro",
+        "context_window": 131072,
+        "supports_vision": False,
+    },
+    {
+        "id": "other-7b",
+        "label": "Other 7B",
+        "partner": True,
+        "research_preview": False,
+        "included": True,
+        "upgrade_to": None,
+        "context_window": None,
+        "supports_vision": True,
+    },
+    {
+        "id": "lab-x",
+        "label": "Lab X",
+        "partner": False,
+        "research_preview": True,
+        "included": True,
+        "upgrade_to": None,
+        "context_window": 32768,
+    },
 ]
 
 ORG_INSTRUCTIONS_TEXT = "Be brief."
@@ -46,8 +74,14 @@ DEFAULT_INSTRUCTIONS: dict[str, Any] = {
 
 def conversation(cid: str = "c1", **fields: Any) -> Conversation:
     return Conversation.from_dict(
-        {"id": cid, "title": "New chat", "created_at": "1", "updated_at": "1",
-         "default_model": "grt-nano", **fields}
+        {
+            "id": cid,
+            "title": "New chat",
+            "created_at": "1",
+            "updated_at": "1",
+            "default_model": "grt-nano",
+            **fields,
+        }
     )
 
 
@@ -56,8 +90,16 @@ def message(
 ) -> ConversationMessage:
     parts = extra.pop("parts", [{"type": "text", "text": text}])
     return ConversationMessage.from_dict(
-        {"id": mid, "conversation_id": "c1", "role": role, "parts": parts, "content": text,
-         "created_at": created_at, "parent_id": parent, **extra}
+        {
+            "id": mid,
+            "conversation_id": "c1",
+            "role": role,
+            "parts": parts,
+            "content": text,
+            "created_at": created_at,
+            "parent_id": parent,
+            **extra,
+        }
     )
 
 
@@ -250,7 +292,8 @@ class FakeAPI:
     async def search_conversations(self, query: str) -> list[Conversation]:
         self.searches.append(query)
         return [
-            c for c in self.conversations
+            c
+            for c in self.conversations
             if c.id not in self.temporary_ids and query.lower() in c.title.lower()
         ]
 
@@ -302,9 +345,7 @@ class FakeAPI:
     async def set_pinned(self, conversation_id: str, pinned: bool) -> Conversation:
         self.pins.append((conversation_id, pinned))
         self._refuse_temporary(conversation_id, "pinned")
-        return self._replace(
-            conversation_id, pinned_at="2026-10-27T00:00:00Z" if pinned else None
-        )
+        return self._replace(conversation_id, pinned_at="2026-10-27T00:00:00Z" if pinned else None)
 
     async def set_archived(self, conversation_id: str, archived: bool) -> Conversation:
         self.archives.append((conversation_id, archived))
@@ -356,7 +397,9 @@ class FakeAPI:
     ) -> dict[str, Any]:
         self.feedback_puts.append((message_id, rating, list(reasons), comment))
         row = {
-            "message_id": message_id, "rating": rating, "reasons": list(reasons),
+            "message_id": message_id,
+            "rating": rating,
+            "reasons": list(reasons),
             "comment": comment,
         }
         self.feedback_rows = [
@@ -381,9 +424,14 @@ class FakeAPI:
     ) -> Attachment:
         self.uploads.append((filename, data))
         return Attachment.from_dict(
-            {"id": f"att{len(self.uploads)}", "filename": filename,
-             "content_type": "application/octet-stream", "size_bytes": len(data),
-             "scan_status": self.upload_scan_status, "created_at": "1"}
+            {
+                "id": f"att{len(self.uploads)}",
+                "filename": filename,
+                "content_type": "application/octet-stream",
+                "size_bytes": len(data),
+                "scan_status": self.upload_scan_status,
+                "created_at": "1",
+            }
         )
 
     async def attachment_scan_status(self, attachment_id: str) -> str:
@@ -413,8 +461,11 @@ class FakeAPI:
             )
         self.folders_created.append(name)
         folder = {
-            "id": f"f{len(self.library_folders) + 1}", "name": name, "position": 0,
-            "created_at": "1", "updated_at": "1",
+            "id": f"f{len(self.library_folders) + 1}",
+            "name": name,
+            "position": 0,
+            "created_at": "1",
+            "updated_at": "1",
         }
         self.library_folders.append(folder)
         return dict(folder)
@@ -445,9 +496,7 @@ class FakeAPI:
     async def notifications(
         self, *, unread: bool = False, limit: int = NOTIFICATIONS_PAGE
     ) -> dict[str, Any]:
-        rows = [
-            dict(row) for row in self.notification_rows if not unread or not row.get("read_at")
-        ]
+        rows = [dict(row) for row in self.notification_rows if not unread or not row.get("read_at")]
         return {"data": rows[:limit], "unread_count": self._unread_count()}
 
     async def read_notification(self, notification_id: str) -> dict[str, Any]:
@@ -480,9 +529,7 @@ class FakeAPI:
 
     async def conversation_shares(self, conversation_id: str) -> list[dict[str, Any]]:
         return [
-            dict(row)
-            for row in self.share_rows
-            if row.get("conversation_id") == conversation_id
+            dict(row) for row in self.share_rows if row.get("conversation_id") == conversation_id
         ]
 
     async def my_shares(self) -> list[dict[str, Any]]:
@@ -632,9 +679,21 @@ class FakeAPI:
         self.compacted.append(conversation_id)
         first, last = self.tree_messages[0], self.tree_messages[-1]
         summary = message(
-            "s1", "system", "", parent=last.id, created_at="9",
-            parts=[{"type": "summary", "text": "They talked.", "covers_from": first.id,
-                    "covers_to": last.id, "tokens_before": 900, "tokens_after": 120}],
+            "s1",
+            "system",
+            "",
+            parent=last.id,
+            created_at="9",
+            parts=[
+                {
+                    "type": "summary",
+                    "text": "They talked.",
+                    "covers_from": first.id,
+                    "covers_to": last.id,
+                    "tokens_before": 900,
+                    "tokens_after": 120,
+                }
+            ],
         )
         self.tree_messages.append(summary)
         return summary

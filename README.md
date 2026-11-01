@@ -134,8 +134,8 @@ resume) before it is reported as cut off.
 ## Development
 
 ```sh
-uv sync --extra dev
-uv run ruff check . && uv run mypy --strict src && uv run pytest -q
+uv sync --extra dev --extra images
+uv run ruff check . && uv run ruff format --check . && uv run mypy --strict && uv run pytest -q
 ```
 
 The wire is the Python SDK's (`matterwave-sdk` from your package index): `client.conversations.*`,

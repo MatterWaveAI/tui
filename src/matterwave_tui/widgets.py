@@ -143,7 +143,8 @@ class MessageView(Vertical):
                 yield ImageView(part, backend=self.image_backend)
             elif kind == "document":
                 yield Static(
-                    f"[document: {part.get('filename') or 'attachment'}]", classes="tool",
+                    f"[document: {part.get('filename') or 'attachment'}]",
+                    classes="tool",
                     markup=False,
                 )
             # Unknown kinds are skipped, as every reader of parts does.
@@ -242,6 +243,4 @@ class DividerView(Vertical):
             classes="head",
             markup=False,
         )
-        yield Collapsible(
-            Markdown(self.divider.text), title="Summary", collapsed=True
-        )
+        yield Collapsible(Markdown(self.divider.text), title="Summary", collapsed=True)

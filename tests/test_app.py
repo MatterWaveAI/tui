@@ -49,8 +49,14 @@ from .fake_api import (
 )
 
 BASE = "https://matterwave.test"
-CONV = {"id": "c1", "title": "New chat", "default_model": "grt-nano",
-        "created_at": "1", "updated_at": "1", "current_leaf_message_id": None}
+CONV = {
+    "id": "c1",
+    "title": "New chat",
+    "default_model": "grt-nano",
+    "created_at": "1",
+    "updated_at": "1",
+    "current_leaf_message_id": None,
+}
 
 
 def transcript_text(app: MatterWaveApp) -> str:
@@ -167,8 +173,13 @@ async def test_a_stream_that_ends_without_done_is_marked_cut_off():
 @pytest.mark.asyncio
 async def test_a_cut_stream_reads_back_what_the_server_kept():
     api = FakeAPI(
-        [Opened("req-cut"), fr.MessageFrame(message("u1", "user", "hi")),
-         fr.PartStartFrame(0, "text"), fr.DeltaFrame(0, "Hel"), Cut("req-cut")]
+        [
+            Opened("req-cut"),
+            fr.MessageFrame(message("u1", "user", "hi")),
+            fr.PartStartFrame(0, "text"),
+            fr.DeltaFrame(0, "Hel"),
+            Cut("req-cut"),
+        ]
     )
     kept = message("a1", "assistant", "Hel", parent="u1", created_at="2", truncated=True)
     app = MatterWaveApp(api)
@@ -283,7 +294,11 @@ async def test_branch_keys_move_the_leaf_and_x_expands_a_summary():
         assert "one" in transcript_text(app)
 
         summary = message(
-            "s1", "system", "", parent="a1", created_at="4",
+            "s1",
+            "system",
+            "",
+            parent="a1",
+            created_at="4",
             parts=[{"type": "summary", "text": "folded", "covers_from": "u1", "covers_to": "a1"}],
         )
         app.thread.add(summary)
@@ -483,7 +498,9 @@ async def test_compact_folds_the_thread_behind_a_divider():
 async def test_a_rate_limit_and_a_plan_refusal_are_their_own_states():
     limited = RateLimitError(
         "Rate limit of 60 requests per minute exceeded for this API key.",
-        status_code=429, request_id="req-429", retry_after=30,
+        status_code=429,
+        request_id="req-429",
+        retry_after=30,
     )
     app = MatterWaveApp(FakeAPI(refusal=limited))
     async with app.run_test() as pilot:
@@ -592,6 +609,7 @@ async def test_switching_conversations_mid_stream_keeps_the_answer_out_of_the_ne
         assert not app.streaming
         assert app.live is None
         assert app.failure is None
+
 
 @pytest.mark.asyncio
 async def test_pin_archive_and_the_list_filters_make_them_actions():
@@ -776,8 +794,12 @@ async def test_the_status_line_shows_the_overage_cap():
 
     api = FakeAPI()
     api.budget_payload = {
-        "period_start": "2026-10-01", "included_tokens": 100000, "tokens_used": 1234,
-        "remaining_tokens": 98766, "overage_enabled": True, "overage_cap_micros": 1000000,
+        "period_start": "2026-10-01",
+        "included_tokens": 100000,
+        "tokens_used": 1234,
+        "remaining_tokens": 98766,
+        "overage_enabled": True,
+        "overage_cap_micros": 1000000,
         "overage_micros": 250000,
     }
     app = MatterWaveApp(api)
@@ -794,9 +816,7 @@ async def test_the_status_line_shows_the_overage_cap():
 async def test_the_notifications_panel_reads_one_or_all(tmp_path, monkeypatch):
     monkeypatch.setenv("MATTERWAVE_STATE_DIR", str(tmp_path))
     api = FakeAPI()
-    api.notification_rows = [
-        notification("n1"), notification("n2", read_at="2026-10-29T01:00:00Z")
-    ]
+    api.notification_rows = [notification("n1"), notification("n2", read_at="2026-10-29T01:00:00Z")]
     app = MatterWaveApp(api)
     async with app.run_test() as pilot:
         await settle(app, pilot)
@@ -932,7 +952,11 @@ async def test_the_library_screen_files_and_tags_and_the_captions_follow():
         assert api.folders_created == ["Archive"]
         assert isinstance(app.screen, Library)
         assert labels() == [
-            "— Folders —", "● Work", "  Archive", "— Tags —", "  draft",
+            "— Folders —",
+            "● Work",
+            "  Archive",
+            "— Tags —",
+            "  draft",
         ]
 
         # A folder of a taken name is the server's 409, said, not a banner.
@@ -1202,9 +1226,7 @@ async def test_feedback_is_restored_on_open_and_the_dialog_edits_reasons():
         message("u1", "user", "q"),
         message("a1", "assistant", "one", parent="u1", created_at="2"),
     ]
-    api.feedback_rows = [
-        {"message_id": "a1", "rating": -1, "reasons": ["wrong"], "comment": "no"}
-    ]
+    api.feedback_rows = [{"message_id": "a1", "rating": -1, "reasons": ["wrong"], "comment": "no"}]
     app = MatterWaveApp(api)
     shown = capture_notify(app)
     async with app.run_test() as pilot:
@@ -1352,8 +1374,14 @@ async def test_the_scan_is_polled_on_its_route_before_the_turn_goes(tmp_path, mo
         if (request.method, request.url.path) == ("POST", "/api/attachments"):
             return httpx.Response(
                 201,
-                json={"id": "att1", "filename": "notes.txt", "content_type": "text/plain",
-                      "size_bytes": 5, "scan_status": "scanning", "created_at": "1"},
+                json={
+                    "id": "att1",
+                    "filename": "notes.txt",
+                    "content_type": "text/plain",
+                    "size_bytes": 5,
+                    "scan_status": "scanning",
+                    "created_at": "1",
+                },
             )
         if (request.method, request.url.path) == ("GET", "/api/attachments/att1/scan"):
             answer = next(scans)
@@ -1611,10 +1639,22 @@ async def test_a_report_targets_the_selected_reply_or_the_conversation():
 async def test_the_account_switcher_offers_the_parked_and_reloads():
     api = FakeAPI()
     api.account_rows = [
-        {"slot": 0, "current": True, "subject": "a", "email": "a@x.test",
-         "name": "A", "org_name": "Work"},
-        {"slot": 1, "current": False, "subject": "b", "email": "b@x.test",
-         "name": "B", "org_name": "Home"},
+        {
+            "slot": 0,
+            "current": True,
+            "subject": "a",
+            "email": "a@x.test",
+            "name": "A",
+            "org_name": "Work",
+        },
+        {
+            "slot": 1,
+            "current": False,
+            "subject": "b",
+            "email": "b@x.test",
+            "name": "B",
+            "org_name": "Home",
+        },
     ]
     app = MatterWaveApp(api)
     shown = capture_notify(app)
@@ -1648,8 +1688,14 @@ async def test_the_account_switcher_offers_the_parked_and_reloads():
 async def test_the_switcher_says_when_nothing_is_parked():
     api = FakeAPI()
     api.account_rows = [
-        {"slot": 0, "current": True, "subject": "a", "email": "a@x.test",
-         "name": "A", "org_name": "Work"},
+        {
+            "slot": 0,
+            "current": True,
+            "subject": "a",
+            "email": "a@x.test",
+            "name": "A",
+            "org_name": "Work",
+        },
     ]
     app = MatterWaveApp(api)
     shown = capture_notify(app)
@@ -1690,8 +1736,9 @@ async def test_an_import_is_uploaded_watched_and_summarised(tmp_path, monkeypatc
 
         # A job that fails names the error it reported.
         api.import_done_after = None
-        api.import_rows = [{"id": "imp2", "status": "failed",
-                            "error": "This export holds no conversations."}]
+        api.import_rows = [
+            {"id": "imp2", "status": "failed", "error": "This export holds no conversations."}
+        ]
         app._watch_import("imp2")
         await settle(app, pilot)
         assert any("Import failed: This export holds no conversations." in s for s in shown)
@@ -1712,9 +1759,7 @@ async def test_an_account_export_is_polled_and_saved(tmp_path, monkeypatch):
         await settle(app, pilot)
         assert api.exports_started == ["asked"]
         assert api.export_status_calls == ["exp1"]
-        assert api.export_downloads == [
-            "/api/me/export/exp1/download?expires=1&sig=signed"
-        ]
+        assert api.export_downloads == ["/api/me/export/exp1/download?expires=1&sig=signed"]
         saved = tmp_path / "matterwave-export-2026-10-30.json"
         assert saved.read_bytes() == b'{"conversations": ["one"]}'
         assert any("Export starting" in s for s in shown)
@@ -1730,9 +1775,7 @@ async def test_an_account_export_is_polled_and_saved(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_dictation_without_the_microphone_extra_transcribes_a_file(
-    tmp_path, monkeypatch
-):
+async def test_dictation_without_the_microphone_extra_transcribes_a_file(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("matterwave_tui.app.mic_available", lambda: False)
     api = FakeAPI()
@@ -1814,9 +1857,19 @@ async def test_an_image_part_is_loaded_when_the_terminal_can_draw_it(monkeypatch
     api.tree_messages = [
         message("u1", "user", "q"),
         message(
-            "a1", "assistant", "look", parent="u1", created_at="2",
-            parts=[{"type": "image", "attachment_id": "att1", "filename": "pic.png",
-                    "content_type": "image/png"}],
+            "a1",
+            "assistant",
+            "look",
+            parent="u1",
+            created_at="2",
+            parts=[
+                {
+                    "type": "image",
+                    "attachment_id": "att1",
+                    "filename": "pic.png",
+                    "content_type": "image/png",
+                }
+            ],
         ),
     ]
     app = MatterWaveApp(api)
@@ -1886,9 +1939,17 @@ async def test_an_image_part_stays_a_placeholder_without_a_backend(monkeypatch):
     api.attachments_store["att1"] = b"\x89PNG\r\n\x1a\npixels"
     api.tree_messages = [
         message(
-            "u1", "user", "q",
-            parts=[{"type": "image", "attachment_id": "att1", "filename": "pic.png",
-                    "content_type": "image/png"}],
+            "u1",
+            "user",
+            "q",
+            parts=[
+                {
+                    "type": "image",
+                    "attachment_id": "att1",
+                    "filename": "pic.png",
+                    "content_type": "image/png",
+                }
+            ],
         ),
     ]
     app = MatterWaveApp(api)

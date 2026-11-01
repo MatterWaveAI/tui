@@ -25,10 +25,10 @@ from __future__ import annotations
 import base64
 import io
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from PIL import Image
+    from PIL.Image import Image as PillowImage
 
 CONFIG_ENV = "MATTERWAVE_IMAGES"
 IMAGE_ID_BASE = 900
@@ -196,21 +196,21 @@ def sixel_stream(data: bytes) -> bytes | None:
         long_side = max(rgb.width, rgb.height)
         if long_side > SIXEL_MAX_PX:
             scale = SIXEL_MAX_PX / long_side
-            rgb = rgb.resize(
-                (max(1, round(rgb.width * scale)), max(1, round(rgb.height * scale)))
-            )
+            rgb = rgb.resize((max(1, round(rgb.width * scale)), max(1, round(rgb.height * scale))))
         indexed = rgb.quantize(colors=256)
         return b"\x1bPq" + _sixel_body(indexed) + b"\x1b\\"
     except (OSError, ValueError):
         return None
 
 
-def _sixel_body(image: Image) -> bytes:
+def _sixel_body(image: PillowImage) -> bytes:
     """The quantized image as sixel: the used colours defined, then per
-    six-row band, per colour, the bits of its columns."""
+    six-row band, per colour, the bits of its columns. A quantized image
+    is mode `P`, one palette index per pixel, so its bytes are the
+    indices, row by row."""
     width, height = image.size
-    pixels = image.load()
-    used = sorted({pixels[x, y] for y in range(height) for x in range(width)})
+    indices = image.tobytes()
+    used = sorted(set(indices))
     palette = image.getpalette() or []
     body = io.BytesIO()
     for colour in used:
@@ -222,8 +222,7 @@ def _sixel_body(image: Image) -> bytes:
         body.write(b"$")
         for colour in used:
             runs = [
-                _sixel_bits(pixels, column, top, colour, height)
-                for column in range(width)
+                _sixel_bits(indices, width, column, top, colour, height) for column in range(width)
             ]
             if not any(runs):
                 continue
@@ -241,13 +240,13 @@ def _sixel_body(image: Image) -> bytes:
     return body.getvalue()
 
 
-def _sixel_bits(pixels: Any, column: int, top: int, colour: int, height: int) -> int:
+def _sixel_bits(indices: bytes, width: int, column: int, top: int, colour: int, height: int) -> int:
     """The six bits column `column` holds for `colour` in the band whose
     first row is `top`."""
     bits = 0
     for offset in range(6):
         row = top + offset
-        if row < height and pixels[column, row] == colour:
+        if row < height and indices[row * width + column] == colour:
             bits |= 1 << offset
     return bits
 

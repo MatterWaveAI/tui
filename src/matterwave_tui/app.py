@@ -247,16 +247,27 @@ class TuiCommands(Provider):
     commands: the actions that have no key of their own."""
 
     ENTRIES: tuple[tuple[str, str, str], ...] = (
-        ("Switch account…", "who is signed in here, and make another one acting",
-         "action_switch_account"),
-        ("Import a ChatGPT or Claude export…", "bring an exported history into this account",
-         "action_import"),
-        ("Export this account's data…", "every conversation and rating the account holds, "
-         "as one JSON file", "action_export_account"),
-        ("Dictate audio…", "transcribe the microphone or an audio file into the composer",
-         "action_dictate"),
-        ("Prompt roles…", "named system prompts to apply to this conversation",
-         "action_roles"),
+        (
+            "Switch account…",
+            "who is signed in here, and make another one acting",
+            "action_switch_account",
+        ),
+        (
+            "Import a ChatGPT or Claude export…",
+            "bring an exported history into this account",
+            "action_import",
+        ),
+        (
+            "Export this account's data…",
+            "every conversation and rating the account holds, as one JSON file",
+            "action_export_account",
+        ),
+        (
+            "Dictate audio…",
+            "transcribe the microphone or an audio file into the composer",
+            "action_dictate",
+        ),
+        ("Prompt roles…", "named system prompts to apply to this conversation", "action_roles"),
     )
 
     async def discover(self) -> Hits:
@@ -267,8 +278,7 @@ class TuiCommands(Provider):
         matcher = self.matcher(query)
         for name, help_text, action in self.ENTRIES:
             if (match := matcher.match(name)) > 0:
-                yield Hit(match, matcher.highlight(name), getattr(self.app, action),
-                          help=help_text)
+                yield Hit(match, matcher.highlight(name), getattr(self.app, action), help=help_text)
 
 
 class MatterWaveApp(App[None]):
@@ -504,8 +514,9 @@ class MatterWaveApp(App[None]):
                 bits.append("budget used up")
             else:
                 warn = "⚠ " if balance.warn else ""
-                bits.append(f"{warn}usage {balance.used:,}/{balance.included:,} "
-                            f"({round(balance.percent)}%)")
+                bits.append(
+                    f"{warn}usage {balance.used:,}/{balance.included:,} ({round(balance.percent)}%)"
+                )
         budget = self.budget
         if budget is not None and budget.get("overage_enabled"):
             overage = int(budget.get("overage_micros") or 0)
@@ -651,7 +662,9 @@ class MatterWaveApp(App[None]):
             self.fail_from_exception(exc)
             return False
         data = models.get("data")
-        self.models_list = [m for m in data if isinstance(m, dict)] if isinstance(data, list) else []
+        self.models_list = (
+            [m for m in data if isinstance(m, dict)] if isinstance(data, list) else []
+        )
         default = models.get("default_model")
         self.default_model = str(default) if default else None
         return True
@@ -669,9 +682,7 @@ class MatterWaveApp(App[None]):
             self.conversations = found
         view = self.query_one("#conversations", ListView)
         await view.clear()
-        await view.extend(
-            [ConversationItem(c, library=self._library_suffix(c)) for c in found]
-        )
+        await view.extend([ConversationItem(c, library=self._library_suffix(c)) for c in found])
 
     def refresh_account_lines(self) -> None:
         """The status line's account bits as the server now holds them: the
@@ -766,7 +777,9 @@ class MatterWaveApp(App[None]):
         await self.open_conversation(conversation_id)
 
     async def open_conversation(self, conversation_id: str) -> None:
-        if self.streaming and (self.conversation is None or self.conversation.id != conversation_id):
+        if self.streaming and (
+            self.conversation is None or self.conversation.id != conversation_id
+        ):
             self._detach_turn()
         composer = self.query_one("#composer", TextArea)
         if self.conversation is not None:
@@ -818,9 +831,12 @@ class MatterWaveApp(App[None]):
                 widgets.append(DividerView(item))
             else:
                 widgets.append(
-                    MessageView(item, position=self.thread.position(item),
-                                feedback=self.feedback.get(item.id),
-                                image_backend=self.image_backend)
+                    MessageView(
+                        item,
+                        position=self.thread.position(item),
+                        feedback=self.feedback.get(item.id),
+                        image_backend=self.image_backend,
+                    )
                 )
         if self.live is not None:
             widgets.append(MessageView(self.live, streaming=True))
@@ -1085,8 +1101,9 @@ class MatterWaveApp(App[None]):
             text = shell_request(text, self.shell)
         attachment_ids = [a.id for a in self.pending_attachments] or None
         if self.conversation is None:
-            self.run_worker(self._create_then_send(text, attachment_ids), group="stream",
-                            exclusive=True)
+            self.run_worker(
+                self._create_then_send(text, attachment_ids), group="stream", exclusive=True
+            )
             return
         cid = self.conversation.id
         if self.editing:
@@ -1463,9 +1480,7 @@ class MatterWaveApp(App[None]):
             if attachment_id:
                 self.apply_detach(attachment_id)
 
-        self.push_screen(
-            PendingAttachments([(a.id, attachment_label(a)) for a in pending]), chosen
-        )
+        self.push_screen(PendingAttachments([(a.id, attachment_label(a)) for a in pending]), chosen)
 
     @work(group="action")
     async def apply_detach(self, attachment_id: str) -> None:
@@ -1569,9 +1584,7 @@ class MatterWaveApp(App[None]):
         }
         path = _state_path()
         _write_dismissed(path, _read_dismissed(path) | dismissible)
-        self.announcements = [
-            row for row in self.announcements if not row.get("dismissible", True)
-        ]
+        self.announcements = [row for row in self.announcements if not row.get("dismissible", True)]
         self.render_announcements()
         # The footer's Dismiss goes away with the banner.
         self.refresh_bindings()
@@ -1592,9 +1605,7 @@ class MatterWaveApp(App[None]):
         # app's report-this-reply is; whatever the transcript is resting on
         # by default is not a selection, and reports the conversation.
         transcript = self.query_one("#transcript", Transcript)
-        selected = (
-            transcript.selected_widget() if transcript.selected is not None else None
-        )
+        selected = transcript.selected_widget() if transcript.selected is not None else None
         message_id = (
             selected.message.id
             if isinstance(selected, MessageView) and selected.message.role == "assistant"
@@ -1689,11 +1700,7 @@ class MatterWaveApp(App[None]):
             self.fail_from_exception(exc)
             return
         rows = body.get("accounts")
-        offered = (
-            [row for row in rows if isinstance(row, dict)]
-            if isinstance(rows, list)
-            else []
-        )
+        offered = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
         # The acting account is not offered (switching to it would be a
         # no-op); with nothing parked there is nothing to choose.
         if not offered or all(
@@ -1900,8 +1907,10 @@ class MatterWaveApp(App[None]):
         if mic_available():
             self.push_screen(Dictation(MicRecorder()), self._dictated)
         else:
-            self.notify(f"No microphone support installed (pip install matterwave-tui[dictation]); "
-                        f"naming an audio file instead ({', '.join(sorted(MEDIA_TYPES))}).")
+            self.notify(
+                f"No microphone support installed (pip install matterwave-tui[dictation]); "
+                f"naming an audio file instead ({', '.join(sorted(MEDIA_TYPES))})."
+            )
 
             def chosen(path_text: str | None) -> None:
                 if path_text:
@@ -1970,7 +1979,9 @@ class MatterWaveApp(App[None]):
             if folder.get("id")
         }
         tag_names = {
-            str(tag.get("id")): str(tag.get("name") or "") for tag in self.library_tags if tag.get("id")
+            str(tag.get("id")): str(tag.get("name") or "")
+            for tag in self.library_tags
+            if tag.get("id")
         }
         bits: list[str] = []
         folder = folder_names.get(conversation.folder_id or "")
@@ -2198,12 +2209,12 @@ class MatterWaveApp(App[None]):
             else:
                 self.toggle_shell()
             return True
-        rest = body[len("role"):].strip()
+        rest = body[len("role") :].strip()
         if rest in ("", "--list"):
             self.action_roles()
             return True
         if rest.startswith("--add"):
-            name = rest[len("--add"):].strip()
+            name = rest[len("--add") :].strip()
             if not name:
                 self.notify("Name the role: /role --add name.", severity="warning")
                 return True
@@ -2222,6 +2233,7 @@ class MatterWaveApp(App[None]):
     def action_roles(self) -> None:
         """The prompt library screen; the role picked there applies to the
         conversation that is open."""
+
         def chosen(name: str | None) -> None:
             if name:
                 self.apply_role(name)
@@ -2571,7 +2583,9 @@ class MatterWaveApp(App[None]):
             while len(parts) <= item.index:
                 parts.append({"type": "reasoning" if item.reasoning else "text", "text": ""})
             parts[item.index]["text"] = (
-                str(parts[item.index].get("text", "")) + (item.content or "") + (item.reasoning or "")
+                str(parts[item.index].get("text", ""))
+                + (item.content or "")
+                + (item.reasoning or "")
             )
             self._live_dirty = True
         elif isinstance(item, fr.TitleFrame) and self.conversation is not None:

@@ -17,7 +17,11 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - run: uv sync --locked --extra dev
+      - run: uv sync --locked --extra dev --extra images
+      # The same gate as CI's: nothing is published that CI would refuse.
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy --strict
       - run: uv run pytest -q --ignore=tests/e2e
       - run: uv build
       - uses: actions/upload-artifact@v4

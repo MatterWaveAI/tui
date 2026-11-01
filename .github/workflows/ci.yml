@@ -6,7 +6,8 @@ on:
   pull_request:
 
 jobs:
-  test:
+  # What a developer runs before a commit: lint, format and types, once.
+  checks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,9 +17,33 @@ jobs:
           enable-cache: true
       # The lockfile is the install: matterwave-sdk resolves from its git
       # source (pyproject's [tool.uv.sources]), which pip would not read.
+      # The images extra is in, so mypy checks the sixel encoder against
+      # Pillow's own types.
       - name: Install
-        run: uv sync --locked --extra dev
+        run: uv sync --locked --extra dev --extra images
       - name: Lint
         run: uv run ruff check .
+      - name: Format
+        run: uv run ruff format --check .
+      - name: Types
+        run: uv run mypy --strict
+
+  # The suite on every Python the package supports, on Linux and on
+  # Windows, which is a terminal the TUI ships for.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - name: Install
+        run: uv sync --locked --extra dev --extra images
       - name: Test
         run: uv run pytest tests -q --ignore=tests/e2e

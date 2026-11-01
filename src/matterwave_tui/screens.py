@@ -36,9 +36,7 @@ REASONS_HINT = "Reasons, comma-separated from: " + ", ".join(FEEDBACK_REASONS)
 # folders, the tags, which conversation carries which tags, and the folder
 # the open conversation is in -- as the app now holds them. None means the
 # write did not land, and the screen keeps what it had.
-LibraryState = tuple[
-    list[dict[str, Any]], list[dict[str, Any]], dict[str, list[str]], str | None
-]
+LibraryState = tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, list[str]], str | None]
 
 
 class ModelPicker(ModalScreen[str | None]):
@@ -142,9 +140,7 @@ class Confirm(ModalScreen[bool]):
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Static(self.message, markup=False)
-            yield Static(
-                self.hint or "Enter confirms, Esc cancels.", classes="hint", markup=False
-            )
+            yield Static(self.hint or "Enter confirms, Esc cancels.", classes="hint", markup=False)
 
     def action_yes(self) -> None:
         self.dismiss(True)
@@ -450,9 +446,11 @@ class Roles(ModalScreen[str | None]):
         self.query_one("#role-rows", OptionList).focus()
 
     def _headline(self) -> str:
-        return (f"Prompt roles — {len(self.roles)} saved "
-                "(Enter applies the highlighted one to this chat, a makes one, "
-                "d deletes it, Esc closes)")
+        return (
+            f"Prompt roles — {len(self.roles)} saved "
+            "(Enter applies the highlighted one to this chat, a makes one, "
+            "d deletes it, Esc closes)"
+        )
 
     def _options(self) -> list[Option]:
         return [
@@ -603,9 +601,7 @@ class Accounts(ModalScreen[dict[str, Any] | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Static(
-                "Signed-in accounts (Enter switches, Esc cancels)", markup=False
-            )
+            yield Static("Signed-in accounts (Enter switches, Esc cancels)", markup=False)
             yield OptionList(*self._options(), id="account-rows")
 
     def on_mount(self) -> None:
@@ -775,10 +771,12 @@ class Notifications(ModalScreen[None]):
         if not self.rows:
             return "No unread notifications." if self.unread_only else "No notifications."
         unread = sum(1 for row in self.rows if not row.get("read_at"))
-        return (f"Notifications — {unread} unread of {len(self.rows)} loaded, "
-                f"page {self.page} of {self._pages()} "
-                "(r reads the highlighted one, a reads all, u unread only, "
-                "n and p turn pages, Esc closes)")
+        return (
+            f"Notifications — {unread} unread of {len(self.rows)} loaded, "
+            f"page {self.page} of {self._pages()} "
+            "(r reads the highlighted one, a reads all, u unread only, "
+            "n and p turn pages, Esc closes)"
+        )
 
     def _options(self) -> list[Option]:
         options: list[Option] = []
@@ -988,10 +986,12 @@ class Library(ModalScreen[None]):
 
     def _headline(self) -> str:
         mine = self.assignments.get(self.conversation_id, [])
-        return (f"Library — {len(self.folders)} folders, {len(self.tags)} tags, "
-                f"{len(mine)} on this chat "
-                "(f makes a folder, t a tag, m files this chat in the highlighted "
-                "folder, Space toggles the highlighted tag, Esc closes)")
+        return (
+            f"Library — {len(self.folders)} folders, {len(self.tags)} tags, "
+            f"{len(mine)} on this chat "
+            "(f makes a folder, t a tag, m files this chat in the highlighted "
+            "folder, Space toggles the highlighted tag, Esc closes)"
+        )
 
     def _options(self) -> list[Option]:
         options: list[Option] = [Option("— Folders —", id="head-folders", disabled=True)]

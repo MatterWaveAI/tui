@@ -684,7 +684,9 @@ class HttpChatAPI:
         """`POST /api/attachments` by way of the SDK: the id the next turn
         names in `attachment_ids`. An upload that lands twice would store
         the file twice, so it is a write: no retries."""
-        return await self._writes.attachments.upload(data, filename, conversation_id=conversation_id)
+        return await self._writes.attachments.upload(
+            data, filename, conversation_id=conversation_id
+        )
 
     async def attachment_scan_status(self, attachment_id: str) -> str:
         """`GET /api/attachments/{id}/scan`: where the malware scan of one of

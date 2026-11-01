@@ -12,8 +12,10 @@ def test_kitty_is_detected_from_its_env():
     assert images.detect_backend({"KITTY_WINDOW_ID": "1"}) == "kitty"
     assert images.detect_backend({"KITTY_PID": "42"}) == "kitty"
     assert images.detect_backend({"TERM": "xterm-kitty"}) == "kitty"
-    assert images.detect_backend({"TERM": "xterm-256color",
-                                  "TERM_PROGRAM": "ghostty-kitty"}) == "kitty"
+    assert (
+        images.detect_backend({"TERM": "xterm-256color", "TERM_PROGRAM": "ghostty-kitty"})
+        == "kitty"
+    )
 
 
 def test_terminals_name_their_protocol():

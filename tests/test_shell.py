@@ -96,7 +96,7 @@ async def test_a_yes_runs_the_command_and_shows_the_output():
 async def test_a_fenced_answer_proposes_its_contents_only():
     api = FakeAPI()
     answer = message(
-        "a1", "assistant", '```bash\ngit status --short\n```', parent="u1", model="grt-nano"
+        "a1", "assistant", "```bash\ngit status --short\n```", parent="u1", model="grt-nano"
     )
     api.script = happy_script()
     api.script[-1] = fr.DoneFrame(answer)
@@ -191,7 +191,11 @@ def test_the_shell_is_detected_per_platform():
     pwsh = detect_shell({"PSModulePath": ps, "POWERSHELL_DISTRIBUTION_CHANNEL": "MSI"}, "Windows")
     assert pwsh.argv[0] == "pwsh"
     cmd = detect_shell({"PSModulePath": "machine", "COMSPEC": "C:\\Windows\\cmd.exe"}, "Windows")
-    assert (cmd.os_name, cmd.name, cmd.argv) == ("Windows", "cmd.exe", ("C:\\Windows\\cmd.exe", "/c"))
+    assert (cmd.os_name, cmd.name, cmd.argv) == (
+        "Windows",
+        "cmd.exe",
+        ("C:\\Windows\\cmd.exe", "/c"),
+    )
     zsh = detect_shell({"SHELL": "/bin/zsh"}, "Darwin")
     assert (zsh.os_name, zsh.name, zsh.argv) == ("macOS", "zsh", ("/bin/zsh", "-c"))
     assert detect_shell({}, "Linux") == Shell("Linux", "sh", ("/bin/sh", "-c"))

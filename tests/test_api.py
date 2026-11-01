@@ -94,7 +94,9 @@ async def test_a_resume_refused_with_401_signs_in_again_and_carries_on():
     assert [i.content for i in items if isinstance(i, fr.DeltaFrame)] == ["Hel", "lo"]
     assert isinstance(items[-1], fr.DoneFrame)
     assert [r.headers["authorization"] for r in seen] == [
-        "Bearer mw_one", "Bearer mw_one", "Bearer mw_two",
+        "Bearer mw_one",
+        "Bearer mw_one",
+        "Bearer mw_two",
     ]
     assert all(r.headers.get("last-event-id") == "g1:1" for r in seen[1:])
 
@@ -220,10 +222,18 @@ async def test_the_picker_routes_go_through_the_same_client_as_the_tui():
 PINNED = {**CONV, "pinned_at": "2026-10-27T00:00:00Z"}
 ARCHIVED = {**CONV, "archived_at": "2026-10-27T00:00:00Z"}
 USAGE = {
-    "unit": "tokens", "used": 1234, "included": 100000, "remaining": 98766,
-    "percent": 1.234, "warn": False, "in_overage": False, "exhausted": False,
-    "period_start": "2026-10-01", "resets_at": "2026-11-01",
-    "plan": {"name": "Free"}, "overage": {},
+    "unit": "tokens",
+    "used": 1234,
+    "included": 100000,
+    "remaining": 98766,
+    "percent": 1.234,
+    "warn": False,
+    "in_overage": False,
+    "exhausted": False,
+    "period_start": "2026-10-01",
+    "resets_at": "2026-11-01",
+    "plan": {"name": "Free"},
+    "overage": {},
 }
 
 
@@ -313,20 +323,38 @@ async def test_fork_share_and_usage_go_through_the_sdk():
 
 
 NOTIFICATION = {
-    "id": "n1", "kind": "budget.warn", "title": "80% of this period's tokens used",
+    "id": "n1",
+    "kind": "budget.warn",
+    "title": "80% of this period's tokens used",
     "body": "Usage past them is refused or billed at list price.",
-    "link": "/settings/usage", "created_at": "2026-10-29T00:00:00Z", "read_at": None,
+    "link": "/settings/usage",
+    "created_at": "2026-10-29T00:00:00Z",
+    "read_at": None,
 }
 SHARE = {
-    "id": "s1", "conversation_id": "c1", "title": "t", "message_count": 2,
-    "include_attachments": False, "created_at": "2026-10-29T00:00:00Z",
-    "expires_at": None, "revoked_at": None, "view_count": 3, "status": "active",
+    "id": "s1",
+    "conversation_id": "c1",
+    "title": "t",
+    "message_count": 2,
+    "include_attachments": False,
+    "created_at": "2026-10-29T00:00:00Z",
+    "expires_at": None,
+    "revoked_at": None,
+    "view_count": 3,
+    "status": "active",
 }
 BUDGET = {
-    "period_start": "2026-10-01", "included_tokens": 100000, "tokens_used": 1234,
-    "remaining_tokens": 98766, "overage_enabled": True, "overage_cap_micros": 1000000,
-    "overage_micros": 250000, "member_default_cap_micros": None,
-    "member_cap": None, "member_spent": 0, "member_exhausted": False,
+    "period_start": "2026-10-01",
+    "included_tokens": 100000,
+    "tokens_used": 1234,
+    "remaining_tokens": 98766,
+    "overage_enabled": True,
+    "overage_cap_micros": 1000000,
+    "overage_micros": 250000,
+    "member_default_cap_micros": None,
+    "member_cap": None,
+    "member_spent": 0,
+    "member_exhausted": False,
 }
 
 
@@ -446,8 +474,14 @@ async def test_an_attachment_is_uploaded_as_multipart():
         assert "picture.png" in body and "PNGDATA" in body
         return httpx.Response(
             200,
-            json={"id": "att1", "filename": "picture.png", "content_type": "image/png",
-                  "size_bytes": 7, "scan_status": "clean", "created_at": "1"},
+            json={
+                "id": "att1",
+                "filename": "picture.png",
+                "content_type": "image/png",
+                "size_bytes": 7,
+                "scan_status": "clean",
+                "created_at": "1",
+            },
         )
 
     attachment = await make(handler).upload_attachment(b"PNGDATA", "picture.png", "c1")
@@ -532,19 +566,25 @@ DONE_ONLY = 'event: done\ndata: {"id": "a1", "role": "assistant", "truncated": f
 async def test_send_names_the_attachments_on_the_wire():
     def handler(request: httpx.Request) -> httpx.Response:
         assert json.loads(request.content) == {
-            "content": "look", "model": "grt-nano", "attachment_ids": ["att1"],
+            "content": "look",
+            "model": "grt-nano",
+            "attachment_ids": ["att1"],
         }
         return sse(200, DONE_ONLY, 1)
 
-    items = [i async for i in make(handler).send("c1", "look", "grt-nano",
-                                                 attachment_ids=["att1"])]
+    items = [i async for i in make(handler).send("c1", "look", "grt-nano", attachment_ids=["att1"])]
     assert isinstance(items[-1], fr.DoneFrame)
 
 
 LIBRARY = {
     "folders": [
-        {"id": "f1", "name": "Work", "position": 0,
-         "created_at": "2026-10-29T00:00:00Z", "updated_at": "2026-10-29T00:00:00Z"}
+        {
+            "id": "f1",
+            "name": "Work",
+            "position": 0,
+            "created_at": "2026-10-29T00:00:00Z",
+            "updated_at": "2026-10-29T00:00:00Z",
+        }
     ],
     "tags": [{"id": "t1", "name": "draft", "created_at": "2026-10-29T00:00:00Z"}],
     "assignments": {"c1": ["t1"]},
@@ -574,7 +614,8 @@ async def test_the_library_routes_carry_their_bodies_and_file_the_conversation()
             return httpx.Response(200, json={**CONV, "folder_id": body["folder_id"]})
         if path == "/api/library/conversations/c1/tags" and method == "PUT":
             return httpx.Response(
-                200, json={"conversation_id": "c1", "tag_ids": json.loads(request.content)["tag_ids"]}
+                200,
+                json={"conversation_id": "c1", "tag_ids": json.loads(request.content)["tag_ids"]},
             )
         return httpx.Response(404, json={"detail": path})
 
@@ -624,12 +665,12 @@ async def test_a_report_names_one_message_and_the_answer_is_typed():
         assert (request.method, request.url.path) == ("POST", "/api/conversations/c1/report")
         return httpx.Response(201, json={"id": "rep1", "kind": "unsafe"})
 
-    filed = await make(handler).report_conversation(
-        "c1", "unsafe", note="beeping", message_id="m7"
-    )
+    filed = await make(handler).report_conversation("c1", "unsafe", note="beeping", message_id="m7")
     assert (filed.id, filed.kind) == ("rep1", "unsafe")
     assert json.loads(seen[0].content) == {
-        "kind": "unsafe", "message_id": "m7", "note": "beeping",
+        "kind": "unsafe",
+        "message_id": "m7",
+        "note": "beeping",
     }
 
     # A conversation-wide report leaves the message id out of the body,
@@ -710,10 +751,22 @@ async def test_accounts_list_and_switch():
                 200,
                 json={
                     "accounts": [
-                        {"slot": 0, "current": True, "subject": "a", "email": "a@x.test",
-                         "name": "A", "org_name": "Work"},
-                        {"slot": 1, "current": False, "subject": "b", "email": "b@x.test",
-                         "name": "B", "org_name": "Home"},
+                        {
+                            "slot": 0,
+                            "current": True,
+                            "subject": "a",
+                            "email": "a@x.test",
+                            "name": "A",
+                            "org_name": "Work",
+                        },
+                        {
+                            "slot": 1,
+                            "current": False,
+                            "subject": "b",
+                            "email": "b@x.test",
+                            "name": "B",
+                            "org_name": "Home",
+                        },
                     ],
                     "max": 4,
                     "room": True,
@@ -755,9 +808,15 @@ async def test_an_attachment_download_mints_a_url_and_follows_it():
         if path == "/api/attachments/att1":
             return httpx.Response(
                 200,
-                json={"id": "att1", "filename": "picture.png", "content_type": "image/png",
-                      "size_bytes": 4, "scan_status": "clean", "created_at": "1",
-                      "download_url": f"{BASE}/api/attachments/att1/content?token=t"},
+                json={
+                    "id": "att1",
+                    "filename": "picture.png",
+                    "content_type": "image/png",
+                    "size_bytes": 4,
+                    "scan_status": "clean",
+                    "created_at": "1",
+                    "download_url": f"{BASE}/api/attachments/att1/content?token=t",
+                },
             )
         if path == "/api/attachments/att1/content":
             assert request.url.params["token"] == "t"
@@ -786,18 +845,31 @@ async def test_an_import_is_uploaded_multipart_and_polled():
             assert "CONVERSATIONS" in body
             return httpx.Response(
                 202,
-                json={"id": "imp1", "status": "pending", "source": "chatgpt",
-                      "conversations_total": 3, "conversations_created": 0,
-                      "conversations_done": 0, "messages_created": 0},
+                json={
+                    "id": "imp1",
+                    "status": "pending",
+                    "source": "chatgpt",
+                    "conversations_total": 3,
+                    "conversations_created": 0,
+                    "conversations_done": 0,
+                    "messages_created": 0,
+                },
             )
         if path == "/api/me/imports" and method == "GET":
             return httpx.Response(200, json={"data": [{"id": "imp1", "status": "running"}]})
         if path == "/api/me/imports/imp1":
             return httpx.Response(
                 200,
-                json={"id": "imp1", "status": "done", "source": "chatgpt",
-                      "conversations_total": 3, "conversations_created": 3,
-                      "conversations_done": 3, "messages_created": 42, "error": None},
+                json={
+                    "id": "imp1",
+                    "status": "done",
+                    "source": "chatgpt",
+                    "conversations_total": 3,
+                    "conversations_created": 3,
+                    "conversations_done": 3,
+                    "messages_created": 42,
+                    "error": None,
+                },
             )
         return httpx.Response(404, json={"detail": path})
 
@@ -839,10 +911,13 @@ async def test_an_account_export_is_started_polled_and_downloaded():
         if path == "/api/me/export/exp1" and method == "GET":
             return httpx.Response(
                 200,
-                json={"id": "exp1", "status": "ready", "size_bytes": 11,
-                      "created_at": "2026-10-30T00:00:00Z",
-                      "download_url": "/api/me/export/exp1/download"
-                                      "?expires=1793385600&sig=signed"},
+                json={
+                    "id": "exp1",
+                    "status": "ready",
+                    "size_bytes": 11,
+                    "created_at": "2026-10-30T00:00:00Z",
+                    "download_url": "/api/me/export/exp1/download?expires=1793385600&sig=signed",
+                },
             )
         if path == "/api/me/export/exp1/download" and method == "GET":
             assert request.url.params["expires"] == "1793385600"

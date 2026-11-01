@@ -157,12 +157,15 @@ DELTA = 'id: g1:0\nevent: delta\ndata: {"content": "Half", "index": 0}\n\n'
     ("body", "status", "note"),
     [
         (
-            USER + DELTA + 'event: done\ndata: {"id": "a1", "role": "assistant", "truncated": true}\n\n',
+            USER
+            + DELTA
+            + 'event: done\ndata: {"id": "a1", "role": "assistant", "truncated": true}\n\n',
             cli.EXIT_TRUNCATED,
             "cut short",
         ),
         (
-            USER + 'event: error\ndata: {"detail": "The monthly token budget is used up", "code": "budget"}\n\n',
+            USER
+            + 'event: error\ndata: {"detail": "The monthly token budget is used up", "code": "budget"}\n\n',
             cli.EXIT_REFUSED,
             "budget",
         ),
@@ -172,7 +175,9 @@ DELTA = 'id: g1:0\nevent: delta\ndata: {"content": "Half", "index": 0}\n\n'
             "moderation",
         ),
         (
-            USER + DELTA + 'event: error\ndata: {"detail": "Lost the connection to the model gateway"}\n\n',
+            USER
+            + DELTA
+            + 'event: error\ndata: {"detail": "Lost the connection to the model gateway"}\n\n',
             cli.EXIT_ERROR,
             "gateway",
         ),
@@ -208,9 +213,7 @@ def test_a_device_sign_in_prints_nothing_to_stdout_but_the_answer(capsys, monkey
     monkeypatch.delenv("MATTERWAVE_API_KEY", raising=False)
 
     async def device_login(base_url, on_code, **_):
-        on_code(
-            DeviceCode("dc", "ABCD-EFGH", f"{BASE}/device", f"{BASE}/device?code=ABCD", 600, 1)
-        )
+        on_code(DeviceCode("dc", "ABCD-EFGH", f"{BASE}/device", f"{BASE}/device?code=ABCD", 600, 1))
         return DeviceToken("mw_device", "bearer", [])
 
     monkeypatch.setattr(cli, "device_login", device_login)
@@ -362,9 +365,7 @@ def test_logout_of_a_dead_key_just_forgets_it(memory_keyring, monkeypatch):
     assert memory_keyring.entries == {}
 
 
-def test_logout_keeps_the_key_when_the_server_cannot_revoke_it(
-    memory_keyring, capsys, monkeypatch
-):
+def test_logout_keeps_the_key_when_the_server_cannot_revoke_it(memory_keyring, capsys, monkeypatch):
     memory_keyring.entries[("matterwave", BASE)] = DEVICE_KEY
     seen: list[tuple[str, str]] = []
     monkeypatch.setattr("matterwave_tui.api.httpx.AsyncClient", keys_api(seen, None, 500))

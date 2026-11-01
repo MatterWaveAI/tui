@@ -1,12 +1,13 @@
-# CI on every push to any branch and on every pull request: the work lives
-# on develop and on feature branches, not only on main. The publish
+# CI on every push to develop and main and on every pull request into them:
+# develop is where the work lands, main is what gets released. The publish
 # workflow (publish-pypi.yml) stays tag-only and runs the same gate.
 name: CI
 
 on:
   push:
-    branches: ["**"]
+    branches: [develop, main]
   pull_request:
+    branches: [develop, main]
 
 # The workflow token reads the repository and nothing else; a job that
 # needs more says so itself.

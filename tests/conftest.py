@@ -43,6 +43,15 @@ def memory_keyring() -> Iterator[MemoryKeyring]:
     yield backend
 
 
+@pytest.fixture(autouse=True)
+def state_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Every test keeps its roles and dismissed announcements in a scratch
+    directory, never the developer's own."""
+    root = tmp_path_factory.mktemp("state")
+    monkeypatch.setenv("MATTERWAVE_STATE_DIR", str(root))
+    return root
+
+
 @pytest.fixture
 def recorded():
     def load(name: str) -> str:

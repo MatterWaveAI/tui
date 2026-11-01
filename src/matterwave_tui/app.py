@@ -30,6 +30,7 @@ from .dictation import MEDIA_TYPES, MicRecorder, media_type_for, mic_available
 from .export import conversation_markdown, export_filename, free_path
 from .failures import Failure, classify, retry_in
 from .models import is_image_filename, model_accepts_images, model_window, vision_capable_model_ids
+from .paths import migrate_legacy_state, state_dir
 from .roles import load_roles, roles_path, save_roles
 from .screens import (
     Accounts,
@@ -102,13 +103,8 @@ SCAN_POLLS_MAX = 60
 
 
 def _state_path() -> Path:
-    """Where the app keeps its per-device state. MATTERWAVE_STATE_DIR moves
-    it, which is also how the tests point it at a scratch directory."""
-    root = os.environ.get("MATTERWAVE_STATE_DIR")
-    if not root:
-        xdg = os.environ.get("XDG_STATE_HOME")
-        root = xdg if xdg else str(Path.home() / ".local" / "state")
-    return Path(root) / "matterwave-tui" / "dismissed-announcements.json"
+    """Where the announcements this device dismissed are kept."""
+    return state_dir() / "dismissed-announcements.json"
 
 
 def _read_dismissed(path: Path) -> set[str]:
@@ -428,7 +424,9 @@ class MatterWaveApp(App[None]):
         # so a redraw hands a rebuilt view its picture without a re-fetch.
         self._image_data: dict[str, bytes] = {}
         # The prompt library: named system texts on this device, applied
-        # with /role or the `L` screen. Empty until roles.json is read.
+        # with /role or the `L` screen. Empty until roles.json is read,
+        # which is after an earlier release's files have moved over.
+        migrate_legacy_state()
         self.roles = load_roles(roles_path())
         # Shell assistant mode: each turn tells the model the OS and shell,
         # and each finished answer is a proposed command, run only after

@@ -1808,7 +1808,21 @@ async def test_dictation_without_the_microphone_extra_transcribes_a_file(tmp_pat
 
 @pytest.mark.asyncio
 async def test_dictation_with_the_microphone_posts_the_clip(monkeypatch):
+    # The microphone itself is stood in for before the screen starts it:
+    # enter "stops" it with a clip, which goes to the route and lands as
+    # text in the composer. No test opens a real microphone.
+    class FakeRecorder:
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> bytes:
+            return b"RIFF"
+
+        def discard(self) -> None:
+            return None
+
     monkeypatch.setattr("matterwave_tui.app.mic_available", lambda: True)
+    monkeypatch.setattr("matterwave_tui.app.MicRecorder", FakeRecorder)
     api = FakeAPI()
     app = MatterWaveApp(api)
     shown = capture_notify(app)
@@ -1818,17 +1832,6 @@ async def test_dictation_with_the_microphone_posts_the_clip(monkeypatch):
         await settle(app, pilot)
         recorder_screen = app.screen
         assert isinstance(recorder_screen, Dictation)
-
-        # The microphone itself is stubbed: enter "stops" it with a clip,
-        # which goes to the route and lands as text in the composer.
-        class FakeRecorder:
-            def stop(self) -> bytes:
-                return b"RIFF"
-
-            def discard(self) -> None:
-                return None
-
-        recorder_screen.recorder = FakeRecorder()
         await pilot.press("enter")
         await settle(app, pilot)
         assert api.transcribes[-1][:3] == ("dictation.wav", "audio/wav", None)

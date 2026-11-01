@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Windows: state (prompt roles, dismissed announcements) lives in
+  `%LOCALAPPDATA%\matterwave-tui`, and macOS's in Application Support,
+  instead of `~/.local/state` on every OS; files an earlier release left
+  there move across on the first run.
 - The status line's unread badge, usage and overage are read again after
   every answer, not only at start-up and after an account switch.
 - Defaults that lost data or left a key live: Enter in the new-chat dialog

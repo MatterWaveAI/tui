@@ -1,0 +1,3 @@
+# The repository is LF everywhere; a checkout on Windows is too, so a
+# commit from there does not turn every line it touches into CRLF.
+* text=auto eol=lf

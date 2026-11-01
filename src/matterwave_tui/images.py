@@ -2,7 +2,7 @@
 protocol, iTerm2's inline images (OSC 1337), and sixel behind Pillow.
 
 Detection is env-only, the way the app reads its other configuration
-(`MATTERWAVE_BASE_URL`, `MATTERWAVE_STATE_DIR`): a DA1 query would have to
+(`MATTERWAVE_BASE_URL`, `MATTERWAVE_SHELL`): a DA1 query would have to
 fight a running Textual app for the terminal's answer. The terminals say
 who they are instead. Kitty (`KITTY_WINDOW_ID`, `KITTY_PID`, a `TERM` that
 names it), Ghostty and WezTerm speak the kitty protocol; iTerm2

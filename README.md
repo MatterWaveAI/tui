@@ -181,7 +181,7 @@ resume) before it is reported as cut off.
 | `MATTERWAVE_API_KEY` | an `mw_` key for this shell, used instead of the keyring and never stored |
 | `MATTERWAVE_IMAGES` | `off` never draws images; `kitty`, `iterm2` or `sixel` forces a protocol; unset or `auto` detects |
 | `MATTERWAVE_SHELL` | the shell the shell assistant writes and runs commands for (`pwsh`, `cmd`, `/bin/zsh`, …) |
-| `MATTERWAVE_STATE_DIR` | where the dismissed announcements and the prompt roles are kept (else `$XDG_STATE_HOME`, else `~/.local/state`) |
+| `MATTERWAVE_STATE_DIR` | where the dismissed announcements and the prompt roles are kept, as `<dir>/matterwave-tui`; else the platform's state directory: `$XDG_STATE_HOME` or `~/.local/state` on Linux, `%LOCALAPPDATA%` on Windows, `~/Library/Application Support` on macOS |
 
 ## Development
 

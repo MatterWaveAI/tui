@@ -901,7 +901,13 @@ class MatterWaveApp(App[None]):
                     image_id, at.x, at.y, "", images.kitty_delete(image_id)
                 )
             else:
-                placement = images.sixel_placement(image_id, at.x + 1, at.y + 1, view.data)
+                placement = (
+                    images.iterm2_placement(
+                        image_id, at.x + 1, at.y + 1, max(at.width, 8), max(at.height, 2), view.data
+                    )
+                    if self.image_backend == "iterm2"
+                    else images.sixel_placement(image_id, at.x + 1, at.y + 1, view.data)
+                )
                 if placement is None:
                     view.set_failed()
                     continue

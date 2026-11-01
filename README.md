@@ -108,9 +108,13 @@ Letter keys apply when focus is not in the composer or the search box; `Esc` get
 The status line also carries the org's balance for the period (`usage used/included (%)`, from
 `/api/me/usage`, read again after every answer along with the overage and the unread count) and any files attached but not sent yet. On a deployment
 that scans uploads, a file shows `(scanning…)` until the scan is clean; a message sent before then
-waits for it, and a file the scan rejects is dropped with its name said. An attached
-image or document renders in the transcript as an `[image: filename]` placeholder line — the
-same line the Markdown export writes — and its id goes out with the next turn.
+waits for it, and a file the scan rejects is dropped with its name said. An image in a
+message is drawn in the transcript where the terminal can show pictures: kitty, Ghostty and
+WezTerm (the kitty protocol), iTerm2 (its inline images), and foot, mlterm, Konsole, contour and
+Windows Terminal (sixel, which needs the `images` extra: `pip install matterwave-tui[images]`).
+`MATTERWAVE_IMAGES=off` turns it off and `kitty`, `iterm2` or `sixel` forces one. Anywhere else,
+and whenever a picture cannot be drawn, it is an `[image: filename]` placeholder line — the same
+line the Markdown export writes. A document is always its `[document: filename]` line.
 
 A draft is kept per conversation while the app runs. The model picker groups models as the web
 does — GRT, partner, research preview — and shows a model your plan does not include with the plan

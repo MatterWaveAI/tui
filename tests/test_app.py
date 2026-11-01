@@ -1845,6 +1845,41 @@ async def test_an_image_part_is_loaded_when_the_terminal_can_draw_it(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_an_image_part_draws_inline_on_iterm2(monkeypatch):
+    monkeypatch.setenv("MATTERWAVE_IMAGES", "auto")
+    monkeypatch.setenv("TERM_PROGRAM", "iTerm.app")
+    for name in ("KITTY_WINDOW_ID", "KITTY_PID", "GHOSTTY_RESOURCES_DIR", "WT_SESSION"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    api = FakeAPI()
+    png = b"\x89PNG\r\n\x1a\n" + b"pixels"
+    api.attachments_store["att1"] = png
+    api.tree_messages = [
+        message(
+            "u1",
+            "user",
+            "q",
+            parts=[
+                {
+                    "type": "image",
+                    "attachment_id": "att1",
+                    "filename": "pic.png",
+                    "content_type": "image/png",
+                }
+            ],
+        ),
+    ]
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert app.image_backend == "iterm2"
+        assert app.query(ImageView).first().data == png
+        app._image_placements.clear()
+        app._refresh_images()
+        assert any("\x1b]1337;File=inline=1" in op for op in app._image_ops)
+
+
+@pytest.mark.asyncio
 async def test_an_image_part_stays_a_placeholder_without_a_backend(monkeypatch):
     monkeypatch.setenv("MATTERWAVE_IMAGES", "off")
     api = FakeAPI()

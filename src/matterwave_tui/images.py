@@ -1,16 +1,18 @@
 """Terminal image rendering for attachment parts: the kitty graphics
-protocol, with sixel behind Pillow where the terminal wants that instead.
+protocol, iTerm2's inline images (OSC 1337), and sixel behind Pillow.
 
 Detection is env-only, the way the app reads its other configuration
-(`MATTERWAVE_BASE_URL`, `MATTERWAVE_STATE_DIR`): kitty advertises itself
-(`KITTY_WINDOW_ID`, `KITTY_PID`, a `TERM` that names it), and sixel has no
-reliable client-side probe from inside a running Textual app -- a DA1
-query would have to fight the app for the terminal's answer -- so sixel is
-opt-in. `MATTERWAVE_IMAGES` is the toggle:
+(`MATTERWAVE_BASE_URL`, `MATTERWAVE_STATE_DIR`): a DA1 query would have to
+fight a running Textual app for the terminal's answer. The terminals say
+who they are instead. Kitty (`KITTY_WINDOW_ID`, `KITTY_PID`, a `TERM` that
+names it), Ghostty and WezTerm speak the kitty protocol; iTerm2
+(`TERM_PROGRAM=iTerm.app`, `LC_TERMINAL=iTerm2`) its own; foot, mlterm,
+Konsole, contour and Windows Terminal (`WT_SESSION`) draw sixel.
+`MATTERWAVE_IMAGES` is the toggle:
 
-* unset or `auto` -- kitty when its env is there, otherwise none;
+* unset or `auto` -- whichever the terminal's env names, otherwise none;
 * `off` -- never render, the text placeholder stays;
-* `kitty` / `sixel` -- force one.
+* `kitty` / `iterm2` / `sixel` -- force one.
 
 The sequences here are pure text; writing them is the app's job (it owns
 the driver and the placement bookkeeping). A terminal that was guessed
@@ -37,27 +39,46 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 SIXEL_MAX_PX = 800
 
 OFF_VALUES = frozenset({"off", "0", "false", "no"})
-FORCED_VALUES = frozenset({"kitty", "sixel"})
+FORCED_VALUES = frozenset({"kitty", "iterm2", "sixel"})
+# `TERM_PROGRAM` values of terminals that speak the kitty protocol.
+KITTY_PROGRAMS = frozenset({"kitty", "ghostty", "wezterm"})
+# `TERM` values (and prefixes) of terminals that draw sixel.
+SIXEL_TERMS = ("foot", "mlterm", "contour", "yaft")
 
-Backend = str  # "kitty" | "sixel"
+Backend = str  # "kitty" | "iterm2" | "sixel"
 
 
 def detect_backend(env: Mapping[str, str]) -> Backend | None:
     """Which graphics protocol to use, honouring the `MATTERWAVE_IMAGES`
-    toggle: `off` is never, `kitty`/`sixel` force one, anything else
-    auto-detects -- kitty by its env, sixel never (no probe, so no guess)."""
+    toggle: `off` is never, `kitty`/`iterm2`/`sixel` force one, anything
+    else asks the terminal's env (see the module's note)."""
     config = env.get(CONFIG_ENV, "").strip().lower()
     if config in OFF_VALUES:
         return None
     if config in FORCED_VALUES:
         return config
-    if env.get("KITTY_WINDOW_ID") or env.get("KITTY_PID"):
-        return "kitty"
     term = (env.get("TERM") or "").lower()
     term_program = (env.get("TERM_PROGRAM") or "").lower()
-    if "kitty" in term or "kitty" in term_program:
+    if (
+        env.get("KITTY_WINDOW_ID")
+        or env.get("KITTY_PID")
+        or env.get("GHOSTTY_RESOURCES_DIR")
+        or "kitty" in term
+        or "ghostty" in term
+        or "kitty" in term_program
+        or term_program in KITTY_PROGRAMS
+    ):
         return "kitty"
-    if "sixel" in term:
+    if term_program == "iterm.app" or (env.get("LC_TERMINAL") or "").lower() == "iterm2":
+        return "iterm2"
+    if (
+        "sixel" in term
+        or term.startswith(SIXEL_TERMS)
+        or env.get("MLTERM")
+        or env.get("KONSOLE_VERSION")
+        or env.get("WT_SESSION")
+        or (env.get("TERMINAL_NAME") or "").lower() == "contour"
+    ):
         return "sixel"
     return None
 
@@ -141,6 +162,21 @@ def kitty_placement(
         *kitty_transmit_chunks(image_id, png),
         kitty_place_at_cursor(image_id, columns, rows),
     ]
+
+
+# --- iTerm2 inline images --------------------------------------------------------
+
+
+def iterm2_sequence(columns: int, rows: int, data: bytes) -> str:
+    """The OSC 1337 `File` write: the bytes as base64, drawn inline at the
+    cursor and scaled into the cells under it. iTerm2 decodes PNG, JPEG
+    and GIF itself, so no Pillow."""
+    payload = base64.b64encode(data).decode("ascii")
+    keys = (
+        f"inline=1;size={len(data)};width={max(columns, 1)};height={max(rows, 1)};"
+        "preserveAspectRatio=1"
+    )
+    return f"\x1b]1337;File={keys}:{payload}\x07"
 
 
 # --- sixel ----------------------------------------------------------------------
@@ -232,6 +268,20 @@ class Placement:
         self.y = y
         self.sequence = sequence
         self.remove = remove
+
+
+def iterm2_placement(
+    image_id: int, column: int, row: int, columns: int, rows: int, data: bytes
+) -> Placement:
+    """An iTerm2 placement at a cell. Like sixel, the picture has no id to
+    delete by: the next redraw of those cells is what takes it down."""
+    return Placement(
+        image_id,
+        column,
+        row,
+        move_cursor_to(column, row) + iterm2_sequence(columns, rows, data),
+        "",
+    )
 
 
 def sixel_placement(image_id: int, column: int, row: int, data: bytes) -> Placement | None:

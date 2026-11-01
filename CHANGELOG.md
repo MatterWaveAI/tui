@@ -49,6 +49,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The test suite signs in against an in-memory keyring, so a run no longer
   writes to the developer's OS keyring and passes on a runner without one.
 
+### Added
+
+- Images in iTerm2 (OSC 1337 inline images), and auto-detection of the
+  terminals that draw them without being told: Ghostty and WezTerm speak
+  the kitty protocol, and foot, mlterm, Konsole, contour and Windows
+  Terminal draw sixel. `MATTERWAVE_IMAGES=iterm2` forces the new one.
+
 ### Changed
 
 - The model list, conversation create (temporary included), delete, pin,

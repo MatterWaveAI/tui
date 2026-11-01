@@ -16,6 +16,41 @@ def test_kitty_is_detected_from_its_env():
                                   "TERM_PROGRAM": "ghostty-kitty"}) == "kitty"
 
 
+def test_terminals_name_their_protocol():
+    # Ghostty and WezTerm speak the kitty protocol.
+    assert images.detect_backend({"TERM_PROGRAM": "ghostty"}) == "kitty"
+    assert images.detect_backend({"TERM": "xterm-ghostty"}) == "kitty"
+    assert images.detect_backend({"GHOSTTY_RESOURCES_DIR": "/usr/share/ghostty"}) == "kitty"
+    assert images.detect_backend({"TERM_PROGRAM": "WezTerm"}) == "kitty"
+    # iTerm2 its own inline images.
+    assert images.detect_backend({"TERM_PROGRAM": "iTerm.app"}) == "iterm2"
+    assert images.detect_backend({"LC_TERMINAL": "iTerm2"}) == "iterm2"
+    # And these draw sixel without being told to.
+    assert images.detect_backend({"TERM": "foot"}) == "sixel"
+    assert images.detect_backend({"TERM": "foot-extra"}) == "sixel"
+    assert images.detect_backend({"TERM": "mlterm"}) == "sixel"
+    assert images.detect_backend({"MLTERM": "3.9"}) == "sixel"
+    assert images.detect_backend({"KONSOLE_VERSION": "240802"}) == "sixel"
+    assert images.detect_backend({"WT_SESSION": "e3c1"}) == "sixel"
+    assert images.detect_backend({"TERMINAL_NAME": "contour"}) == "sixel"
+    assert images.detect_backend({"MATTERWAVE_IMAGES": "iterm2"}) == "iterm2"
+    assert images.detect_backend({"MATTERWAVE_IMAGES": "off", "WT_SESSION": "e3c1"}) is None
+
+
+def test_an_iterm2_image_is_one_osc_1337_write():
+    png = b"\x89PNG\r\n\x1a\nxyz"
+    sequence = images.iterm2_sequence(40, 6, png)
+    assert sequence.startswith(
+        f"\x1b]1337;File=inline=1;size={len(png)};width=40;height=6;preserveAspectRatio=1:"
+    )
+    assert sequence.endswith("\x07")
+    payload = sequence.split(":", 1)[1].rstrip("\x07")
+    assert base64.b64decode(payload) == png
+    placement = images.iterm2_placement(3, 2, 5, 40, 6, png)
+    assert placement.sequence == "\x1b[5;2H" + sequence
+    assert placement.remove == ""
+
+
 def test_nothing_is_detected_without_a_tell():
     assert images.detect_backend({"TERM": "xterm-256color"}) is None
     assert images.detect_backend({}) is None

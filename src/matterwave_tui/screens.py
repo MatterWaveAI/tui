@@ -29,7 +29,7 @@ from . import markers
 from .api import NOTIFICATIONS_LIMIT_MAX, NOTIFICATIONS_PAGE
 from .auth import DeviceCode, LoginError
 from .dictation import MAX_RECORDING_S, MicRecorder
-from .models import picker_rows
+from .models import PickerRow, picker_rows
 
 # The per-thread instructions budget: shown as a counter, never enforced
 # here -- the server is authoritative and refuses more with a 422.
@@ -45,7 +45,10 @@ LibraryState = tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, list[
 
 
 class ModelPicker(ModalScreen[str | None]):
-    """Grouped like the web picker; a model the plan lacks is shown, not chosen."""
+    """Grouped like the web picker; a model the plan lacks is shown, not chosen.
+    When a preset fixes the conversation's model, the header and current badge
+    say so, and selecting a row hands back its id so the caller can refuse with
+    its reason."""
 
     BINDINGS = [Binding("escape", "dismiss_none", "Cancel")]
     DEFAULT_CSS = """
@@ -54,10 +57,20 @@ class ModelPicker(ModalScreen[str | None]):
         border: round $accent; background: $surface; padding: 0 1; }
     """
 
-    def __init__(self, models: list[dict[str, Any]], current: str | None) -> None:
+    def __init__(
+        self,
+        models: list[dict[str, Any]],
+        current: str | None,
+        *,
+        fixed_by: str | None = None,
+    ) -> None:
         super().__init__()
-        self.rows = picker_rows(models)
+        rows = picker_rows(models)
+        if current and all(r.model_id != current for r in rows):
+            rows = [PickerRow(current, current, selectable=True), *rows]
+        self.rows = rows
         self.current = current
+        self.fixed_by = fixed_by
 
     def compose(self) -> ComposeResult:
         options: list[Option] = []
@@ -65,12 +78,18 @@ class ModelPicker(ModalScreen[str | None]):
             if row.is_heading:
                 options.append(Option(f"— {row.label} —", id=f"heading-{i}", disabled=True))
             else:
-                label = row.label + (
-                    f"  ({markers.badge('current')})" if row.model_id == self.current else ""
-                )
+                badge = markers.badge("current")
+                if self.fixed_by and row.model_id == self.current:
+                    badge = f"{badge} · set by {self.fixed_by}"
+                label = row.label + (f"  ({badge})" if row.model_id == self.current else "")
                 options.append(Option(label, id=f"model-{i}", disabled=not row.selectable))
+        heading = (
+            f"Model fixed to {self.current} by the {self.fixed_by} preset (Esc closes)"
+            if self.fixed_by
+            else "Choose a model (Enter selects, Esc cancels)"
+        )
         with Vertical():
-            yield Static("Choose a model (Enter selects, Esc cancels)", markup=False)
+            yield Static(heading, markup=False)
             yield OptionList(*options, id="models")
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
@@ -82,6 +101,68 @@ class ModelPicker(ModalScreen[str | None]):
         # lock, so a plan's exclusion never depends on one widget's behaviour.
         if row.selectable:
             self.dismiss(row.model_id)
+
+    def action_dismiss_none(self) -> None:
+        self.dismiss(None)
+
+
+class PresetPicker(ModalScreen[str | None]):
+    """The org's live presets (`GET /api/org/presets`), 'No preset' to clear,
+    and — when the open conversation is on a deleted preset — that one row so
+    it is named and kept without being offered to any other conversation.
+    Dismisses with `""` for No preset, the preset id for a pick, or `None` on
+    Esc."""
+
+    BINDINGS = [Binding("escape", "dismiss_none", "Cancel")]
+    DEFAULT_CSS = """
+    PresetPicker { align: center middle; }
+    PresetPicker > Vertical { width: 80%; max-width: 90; height: auto; max-height: 80%;
+        border: round $accent; background: $surface; padding: 0 1; }
+    """
+
+    def __init__(
+        self,
+        presets: list[dict[str, Any]],
+        current: str | None,
+        *,
+        retired: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__()
+        self.current = current
+        rows: list[tuple[str, str]] = [("", "No preset — Your own model and instructions.")]
+        listed_ids: set[str] = set()
+        for preset in presets:
+            pid = str(preset.get("id") or "")
+            if not pid:
+                continue
+            listed_ids.add(pid)
+            name = str(preset.get("name") or pid)
+            desc = (
+                str(preset.get("description") or "").strip()
+                or f"Answers with {preset.get('model') or 'its model'}."
+            )
+            rows.append((pid, f"{name} — {desc}"))
+        if current and current not in listed_ids and retired is not None:
+            rname = str(retired.get("name") or current)
+            rows.append((current, f"{rname} — No longer offered; this conversation keeps it."))
+        self.rows = rows
+
+    def compose(self) -> ComposeResult:
+        active = self.current or ""
+        options: list[Option] = []
+        for i, (pid, text) in enumerate(self.rows):
+            label = text + (f"  ({markers.badge('current')})" if pid == active else "")
+            options.append(Option(label, id=f"preset-{i}"))
+        with Vertical():
+            yield Static("Choose a preset (Enter selects, Esc cancels)", markup=False)
+            yield OptionList(*options, id="presets")
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        option_id = event.option.id or ""
+        if not option_id.startswith("preset-"):
+            return
+        pid, _ = self.rows[int(option_id.removeprefix("preset-"))]
+        self.dismiss(pid)
 
     def action_dismiss_none(self) -> None:
         self.dismiss(None)

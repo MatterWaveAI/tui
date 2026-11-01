@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Organization presets (`M`, or "Choose preset…" on the command palette
+  when the organisation offers presets): picking a preset sets `preset_id`
+  on the conversation (`PATCH /api/conversations/{id}`, or `POST
+  /api/conversations` when chosen before the first turn), shows the
+  preset's name in the status line, fixes the model to the preset's model
+  (the model picker explains why it cannot be changed), and shows the
+  preset's welcome message in an empty conversation. Choosing "No preset"
+  clears `preset_id` and restores the conversation's own model. A
+  conversation on a deleted preset (`GET /api/org/presets/{id}`) still
+  names it and keeps its model without offering it to other conversations.
 - A conversation a connector opened (one started from a Slack routing
   rule) is captioned with where it is answered -- `Slack #support` --
   and, while open, a notice over the composer says so, with the thread's

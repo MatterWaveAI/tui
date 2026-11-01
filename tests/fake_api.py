@@ -16,6 +16,7 @@ from matterwave_sdk.models import (
     Conversation,
     ConversationContext,
     ConversationMessage,
+    ConversationPreset,
     FiledReport,
     Me,
     UsageBalance,
@@ -196,6 +197,10 @@ class FakeAPI:
         self.sent_attachment_ids: list[list[str] | None] = []
         self.leaf_moves: list[str] = []
         self.model_updates: list[tuple[str, str | None]] = []
+        self.preset_rows: list[dict[str, Any]] = []
+        self.retired_presets: dict[str, dict[str, Any]] = {}
+        self.preset_updates: list[tuple[str, str | None]] = []
+        self.created_presets: list[str | None] = []
         self.searches: list[str] = []
         self.all_reads = 0
         self.folder_renames: list[tuple[str, str]] = []
@@ -336,6 +341,28 @@ class FakeAPI:
     async def models(self) -> dict[str, Any]:
         return {"data": self.models_payload, "default_model": "grt-nano"}
 
+    async def presets(self) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.preset_rows]
+
+    async def preset(self, preset_id: str) -> dict[str, Any]:
+        for row in self.preset_rows:
+            if row.get("id") == preset_id:
+                return dict(row)
+        if preset_id in self.retired_presets:
+            return dict(self.retired_presets[preset_id])
+        raise LookupError(preset_id)
+
+    def _preset_summary(self, preset_id: str | None) -> ConversationPreset | None:
+        if not preset_id:
+            return None
+        for row in self.preset_rows:
+            if row.get("id") == preset_id:
+                return ConversationPreset(id=preset_id, name=str(row.get("name") or preset_id))
+        if preset_id in self.retired_presets:
+            row = self.retired_presets[preset_id]
+            return ConversationPreset(id=preset_id, name=str(row.get("name") or preset_id))
+        return ConversationPreset(id=preset_id, name=preset_id)
+
     async def list_conversations(self, filter: str = "default") -> list[Conversation]:
         kept = [c for c in self.conversations if c.id not in self.temporary_ids]
         if filter == "all":
@@ -363,11 +390,23 @@ class FakeAPI:
         return SearchPage(page, str(start + SEARCH_PAGE) if more else None)
 
     async def create_conversation(
-        self, title=None, model=None, temporary: bool = False
+        self,
+        title=None,
+        model=None,
+        temporary: bool = False,
+        preset_id: str | None = None,
     ) -> Conversation:
         self.creates.append((title, model, temporary))
+        self.created_presets.append(preset_id)
+        preset_summary = self._preset_summary(preset_id)
         conv = conversation(
-            f"c{len(self.conversations) + 1}", title=title or "New chat", default_model=model
+            f"c{len(self.conversations) + 1}",
+            title=title or "New chat",
+            default_model=model,
+            preset_id=preset_id,
+            preset={"id": preset_summary.id, "name": preset_summary.name}
+            if preset_summary is not None
+            else None,
         )
         if temporary:
             self.temporary_ids.add(conv.id)
@@ -396,6 +435,16 @@ class FakeAPI:
     async def set_default_model(self, conversation_id: str, model: str | None) -> Conversation:
         self.model_updates.append((conversation_id, model))
         conv = replace(self._find(conversation_id), default_model=model)
+        self.conversations = [conv if c.id == conversation_id else c for c in self.conversations]
+        return conv
+
+    async def set_preset(self, conversation_id: str, preset_id: str | None) -> Conversation:
+        self.preset_updates.append((conversation_id, preset_id))
+        conv = replace(
+            self._find(conversation_id),
+            preset_id=preset_id,
+            preset=self._preset_summary(preset_id),
+        )
         self.conversations = [conv if c.id == conversation_id else c for c in self.conversations]
         return conv
 

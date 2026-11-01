@@ -73,6 +73,7 @@ from .screens import (
     NewChat,
     Notifications,
     PendingAttachments,
+    PresetPicker,
     Prompt,
     RoleEditor,
     Roles,
@@ -352,9 +353,16 @@ class Transcript(VerticalScroll):
 
 class TuiCommands(Provider):
     """The command palette's TUI-specific entries, beside Textual's system
-    commands: the actions that have no key of their own."""
+    commands: the actions that have no key of their own, plus the model and
+    preset pickers."""
 
     ENTRIES: tuple[tuple[str, str, str], ...] = (
+        ("Choose model…", "a model for this conversation", "action_pick_model"),
+        (
+            "Choose preset…",
+            "an agent preset for this conversation, or none",
+            "action_pick_preset",
+        ),
         (
             "Account…",
             "API keys, signed-in browsers, preferences, your instructions and the plan",
@@ -383,14 +391,20 @@ class TuiCommands(Provider):
         ("Prompt roles…", "named system prompts to apply to this conversation", "action_roles"),
     )
 
+    def _offered(self, action: str) -> bool:
+        if action == "action_pick_preset" and isinstance(self.app, MatterWaveApp):
+            return self.app.has_preset_picker()
+        return True
+
     async def discover(self) -> Hits:
         for name, help_text, action in self.ENTRIES:
-            yield DiscoveryHit(name, getattr(self.app, action), help=help_text)
+            if self._offered(action):
+                yield DiscoveryHit(name, getattr(self.app, action), help=help_text)
 
     async def search(self, query: str) -> Hits:
         matcher = self.matcher(query)
         for name, help_text, action in self.ENTRIES:
-            if (match := matcher.match(name)) > 0:
+            if self._offered(action) and (match := matcher.match(name)) > 0:
                 yield Hit(match, matcher.highlight(name), getattr(self.app, action), help=help_text)
 
 
@@ -404,6 +418,7 @@ class MatterWaveApp(App[None]):
     #search { margin: 0 0 1 0; }
     #main { width: 1fr; }
     #transcript { height: 1fr; padding: 0 1; }
+    #welcome { color: $text-muted; padding: 1 0; }
     #failure { display: none; background: $error 20%; color: $text; padding: 0 1; }
     #failure.shown { display: block; }
     #announcements { display: none; background: $accent 20%; color: $text; padding: 0 1; }
@@ -421,6 +436,7 @@ class MatterWaveApp(App[None]):
         Binding("n", "new", "New", id="new"),
         Binding("slash", "search", "Search", id="search"),
         Binding("m", "pick_model", "Model", id="pick_model"),
+        Binding("M", "pick_preset", "Preset", id="pick_preset"),
         Binding("e", "edit", "Edit", id="edit"),
         Binding("r", "regenerate", "Regenerate", id="regenerate"),
         Binding("left_square_bracket", "branch(-1)", "Prev branch", id="prev_branch"),
@@ -501,6 +517,12 @@ class MatterWaveApp(App[None]):
         # `-m` at launch: the model for every turn, whatever a conversation
         # was last on, until the picker chooses another.
         self.model_override = model
+        # The org's live presets (GET /api/org/presets), the preset chosen
+        # before a conversation exists (or on the open conversation), and a
+        # deleted preset the open conversation is still on.
+        self.presets_list: list[dict[str, Any]] = []
+        self.selected_preset_id: str | None = None
+        self.retired_preset: dict[str, Any] | None = None
         self.editing: str | None = None
         self.streaming = False
         # Typed while an answer streams: it sends itself when the turn
@@ -747,11 +769,81 @@ class MatterWaveApp(App[None]):
             driver.flush()
         self._image_ops.clear()
 
+    # --- presets ---------------------------------------------------------------
+
+    def active_preset_id(self) -> str | None:
+        if self.conversation is not None:
+            if self.conversation.preset is not None:
+                return self.conversation.preset.id
+            return self.conversation.preset_id
+        return self.selected_preset_id
+
+    def active_preset(self) -> dict[str, Any] | None:
+        pid = self.active_preset_id()
+        if not pid:
+            return None
+        for preset in self.presets_list:
+            if str(preset.get("id") or "") == pid:
+                return preset
+        if self.retired_preset is not None and str(self.retired_preset.get("id") or "") == pid:
+            return self.retired_preset
+        if (
+            self.conversation is not None
+            and self.conversation.preset is not None
+            and self.conversation.preset.id == pid
+        ):
+            return {"id": pid, "name": self.conversation.preset.name}
+        return {"id": pid, "name": pid}
+
+    def active_preset_model(self) -> str | None:
+        preset = self.active_preset()
+        model = preset.get("model") if preset is not None else None
+        return str(model) if isinstance(model, str) and model else None
+
+    def effective_model(self) -> str | None:
+        return self.active_preset_model() or self.model or self.default_model
+
+    def active_welcome_message(self) -> str | None:
+        preset = self.active_preset()
+        welcome = preset.get("welcome_message") if preset is not None else None
+        return welcome.strip() if isinstance(welcome, str) and welcome.strip() else None
+
+    def has_preset_picker(self) -> bool:
+        return bool(self.presets_list or self.active_preset_id() is not None)
+
+    async def load_presets(self) -> None:
+        try:
+            rows = await self.api.presets()
+        except Exception:
+            # No presets route on this deployment, or an account outside an org.
+            return
+        self.presets_list = [row for row in rows if isinstance(row, dict)]
+        self.refresh_bindings()
+
+    async def _resolve_conversation_preset(self, conversation: Conversation) -> None:
+        pid = conversation.preset.id if conversation.preset is not None else conversation.preset_id
+        self.selected_preset_id = pid
+        if not pid or any(str(p.get("id") or "") == pid for p in self.presets_list):
+            self.retired_preset = None
+            self.refresh_bindings()
+            return
+        try:
+            fetched = await self.api.preset(pid)
+        except Exception:
+            name = conversation.preset.name if conversation.preset is not None else pid
+            fetched = {"id": pid, "name": name, "deleted_at": "retired"}
+        self.retired_preset = fetched
+        self.refresh_bindings()
+
     # --- status line -----------------------------------------------------------
 
     def status_text(self) -> str:
-        bits = [f"model {self.model or self.default_model or '—'}"]
-        window = self.context_window or model_window(self.models_list, self.model)
+        model = self.effective_model()
+        bits = [f"model {model or '—'}"]
+        preset = self.active_preset()
+        if preset is not None and preset.get("name"):
+            bits.append(f"preset {preset['name']}")
+        window = self.context_window or model_window(self.models_list, model)
         if window:
             draft = estimate_tokens(self.query_one("#composer", TextArea).text)
             used = (self.context_used or 0) + draft
@@ -869,10 +961,14 @@ class MatterWaveApp(App[None]):
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Share and fork do not exist for a temporary conversation, nor
         edit and regenerate for a connector's: while one is open the keys
-        are dead and the commands off the footer. The announcements banner
-        offers its dismiss key only while it stands."""
+        are dead and the commands off the footer. The preset picker exists
+        only when the org has presets or one is in force on the conversation,
+        and the announcements banner offers its dismiss key only while it
+        stands."""
         if action == "dismiss_announcements":
             return bool(self.announcements)
+        if action == "pick_preset":
+            return self.has_preset_picker()
         if self.connector_source is not None and action in ("edit", "regenerate"):
             return False
         return not (self.temporary_chat and action in ("share", "fork"))
@@ -934,6 +1030,7 @@ class MatterWaveApp(App[None]):
                 severity="warning",
             )
             self.model = self.model_override = None
+        await self.load_presets()
         await self.refresh_conversations()
         self.refresh_account_lines()
         self.load_announcements()
@@ -1134,6 +1231,7 @@ class MatterWaveApp(App[None]):
         # every search, so only the creation itself can open one.
         self.set_temporary_chat(False)
         self.set_connector_source(tree.source)
+        await self._resolve_conversation_preset(tree)
         self.show_failure(None)
         composer.text = self.drafts.get(conversation_id, "")
         self.context_used, self.context_window = None, None
@@ -1174,6 +1272,8 @@ class MatterWaveApp(App[None]):
                 )
         if self.live is not None:
             widgets.append(MessageView(self.live, streaming=True))
+        if not widgets and (welcome := self.active_welcome_message()):
+            widgets.append(Static(welcome, id="welcome", classes="welcome", markup=False))
         await transcript.mount_all(widgets)
         transcript.select(selected)
         transcript.scroll_end(animate=False)
@@ -1287,7 +1387,9 @@ class MatterWaveApp(App[None]):
         tokens = self.answer_tokens.get(message.id)
         if not self.show_answer_usage or tokens is None or message.role != "assistant":
             return None
-        return answer_usage(self.models_list, message.model or self.model, *tokens)
+        return answer_usage(
+            self.models_list, message.model or self.active_preset_model() or self.model, *tokens
+        )
 
     def selected_message(self) -> Message | None:
         widget = self.query_one("#transcript", Transcript).selected_widget()
@@ -1352,6 +1454,8 @@ class MatterWaveApp(App[None]):
 
     @work(group="action")
     async def _new_conversation(self, temporary: bool) -> None:
+        self.selected_preset_id = None
+        self.retired_preset = None
         try:
             conv = await self.api.create_conversation(temporary=temporary)
         except Exception as exc:
@@ -1372,12 +1476,21 @@ class MatterWaveApp(App[None]):
         # would otherwise let a model be picked that the turn then refuses.
         if not await self.load_models():
             return
+        preset = self.active_preset()
+        fixed_by = str(preset.get("name") or "") if preset is not None else ""
 
         def chosen(model_id: str | None) -> None:
             if model_id:
                 self.apply_model(model_id)
 
-        self.push_screen(ModelPicker(self.models_list, self.model), chosen)
+        self.push_screen(
+            ModelPicker(
+                self.models_list,
+                self.effective_model() if fixed_by else self.model,
+                fixed_by=fixed_by or None,
+            ),
+            chosen,
+        )
 
     def model_allowed(self, model_id: str) -> bool:
         """Whether `/api/models` lists it as one the plan includes."""
@@ -1390,6 +1503,15 @@ class MatterWaveApp(App[None]):
     async def apply_model(self, model_id: str) -> None:
         """The picker's choice: checked against the list, then kept on the
         conversation so the next turn, here or in the web app, uses it."""
+        preset = self.active_preset()
+        if preset is not None:
+            fixed = str(preset.get("model") or self.effective_model() or "")
+            name = str(preset.get("name") or "active")
+            self.notify(
+                f"Model is fixed to {fixed} by the {name} preset; choose No preset to change it.",
+                severity="warning",
+            )
+            return
         if not self.model_allowed(model_id):
             self.notify(f"{model_id} is not a model you can use here.", severity="warning")
             return
@@ -1402,6 +1524,59 @@ class MatterWaveApp(App[None]):
             self.conversation = replace(self.conversation, default_model=updated.default_model)
         self.model = model_id
         self.model_override = None
+        self.render_status()
+
+    @work(group="action")
+    async def action_pick_preset(self) -> None:
+        await self.load_presets()
+        if not self.has_preset_picker():
+            return
+        current = self.active_preset_id()
+        retired = (
+            self.retired_preset
+            if self.retired_preset is not None
+            and str(self.retired_preset.get("id") or "") == current
+            else None
+        )
+
+        def chosen(choice: str | None) -> None:
+            if choice is not None:
+                self.apply_preset(choice or None)
+
+        self.push_screen(
+            PresetPicker(self.presets_list, current, retired=retired),
+            chosen,
+        )
+
+    @work(group="action")
+    async def apply_preset(self, preset_id: str | None) -> None:
+        """Put the conversation on `preset_id`, or clear it (`None`) back to
+        the conversation's own model and instructions."""
+        if (
+            preset_id is not None
+            and not any(str(p.get("id") or "") == preset_id for p in self.presets_list)
+            and not (
+                self.retired_preset is not None
+                and str(self.retired_preset.get("id") or "") == preset_id
+                and self.active_preset_id() == preset_id
+            )
+        ):
+            self.notify(f"{preset_id} is not an available preset.", severity="warning")
+            return
+        if self.conversation is not None:
+            try:
+                updated = await self.api.set_preset(self.conversation.id, preset_id)
+            except Exception as exc:
+                self.fail_from_exception(exc)
+                return
+            self._sync_conversation(updated)
+            await self._resolve_conversation_preset(updated)
+        else:
+            self.selected_preset_id = preset_id
+            if preset_id is None:
+                self.retired_preset = None
+            self.refresh_bindings()
+        await self.render_thread(keep_selection=True)
         self.render_status()
 
     def action_send(self) -> None:
@@ -1454,11 +1629,12 @@ class MatterWaveApp(App[None]):
             return
         cid = self.conversation.id
         temperature = self.temperatures.get(cid)
+        turn_model = self.active_preset_model() or self.model
         if self.editing:
-            stream = self.api.edit(cid, self.editing, text, self.model, temperature=temperature)
+            stream = self.api.edit(cid, self.editing, text, turn_model, temperature=temperature)
         else:
             stream = self.api.send(
-                cid, text, self.model, attachment_ids=attachment_ids, temperature=temperature
+                cid, text, turn_model, attachment_ids=attachment_ids, temperature=temperature
             )
         composer.text = ""
         self.drafts.pop(cid, None)
@@ -1467,8 +1643,9 @@ class MatterWaveApp(App[None]):
         self.consume(stream)
 
     async def _create_then_send(self, text: str, attachment_ids: list[str] | None = None) -> None:
+        preset_id = self.selected_preset_id
         try:
-            conv = await self.api.create_conversation(model=self.model)
+            conv = await self.api.create_conversation(model=self.model, preset_id=preset_id)
         except Exception as exc:
             self.fail_from_exception(exc)
             return
@@ -1484,7 +1661,11 @@ class MatterWaveApp(App[None]):
         self.query_one("#composer", TextArea).text = ""
         await self._consume(
             self.api.send(
-                conv.id, text, self.model, attachment_ids=attachment_ids, temperature=temperature
+                conv.id,
+                text,
+                self.active_preset_model() or self.model,
+                attachment_ids=attachment_ids,
+                temperature=temperature,
             )
         )
 
@@ -1520,7 +1701,7 @@ class MatterWaveApp(App[None]):
             self.api.regenerate(
                 self.conversation.id,
                 message.id,
-                self.model,
+                self.active_preset_model() or self.model,
                 temperature=self.temperatures.get(self.conversation.id),
             )
         )
@@ -1667,6 +1848,9 @@ class MatterWaveApp(App[None]):
             if self.streaming:
                 self._detach_turn()
             self.conversation = None
+            self.selected_preset_id = None
+            self.retired_preset = None
+            self.refresh_bindings()
             self.thread = Thread()
             self.editing = None
             self.live = None
@@ -1813,7 +1997,7 @@ class MatterWaveApp(App[None]):
         # The vision gate, before the upload: a model the list says cannot
         # see is told by name, with the ones that can. An unknown model is
         # allowed through; the server's 422 remains the backstop.
-        model_id = self.model or self.default_model
+        model_id = self.effective_model()
         if is_image_filename(filename) and not model_accepts_images(self.models_list, model_id):
             capable = vision_capable_model_ids(self.models_list)
             names = ", ".join(capable) if capable else "none of your models"
@@ -2199,10 +2383,14 @@ class MatterWaveApp(App[None]):
         if self.streaming:
             self._detach_turn()
         self.conversation = None
+        self.presets_list = []
+        self.selected_preset_id = None
+        self.retired_preset = None
         self.thread = Thread()
         self.editing = None
         self.live = None
         await self.render_thread()
+        await self.load_presets()
         await self.refresh_conversations()
         self.refresh_account_lines()
         self.load_announcements()
@@ -3128,7 +3316,7 @@ class MatterWaveApp(App[None]):
             parts=[],
             content="",
             created_at="",
-            model=self.model,
+            model=self.active_preset_model() or self.model,
         )
 
     async def _consume(self, stream: AsyncIterator[StreamItem]) -> None:

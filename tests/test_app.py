@@ -36,6 +36,7 @@ from matterwave_tui.screens import (
     NewChat,
     Notifications,
     PendingAttachments,
+    PresetPicker,
     Prompt,
     SecretShown,
     ShareDialog,
@@ -121,6 +122,7 @@ def json_routes(request: httpx.Request) -> httpx.Response | None:
         "/api/announcements",
         "/api/budget",
         "/api/library",
+        "/api/org/presets",
     ):
         return httpx.Response(404, json={"detail": "Not Found"})
     return None
@@ -2428,3 +2430,208 @@ async def test_the_command_palette_offers_the_tui_commands():
         # With nothing parked, the switcher says so rather than showing an
         # empty screen.
         assert any("No other account is signed in" in s for s in shown)
+
+
+SUPPORT_PRESET = {
+    "id": "p_support",
+    "org_id": "o1",
+    "slug": "support",
+    "name": "Support triage",
+    "description": "Answers billing and account questions.",
+    "welcome_message": "What account or invoice is this about?",
+    "model": "grt-max",
+    "instructions": "Be brief.",
+    "tools": [],
+    "limits": {},
+    "created_at": "2026-11-01T00:00:00Z",
+    "updated_at": "2026-11-01T00:00:00Z",
+    "deleted_at": None,
+}
+DOCS_PRESET = {
+    "id": "p_docs",
+    "org_id": "o1",
+    "slug": "docs",
+    "name": "Docs writer",
+    "description": "",
+    "welcome_message": None,
+    "model": "other-7b",
+    "instructions": "Write docs.",
+    "tools": [],
+    "limits": {},
+    "created_at": "2026-11-01T00:00:00Z",
+    "updated_at": "2026-11-01T00:00:00Z",
+    "deleted_at": None,
+}
+
+
+@pytest.mark.asyncio
+async def test_no_preset_picker_when_the_org_has_no_presets():
+    api = FakeAPI()
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert app.check_action("pick_preset", ()) is False
+        provider = TuiCommands(app.screen)
+        names = [str(hit.display) async for hit in provider.discover()]
+        assert any("Choose model" in n for n in names)
+        assert not any("Choose preset" in n for n in names)
+        await pilot.press("escape", "M")
+        await settle(app, pilot)
+        assert not isinstance(app.screen, PresetPicker)
+
+
+@pytest.mark.asyncio
+async def test_picking_and_clearing_a_preset_fixes_the_model_and_shows_welcome_text():
+    api = FakeAPI(happy_script("Triage reply"))
+    api.preset_rows = [SUPPORT_PRESET, DOCS_PRESET]
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert app.check_action("pick_preset", ()) is True
+        provider = TuiCommands(app.screen)
+        names = [str(hit.display) async for hit in provider.discover()]
+        assert any("Choose preset" in n for n in names)
+        assert len(app.query("#welcome")) == 0
+
+        # Open the preset picker with `M` and pick Support triage.
+        await pilot.press("escape", "M")
+        await settle(app, pilot)
+        picker = app.screen
+        assert isinstance(picker, PresetPicker)
+        options = picker.query_one("#presets", OptionList)
+        assert options.option_count == 3
+        assert "No preset" in str(options.get_option_at_index(0).prompt)
+        assert "Support triage" in str(options.get_option_at_index(1).prompt)
+        options.highlighted = 1
+        await pilot.press("enter")
+        await settle(app, pilot)
+
+        assert api.preset_updates == [("c1", "p_support")]
+        assert "model grt-max" in status(app)
+        assert "preset Support triage" in status(app)
+        # Empty conversation shows the preset's welcome message.
+        welcome = app.query_one("#welcome", Static)
+        assert str(welcome.render()) == "What account or invoice is this about?"
+
+        # While the preset is set, the model picker shows the fixed model
+        # and refuses a change with a one-line reason.
+        await pilot.press("escape", "m")
+        await settle(app, pilot)
+        model_picker = app.screen
+        assert isinstance(model_picker, ModelPicker)
+        header = str(model_picker.query_one(Static).render())
+        assert "Model fixed to grt-max by the Support triage preset" in header
+        model_options = model_picker.query_one("#models", OptionList)
+        for idx in range(model_options.option_count):
+            opt = model_options.get_option_at_index(idx)
+            if opt.id == "other-7b":
+                model_options.highlighted = idx
+                break
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.model_updates == []
+        assert any(
+            "Model is fixed to grt-max by the Support triage preset" in note for note in shown
+        )
+        assert "model grt-max" in status(app)
+
+        # Sending a turn uses the preset's model, and once a message is in the
+        # transcript, the empty-state welcome text is gone.
+        app.query_one("#composer", TextArea).focus()
+        await pilot.press(*"invoice 42", "ctrl+s")
+        await settle(app, pilot)
+        assert api.sent[-1] == ("c1", "invoice 42", "grt-max")
+        assert len(app.query("#welcome")) == 0
+
+        # Picking "No preset" clears preset_id on the conversation and
+        # restores the conversation's own model.
+        await pilot.press("escape", "M")
+        await settle(app, pilot)
+        picker = app.screen
+        assert isinstance(picker, PresetPicker)
+        picker.query_one("#presets", OptionList).highlighted = 0
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.preset_updates[-1] == ("c1", None)
+        assert "preset " not in status(app)
+        assert "model grt-nano" in status(app)
+
+
+@pytest.mark.asyncio
+async def test_picking_a_preset_before_the_first_turn_passes_preset_id_on_create():
+    api = FakeAPI(happy_script("Created with preset"))
+    api.conversations = []
+    api.preset_rows = [SUPPORT_PRESET]
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert app.conversation is None
+        await pilot.press("escape", "M")
+        await settle(app, pilot)
+        picker = app.screen
+        assert isinstance(picker, PresetPicker)
+        picker.query_one("#presets", OptionList).highlighted = 1
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.preset_updates == []
+        assert "preset Support triage" in status(app)
+        assert "model grt-max" in status(app)
+        assert str(app.query_one("#welcome", Static).render()) == (
+            "What account or invoice is this about?"
+        )
+
+        app.query_one("#composer", TextArea).focus()
+        await pilot.press("h", "i", "ctrl+s")
+        await settle(app, pilot)
+        assert api.created_presets == ["p_support"]
+        assert api.sent == [("c1", "hi", "grt-max")]
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_on_a_deleted_preset_names_it_without_offering_it_elsewhere():
+    api = FakeAPI()
+    api.retired_presets["p_retired"] = {
+        **SUPPORT_PRESET,
+        "id": "p_retired",
+        "name": "Legacy helper",
+        "welcome_message": "Legacy welcome.",
+        "model": "other-7b",
+        "deleted_at": "2026-11-01T02:00:00Z",
+    }
+    api.conversations = [
+        conversation(
+            "c1",
+            title="Old chat",
+            preset_id="p_retired",
+            preset={"id": "p_retired", "name": "Legacy helper"},
+        ),
+        conversation("c2", title="Plain chat"),
+    ]
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        # Even when the org has no active presets, a conversation on a deleted
+        # preset shows its name, its fixed model, its welcome message, and the
+        # picker so the user can switch to "No preset".
+        assert app.check_action("pick_preset", ()) is True
+        assert "preset Legacy helper" in status(app)
+        assert "model other-7b" in status(app)
+        assert str(app.query_one("#welcome", Static).render()) == "Legacy welcome."
+
+        await pilot.press("escape", "M")
+        await settle(app, pilot)
+        picker = app.screen
+        assert isinstance(picker, PresetPicker)
+        options = picker.query_one("#presets", OptionList)
+        prompts = [str(options.get_option_at_index(i).prompt) for i in range(options.option_count)]
+        assert any("Legacy helper" in p and "No longer offered" in p for p in prompts)
+        await pilot.press("escape")
+        await settle(app, pilot)
+
+        # Switching to another conversation never offers the deleted preset;
+        # and with no live presets in the org, the picker hides altogether.
+        await app.open_conversation("c2")
+        await settle(app, pilot)
+        assert "preset " not in status(app)
+        assert app.check_action("pick_preset", ()) is False

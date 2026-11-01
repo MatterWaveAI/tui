@@ -195,6 +195,14 @@ class ConversationItem(ListItem):
         self.query_one(Label).update(self.caption())
 
 
+class MoreResults(ListItem):
+    """The last row of a search that has another page: selecting it reads
+    that page in its place."""
+
+    def __init__(self) -> None:
+        super().__init__(Label("More results…", markup=False))
+
+
 class Transcript(VerticalScroll):
     """The active path. Focusable so the branch and edit keys apply to the
     selected message rather than to whatever the composer holds."""
@@ -384,8 +392,13 @@ class MatterWaveApp(App[None]):
         self.temporary_chat = False
         # The caller's own ratings in the open conversation, by message id.
         self.feedback: dict[str, dict[str, Any]] = {}
-        # Which slice of the conversations the sidebar shows.
+        # Which slice of the conversations the sidebar shows, and the folder
+        # or tag it is narrowed to: ("folder" | "tag", id), or None.
         self.list_filter = "default"
+        self.library_filter: tuple[str, str] | None = None
+        # The search the sidebar shows, and the cursor of its next page.
+        self.search_query = ""
+        self.search_cursor: str | None = None
         # The caller's notifications (the page GET /api/me/notifications
         # answers) and the unread count the badge shows; None until the
         # route has answered (or forever, when it is not there). What the
@@ -543,6 +556,8 @@ class MatterWaveApp(App[None]):
             bits.append("editing (Esc cancels)")
         if self.shell_mode:
             bits.append("shell: answers are commands to confirm")
+        if self.library_filter is not None:
+            bits.append(f"showing only {self._library_filter_name()} (o shows all)")
         return " │ ".join(bits)
 
     def render_status(self) -> None:
@@ -668,9 +683,17 @@ class MatterWaveApp(App[None]):
         return True
 
     async def refresh_conversations(self, query: str = "") -> None:
+        """The sidebar: a search's first page, or the list -- every page of
+        it when a folder or tag narrows it, since that filter is the
+        client's and must not miss what the first page left out."""
+        more: str | None = None
         try:
             if query:
-                found = await self.api.search_conversations(query)
+                page = await self.api.search(query)
+                found, more = page.conversations, page.next_cursor
+            elif self.library_filter is not None:
+                everything = await self.api.all_conversations(filter=self.list_filter)
+                found = [c for c in everything if self._in_library_filter(c)]
             else:
                 found = await self.api.list_conversations(filter=self.list_filter)
         except Exception as exc:
@@ -678,9 +701,44 @@ class MatterWaveApp(App[None]):
             return
         if not query:
             self.conversations = found
+        self.search_query, self.search_cursor = query, more
         view = self.query_one("#conversations", ListView)
         await view.clear()
-        await view.extend([ConversationItem(c, library=self._library_suffix(c)) for c in found])
+        items: list[ListItem] = [
+            ConversationItem(c, library=self._library_suffix(c)) for c in found
+        ]
+        if more:
+            items.append(MoreResults())
+        await view.extend(items)
+
+    def _in_library_filter(self, conversation: Conversation) -> bool:
+        if self.library_filter is None:
+            return True
+        kind, row_id = self.library_filter
+        if kind == "folder":
+            return conversation.folder_id == row_id
+        return row_id in self.library_assignments.get(conversation.id, [])
+
+    @work(group="search", exclusive=True)
+    async def load_more_results(self) -> None:
+        """The search's next page, in place of its "More results…" row."""
+        if not self.search_query or not self.search_cursor:
+            return
+        try:
+            page = await self.api.search(self.search_query, self.search_cursor)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return
+        view = self.query_one("#conversations", ListView)
+        for row in list(view.query(MoreResults)):
+            await row.remove()
+        self.search_cursor = page.next_cursor
+        items: list[ListItem] = [
+            ConversationItem(c, library=self._library_suffix(c)) for c in page.conversations
+        ]
+        if page.next_cursor:
+            items.append(MoreResults())
+        await view.extend(items)
 
     def refresh_account_lines(self) -> None:
         """The status line's account bits as the server now holds them: the
@@ -769,6 +827,8 @@ class MatterWaveApp(App[None]):
     def _picked(self, event: ListView.Selected) -> None:
         if isinstance(event.item, ConversationItem):
             self.open_worker(event.item.conversation.id)
+        elif isinstance(event.item, MoreResults):
+            self.load_more_results()
 
     @work(group="load", exclusive=True)
     async def open_worker(self, conversation_id: str) -> None:
@@ -1498,9 +1558,15 @@ class MatterWaveApp(App[None]):
 
     @work(group="action")
     async def action_cycle_filter(self) -> None:
-        index = LIST_FILTERS.index(self.list_filter)
-        self.list_filter = LIST_FILTERS[(index + 1) % len(LIST_FILTERS)]
+        """The next slice of the list; with a folder or tag narrowing it,
+        the first press shows the whole slice again."""
+        if self.library_filter is not None:
+            self.library_filter = None
+        else:
+            index = LIST_FILTERS.index(self.list_filter)
+            self.list_filter = LIST_FILTERS[(index + 1) % len(LIST_FILTERS)]
         await self.refresh_conversations()
+        self.render_status()
         self.notify(f"Showing {self.list_filter} conversations.")
 
     # --- notifications and announcements -----------------------------------------
@@ -2072,8 +2138,95 @@ class MatterWaveApp(App[None]):
                 new_tag=self.apply_tag_create,
                 move_to=self.apply_folder_move,
                 set_tags=self.apply_tags_set,
-            )
+                rename_folder=self.apply_folder_rename,
+                delete_folder=self.apply_folder_delete,
+                delete_tag=self.apply_tag_delete,
+            ),
+            self._show_only,
         )
+
+    def _show_only(self, choice: tuple[str, str] | None) -> None:
+        """The library's Enter: the sidebar narrowed to one folder or tag;
+        the one already shown, chosen again, shows the whole list."""
+        if choice is None:
+            return
+        self.library_filter = None if choice == self.library_filter else choice
+        self.run_worker(self._refilter(), group="load", exclusive=True)
+
+    async def _refilter(self) -> None:
+        await self.refresh_conversations()
+        self.render_status()
+        if self.library_filter is None:
+            self.notify(f"Showing {self.list_filter} conversations.")
+        else:
+            self.notify(f"Showing only {self._library_filter_name()}.")
+
+    def _library_filter_name(self) -> str:
+        if self.library_filter is None:
+            return ""
+        kind, row_id = self.library_filter
+        rows = self.library_folders if kind == "folder" else self.library_tags
+        name = next((str(r.get("name") or "") for r in rows if r.get("id") == row_id), row_id)
+        return f"📁 {name}" if kind == "folder" else f"#{name}"
+
+    async def apply_folder_rename(self, folder_id: str, name: str) -> LibraryState | None:
+        """A folder's new name; one another folder has is the server's 409,
+        said in passing."""
+        try:
+            folder = await self.api.rename_folder(folder_id, name)
+        except ConflictError as exc:
+            self.notify(exc.message or "That folder name is taken.")
+            return None
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return None
+        self.library_folders = [
+            folder if f.get("id") == folder_id else f for f in self.library_folders
+        ]
+        self._refresh_library_captions()
+        self.render_status()
+        return self._library_state(self._open_folder_id())
+
+    async def apply_folder_delete(self, folder_id: str) -> LibraryState | None:
+        """The folder goes; the server returns its conversations to the
+        main list, and so do the sidebar and the open conversation."""
+        try:
+            await self.api.delete_folder(folder_id)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return None
+        self.library_folders = [f for f in self.library_folders if f.get("id") != folder_id]
+        for conversation in [c for c in self.conversations if c.folder_id == folder_id]:
+            self._sync_conversation(replace(conversation, folder_id=None))
+        if self.conversation is not None and self.conversation.folder_id == folder_id:
+            self.conversation = replace(self.conversation, folder_id=None)
+        await self._forget_filter(("folder", folder_id))
+        self.notify("Folder deleted; its conversations are back in the main list.")
+        return self._library_state(self._open_folder_id())
+
+    async def apply_tag_delete(self, tag_id: str) -> LibraryState | None:
+        """The tag goes, and off every conversation that carried it."""
+        try:
+            await self.api.delete_tag(tag_id)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return None
+        self.library_tags = [t for t in self.library_tags if t.get("id") != tag_id]
+        self.library_assignments = {
+            cid: [t for t in tag_ids if t != tag_id]
+            for cid, tag_ids in self.library_assignments.items()
+        }
+        await self._forget_filter(("tag", tag_id))
+        self.notify("Tag deleted.")
+        return self._library_state(self._open_folder_id())
+
+    async def _forget_filter(self, deleted: tuple[str, str]) -> None:
+        """A deleted folder or tag cannot narrow the sidebar any more."""
+        if self.library_filter == deleted:
+            self.library_filter = None
+            await self.refresh_conversations()
+        self._refresh_library_captions()
+        self.render_status()
 
     async def apply_folder_create(self, name: str) -> LibraryState | None:
         """A folder of that name. A duplicate is the server's 409, and its

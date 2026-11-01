@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The library manages what it lists: `r` renames a folder, `x` deletes a
+  folder (its conversations return to the main list) or a tag (it comes
+  off every conversation), and `Enter` narrows the sidebar to the
+  highlighted folder or tag, every page of the list read so none is
+  missed; `o` widens it again. Search uses the ranked `/api/search`
+  (titles and messages), a page at a time behind a **More results…** row.
 - Images in iTerm2 (OSC 1337 inline images), and auto-detection of the
   terminals that draw them without being told: Ghostty and WezTerm speak
   the kitty protocol, and foot, mlterm, Konsole, contour and Windows

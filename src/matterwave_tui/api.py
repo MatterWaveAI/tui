@@ -73,6 +73,15 @@ class Cut:
 StreamItem = ConversationFrame | Opened | Cut
 
 
+@dataclass(frozen=True)
+class SearchPage:
+    """One page of `GET /api/search`: the conversations that matched, best
+    first, and the cursor of the page after it (None on the last)."""
+
+    conversations: list[Conversation]
+    next_cursor: str | None
+
+
 class ChatAPI(Protocol):
     """Everything the app asks of the platform."""
 
@@ -82,7 +91,9 @@ class ChatAPI(Protocol):
 
     async def list_conversations(self, filter: str = "default") -> list[Conversation]: ...
 
-    async def search_conversations(self, query: str) -> list[Conversation]: ...
+    async def all_conversations(self, filter: str = "default") -> list[Conversation]: ...
+
+    async def search(self, query: str, cursor: str | None = None) -> SearchPage: ...
 
     async def create_conversation(
         self, title: str | None = None, model: str | None = None, temporary: bool = False
@@ -137,6 +148,12 @@ class ChatAPI(Protocol):
     async def library(self) -> dict[str, Any]: ...
 
     async def create_folder(self, name: str) -> dict[str, Any]: ...
+
+    async def rename_folder(self, folder_id: str, name: str) -> dict[str, Any]: ...
+
+    async def delete_folder(self, folder_id: str) -> None: ...
+
+    async def delete_tag(self, tag_id: str) -> None: ...
 
     async def move_to_folder(self, conversation_id: str, folder_id: str | None) -> None: ...
 
@@ -365,9 +382,20 @@ class HttpChatAPI:
     async def list_conversations(self, filter: str = "default") -> list[Conversation]:
         return (await self._reads.conversations.list(filter=filter)).data
 
-    async def search_conversations(self, query: str) -> list[Conversation]:
-        hits = await self._reads.conversations.search(query)
-        return [hit.conversation for hit in hits.data]
+    async def all_conversations(self, filter: str = "default") -> list[Conversation]:
+        """Every page of the list, for a view that filters on the client
+        (a folder, a tag) and must not miss what the first page left out."""
+        found: list[Conversation] = []
+        async for page in self._reads.conversations.pages(filter=filter):
+            found.extend(page.data)
+        return found
+
+    async def search(self, query: str, cursor: str | None = None) -> SearchPage:
+        """`GET /api/search` by way of the SDK's `library.search`: titles and
+        messages, ranked by relevance and recency, a page at a time;
+        `cursor` is the previous page's `next_cursor`."""
+        page = await self._reads.library.search(query, cursor=cursor)
+        return SearchPage([hit.conversation for hit in page.data], page.next_cursor)
 
     async def create_conversation(
         self, title: str | None = None, model: str | None = None, temporary: bool = False
@@ -725,6 +753,23 @@ class HttpChatAPI:
         """`POST /api/library/folders` by way of the SDK. A write: no
         retries."""
         return _row_dict(await self._writes.library.create_folder(name))
+
+    async def rename_folder(self, folder_id: str, name: str) -> dict[str, Any]:
+        """`PATCH /api/library/folders/{id}` by way of the SDK: the folder
+        with its new name (a name another folder has is the server's 409).
+        A write: no retries."""
+        return _row_dict(await self._writes.library.update_folder(folder_id, name=name))
+
+    async def delete_folder(self, folder_id: str) -> None:
+        """`DELETE /api/library/folders/{id}` by way of the SDK: the folder
+        goes and its conversations return to the main list; nothing else
+        is deleted. A write: no retries."""
+        await self._writes.library.delete_folder(folder_id)
+
+    async def delete_tag(self, tag_id: str) -> None:
+        """`DELETE /api/library/tags/{id}` by way of the SDK: the tag goes,
+        and off every conversation that carried it. A write: no retries."""
+        await self._writes.library.delete_tag(tag_id)
 
     async def move_to_folder(self, conversation_id: str, folder_id: str | None) -> None:
         """`PUT /api/library/conversations/{id}/folder` by way of the SDK;

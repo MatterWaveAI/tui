@@ -19,7 +19,10 @@ from matterwave_sdk.models import (
     UsageBalance,
 )
 
-from matterwave_tui.api import NOTIFICATIONS_PAGE, Opened, StreamItem
+from matterwave_tui.api import NOTIFICATIONS_PAGE, Opened, SearchPage, StreamItem
+
+# The fake's search answers this many hits a page, so paging is exercised.
+SEARCH_PAGE = 2
 
 MODELS: list[dict[str, Any]] = [
     {
@@ -190,6 +193,10 @@ class FakeAPI:
         self.leaf_moves: list[str] = []
         self.model_updates: list[tuple[str, str | None]] = []
         self.searches: list[str] = []
+        self.all_reads = 0
+        self.folder_renames: list[tuple[str, str]] = []
+        self.folder_deletes: list[str] = []
+        self.tag_deletes: list[str] = []
         self.compacted: list[str] = []
         self.renames: list[tuple[str, str]] = []
         self.deletes: list[str] = []
@@ -289,13 +296,21 @@ class FakeAPI:
             return [c for c in kept if c.archived_at]
         return [c for c in kept if not c.archived_at]
 
-    async def search_conversations(self, query: str) -> list[Conversation]:
+    async def all_conversations(self, filter: str = "default") -> list[Conversation]:
+        self.all_reads += 1
+        return await self.list_conversations(filter)
+
+    async def search(self, query: str, cursor: str | None = None) -> SearchPage:
         self.searches.append(query)
-        return [
+        hits = [
             c
             for c in self.conversations
             if c.id not in self.temporary_ids and query.lower() in c.title.lower()
         ]
+        start = int(cursor or 0)
+        page = hits[start : start + SEARCH_PAGE]
+        more = start + SEARCH_PAGE < len(hits)
+        return SearchPage(page, str(start + SEARCH_PAGE) if more else None)
 
     async def create_conversation(
         self, title=None, model=None, temporary: bool = False
@@ -469,6 +484,35 @@ class FakeAPI:
         }
         self.library_folders.append(folder)
         return dict(folder)
+
+    async def rename_folder(self, folder_id: str, name: str) -> dict[str, Any]:
+        if any(f["name"] == name and f["id"] != folder_id for f in self.library_folders):
+            raise ConflictError(
+                "You already have one with that name.",
+                status_code=409,
+                request_id="req-name-taken",
+            )
+        self.folder_renames.append((folder_id, name))
+        for folder in self.library_folders:
+            if folder["id"] == folder_id:
+                folder["name"] = name
+                return dict(folder)
+        raise LookupError(folder_id)
+
+    async def delete_folder(self, folder_id: str) -> None:
+        self.folder_deletes.append(folder_id)
+        self.library_folders = [f for f in self.library_folders if f["id"] != folder_id]
+        self.conversations = [
+            replace(c, folder_id=None) if c.folder_id == folder_id else c
+            for c in self.conversations
+        ]
+
+    async def delete_tag(self, tag_id: str) -> None:
+        self.tag_deletes.append(tag_id)
+        self.library_tags = [t for t in self.library_tags if t["id"] != tag_id]
+        self.library_assignments = {
+            cid: [t for t in ids if t != tag_id] for cid, ids in self.library_assignments.items()
+        }
 
     async def move_to_folder(self, conversation_id: str, folder_id: str | None) -> None:
         self.folder_moves.append((conversation_id, folder_id))

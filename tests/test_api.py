@@ -175,8 +175,8 @@ async def test_concurrent_401s_share_one_sign_in():
         return "mw_two"
 
     api = make(handler, refresh=refresh)
-    first, second = await asyncio.gather(api.list_conversations(), api.search_conversations("t"))
-    assert [c.id for c in first] == ["c1"] and [c.id for c in second] == ["c1"]
+    first, second = await asyncio.gather(api.list_conversations(), api.search("t"))
+    assert [c.id for c in first] == ["c1"] and [c.id for c in second.conversations] == ["c1"]
     assert refreshes == 1
 
 
@@ -535,6 +535,72 @@ async def test_a_conversations_ratings_are_read_from_its_route():
     assert [(r["message_id"], r["rating"], r["reasons"], r["comment"]) for r in rows] == [
         ("a1", -1, ["wrong"], "no")
     ]
+
+
+@pytest.mark.asyncio
+async def test_search_is_the_ranked_route_a_page_at_a_time():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        cursor = request.url.params.get("cursor")
+        hit = {**CONV, "id": "c2" if cursor else "c1", "snippet": "…", "message_id": None}
+        return httpx.Response(
+            200, json={"data": [hit], "query": "t", "next_cursor": None if cursor else "p2"}
+        )
+
+    api = make(handler)
+    first = await api.search("tea")
+    assert [c.id for c in first.conversations] == ["c1"] and first.next_cursor == "p2"
+    second = await api.search("tea", first.next_cursor)
+    assert [c.id for c in second.conversations] == ["c2"] and second.next_cursor is None
+    assert [(r.method, r.url.path, dict(r.url.params)) for r in seen] == [
+        ("GET", "/api/search", {"q": "tea"}),
+        ("GET", "/api/search", {"q": "tea", "cursor": "p2"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_narrowed_list_reads_every_page():
+    def handler(request: httpx.Request) -> httpx.Response:
+        cursor = request.url.params.get("cursor")
+        row = {**CONV, "id": "c2" if cursor else "c1"}
+        return httpx.Response(200, json={"data": [row], "next_cursor": None if cursor else "n2"})
+
+    convs = await make(handler).all_conversations("default")
+    assert [c.id for c in convs] == ["c1", "c2"]
+
+
+@pytest.mark.asyncio
+async def test_folders_rename_and_delete_and_tags_delete_on_their_routes():
+    seen: list[tuple[str, str, bytes]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, request.content))
+        if request.method == "PATCH":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "f1",
+                    "name": "Home",
+                    "position": 0,
+                    "created_at": "1",
+                    "updated_at": "2",
+                },
+            )
+        return httpx.Response(204)
+
+    api = make(handler)
+    renamed = await api.rename_folder("f1", "Home")
+    assert renamed["name"] == "Home"
+    await api.delete_folder("f1")
+    await api.delete_tag("t1")
+    assert [(m, p) for m, p, _ in seen] == [
+        ("PATCH", "/api/library/folders/f1"),
+        ("DELETE", "/api/library/folders/f1"),
+        ("DELETE", "/api/library/tags/t1"),
+    ]
+    assert json.loads(seen[0][2]) == {"name": "Home"}
 
 
 @pytest.mark.asyncio

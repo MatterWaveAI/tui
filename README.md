@@ -90,7 +90,7 @@ PowerShell or cmd.exe on Windows (whichever started the TUI) and `$SHELL` elsewh
 | `c` | transcript | compact the conversation now |
 | `m` | transcript | model picker |
 | `n` | transcript | new conversation: Enter a regular one, `t` a temporary one (deleted 24 h after its last message), Esc none |
-| `/` | transcript | search conversations |
+| `/` | transcript | search conversations, titles and messages, best match first; the last row, **More results…**, reads the next page |
 | `t` | anywhere | this conversation's own instructions, edited against the effective prompt |
 | `b` | transcript | reasons and a comment for the selected (or last) answer's rating |
 | `F2` | anywhere | rename the open conversation |
@@ -104,8 +104,8 @@ PowerShell or cmd.exe on Windows (whichever started the TUI) and `$SHELL` elsewh
 | `i` | anywhere | attach a file (its path, quoted or not, `~` allowed); it goes with this conversation's next message |
 | `I` | anywhere | take a pending file off the next message (and delete the upload) |
 | `v` | anywhere | dictate into the composer: the microphone with the `dictation` extra, an audio file without |
-| `o` | anywhere | cycle the sidebar list: default → pinned → archived → all |
-| `l` | anywhere | the library: folders and tags for the open conversation |
+| `o` | anywhere | cycle the sidebar list: default → pinned → archived → all; with a folder or tag shown, back to the whole list |
+| `l` | anywhere | the library: folders and tags for the open conversation, and the sidebar narrowed to one |
 | `L` | anywhere | prompt roles: apply, add or delete a named system prompt |
 | `R` | anywhere | report the conversation, or the selected answer, as unsafe or unhelpful |
 | `N` | anywhere | the notifications inbox |
@@ -122,7 +122,7 @@ Inside the dialogs:
 | Dialog | Keys |
 |---|---|
 | Notifications (`N`) | `r` read the highlighted one, `a` read all, `u` unread only, `n` / `p` next and previous page |
-| Library (`l`) | `f` new folder, `t` new tag, `m` file the chat in the highlighted folder (again: take it out), `Space` toggle the highlighted tag |
+| Library (`l`) | `f` new folder, `t` new tag, `m` file the chat in the highlighted folder (again: take it out), `Space` toggle the highlighted tag, `r` rename the highlighted folder, `x` or `Delete` delete the highlighted folder or tag (asks first), `Enter` show only that folder or tag in the sidebar (again: all) |
 | Shares (`S`) | `x` revoke the highlighted link |
 | Prompt roles (`L`) | `Enter` apply, `a` add, `d` delete |
 | Pending files (`I`) | `Enter`, `x` or `Delete` take the highlighted file off |

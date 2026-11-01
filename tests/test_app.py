@@ -17,6 +17,7 @@ from matterwave_tui.app import (
     IMPORT_MAX_BYTES,
     TEMPORARY_NOTICE,
     MatterWaveApp,
+    MoreResults,
     Transcript,
     TuiCommands,
 )
@@ -1568,6 +1569,140 @@ async def test_each_answer_refreshes_usage_budget_and_the_unread_badge():
         assert (api.usage_reads, api.budget_reads) == (2, 2)
         assert "✉ 1 unread" in status(app)
         assert "⚠ usage 90,000/100,000 (90%)" in status(app)
+
+
+def library_api() -> FakeAPI:
+    api = FakeAPI()
+    api.conversations = [
+        conversation("c1", title="Plan", folder_id="f1"),
+        conversation("c2", title="Notes"),
+        conversation("c3", title="Draft"),
+    ]
+    api.library_folders = [
+        {"id": "f1", "name": "Work", "position": 0, "created_at": "1", "updated_at": "1"},
+        {"id": "f2", "name": "Home", "position": 1, "created_at": "1", "updated_at": "1"},
+    ]
+    api.library_tags = [{"id": "t1", "name": "todo", "created_at": "1"}]
+    api.library_assignments = {"c3": ["t1"]}
+    return api
+
+
+@pytest.mark.asyncio
+async def test_the_sidebar_narrows_to_a_folder_or_a_tag_and_o_widens_it():
+    api = library_api()
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("escape", "l")
+        await settle(app, pilot)
+        assert isinstance(app.screen, Library)
+        # The first folder is highlighted as the library opens: Enter shows
+        # only it.
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert not isinstance(app.screen, Library)
+        assert sidebar_titles(app) == ["Plan"]
+        assert api.all_reads == 1
+        assert "showing only 📁 Work (o shows all)" in status(app)
+        # A tag, from the library again.
+        await pilot.press("l")
+        await settle(app, pilot)
+        # Rows: the folders' heading, two folders, the tags' heading, the tag.
+        app.screen.query_one("#library-rows", OptionList).highlighted = 4
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert sidebar_titles(app) == ["Draft"]
+        await pilot.press("o")
+        await settle(app, pilot)
+        assert sidebar_titles(app) == ["Plan", "Notes", "Draft"]
+        assert app.list_filter == "default"
+        assert "showing only" not in status(app)
+
+
+@pytest.mark.asyncio
+async def test_folders_are_renamed_and_deleted_and_tags_deleted_from_the_library():
+    api = library_api()
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("escape", "l")
+        await settle(app, pilot)
+        library = app.screen
+        assert isinstance(library, Library)
+        # Rename the highlighted folder, the first.
+        await pilot.press("r")
+        await settle(app, pilot)
+        assert isinstance(app.screen, Prompt)
+        app.screen.query_one("#prompt-input", Input).value = "Office"
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.folder_renames == [("f1", "Office")]
+        assert "📁 Office" in sidebar_captions(app)[0]
+        # A name another folder has is the server's 409, said in passing.
+        await pilot.press("r")
+        await settle(app, pilot)
+        app.screen.query_one("#prompt-input", Input).value = "Home"
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert "You already have one with that name." in shown
+        # Delete the folder: after a confirm, its conversation is unfiled.
+        await pilot.press("x")
+        await settle(app, pilot)
+        assert isinstance(app.screen, Confirm)
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.folder_deletes == ["f1"]
+        assert [f["id"] for f in library.folders] == ["f2"]
+        assert all("📁" not in caption for caption in sidebar_captions(app))
+        assert app.conversation is not None and app.conversation.folder_id is None
+        # Delete the tag: it comes off the conversation that carried it.
+        tag_row = len(library.folders) + 2
+        library.query_one("#library-rows", OptionList).highlighted = tag_row
+        await pilot.press("x")
+        await settle(app, pilot)
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.tag_deletes == ["t1"]
+        assert app.library_assignments["c3"] == []
+        assert all("#todo" not in caption for caption in sidebar_captions(app))
+
+
+@pytest.mark.asyncio
+async def test_search_pages_through_more_results():
+    api = FakeAPI()
+    api.conversations = [conversation(f"c{n}", title=f"Tea {n}") for n in range(1, 6)]
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await app.refresh_conversations("tea")
+        await settle(app, pilot)
+        view = app.query_one("#conversations", ListView)
+        assert sidebar_titles_with_more(app) == ["Tea 1", "Tea 2", "More results…"]
+        view.index = 2
+        view.action_select_cursor()
+        await settle(app, pilot)
+        assert sidebar_titles_with_more(app) == [
+            "Tea 1",
+            "Tea 2",
+            "Tea 3",
+            "Tea 4",
+            "More results…",
+        ]
+        app.load_more_results()
+        await settle(app, pilot)
+        assert sidebar_titles_with_more(app)[-1] == "Tea 5"
+        assert api.searches == ["tea", "tea", "tea"]
+
+
+def sidebar_titles_with_more(app: MatterWaveApp) -> list[str]:
+    out: list[str] = []
+    for item in app.query_one("#conversations", ListView).children:
+        if isinstance(item, MoreResults):
+            out.append("More results…")
+        else:
+            out.append(item.conversation.title)
+    return out
 
 
 @pytest.mark.asyncio

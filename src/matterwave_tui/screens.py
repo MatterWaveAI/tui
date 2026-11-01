@@ -932,12 +932,15 @@ class Shares(ModalScreen[None]):
         self.dismiss(None)
 
 
-class Library(ModalScreen[None]):
+class Library(ModalScreen[tuple[str, str] | None]):
     """The folders and tags, and the open conversation's place among them:
     `f` makes a folder, `t` makes a tag, `m` files the conversation in the
     highlighted folder (`m` again takes it back out), Space toggles the
-    highlighted tag on it, Esc closes. Every write answers with the
-    library as the app now holds it, and the sidebar's captions follow."""
+    highlighted tag on it, `r` renames the highlighted folder, `x` deletes
+    the highlighted folder or tag after a confirm, Enter hands back
+    ("folder" | "tag", id) for the sidebar to show only that, Esc closes.
+    Every write answers with the library as the app now holds it, and the
+    sidebar's captions follow."""
 
     BINDINGS = [
         Binding("escape", "dismiss_none", "Close"),
@@ -945,6 +948,9 @@ class Library(ModalScreen[None]):
         Binding("t", "new_tag", "Tag"),
         Binding("m", "move", "Move"),
         Binding("space", "toggle_tag", "Tag it"),
+        Binding("r", "rename", "Rename"),
+        Binding("x,delete", "delete", "Delete"),
+        Binding("enter", "show_only", "Show only"),
     ]
     DEFAULT_CSS = """
     Library { align: center middle; }
@@ -964,6 +970,9 @@ class Library(ModalScreen[None]):
         new_tag: Callable[[str], Awaitable[LibraryState | None]],
         move_to: Callable[[str | None], Awaitable[LibraryState | None]],
         set_tags: Callable[[list[str]], Awaitable[LibraryState | None]],
+        rename_folder: Callable[[str, str], Awaitable[LibraryState | None]],
+        delete_folder: Callable[[str], Awaitable[LibraryState | None]],
+        delete_tag: Callable[[str], Awaitable[LibraryState | None]],
     ) -> None:
         super().__init__()
         self.folders = folders
@@ -975,6 +984,9 @@ class Library(ModalScreen[None]):
         self._new_tag = new_tag
         self._move_to = move_to
         self._set_tags = set_tags
+        self._rename_folder = rename_folder
+        self._delete_folder = delete_folder
+        self._delete_tag = delete_tag
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -988,9 +1000,9 @@ class Library(ModalScreen[None]):
         mine = self.assignments.get(self.conversation_id, [])
         return (
             f"Library — {len(self.folders)} folders, {len(self.tags)} tags, "
-            f"{len(mine)} on this chat "
-            "(f makes a folder, t a tag, m files this chat in the highlighted "
-            "folder, Space toggles the highlighted tag, Esc closes)"
+            f"{len(mine)} on this chat (f makes a folder, t a tag, m files this chat in the "
+            "highlighted folder, Space toggles the highlighted tag, r renames a folder, "
+            "x deletes, Enter shows only that one in the sidebar, Esc closes)"
         )
 
     def _options(self) -> list[Option]:
@@ -1079,6 +1091,62 @@ class Library(ModalScreen[None]):
         else:
             mine.append(tag_id)
         self._adopt(await self._set_tags(mine))
+
+    def action_rename(self) -> None:
+        found = self._highlighted()
+        if found is None or found[0] != "folder":
+            self.notify("Highlight a folder to rename it.")
+            return
+        folder = self.folders[found[1]]
+        folder_id = str(folder.get("id") or "")
+
+        def chosen(name: str | None) -> None:
+            if name and folder_id:
+                self.run_worker(self._renamed(folder_id, name), exclusive=True)
+
+        self.app.push_screen(Prompt("Rename the folder:", str(folder.get("name") or "")), chosen)
+
+    async def _renamed(self, folder_id: str, name: str) -> None:
+        self._adopt(await self._rename_folder(folder_id, name))
+
+    def action_delete(self) -> None:
+        """The highlighted folder (its conversations go back to the main
+        list) or tag (it comes off every conversation), after a confirm."""
+        found = self._highlighted()
+        if found is None:
+            self.notify("Highlight a folder or a tag to delete it.")
+            return
+        kind, index = found
+        row = (self.folders if kind == "folder" else self.tags)[index]
+        row_id = str(row.get("id") or "")
+        name = str(row.get("name") or "")
+        question = (
+            f"Delete the folder “{name}”? Its conversations go back to the main list."
+            if kind == "folder"
+            else f"Delete the tag “{name}”? It comes off every conversation."
+        )
+
+        def chosen(confirmation: bool | None) -> None:
+            if confirmation and row_id:
+                self.run_worker(self._deleted(kind, row_id), exclusive=True)
+
+        self.app.push_screen(Confirm(question), chosen)
+
+    async def _deleted(self, kind: str, row_id: str) -> None:
+        remove = self._delete_folder if kind == "folder" else self._delete_tag
+        self._adopt(await remove(row_id))
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.action_show_only()
+
+    def action_show_only(self) -> None:
+        found = self._highlighted()
+        if found is None:
+            return
+        kind, index = found
+        row = (self.folders if kind == "folder" else self.tags)[index]
+        if row.get("id"):
+            self.dismiss((kind, str(row["id"])))
 
     def action_dismiss_none(self) -> None:
         self.dismiss(None)

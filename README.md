@@ -24,8 +24,18 @@ cat notes.md | matterwave-tui -m grt-nano
 echo "explain this trace" | matterwave-tui -p > answer.txt
 ```
 
-Exit 0 on a whole answer, 1 when the turn was refused or cut short (whatever arrived is already on
-stdout). `--shell` starts the shell assistant: each answer is treated as a proposed command, shown
+stdout carries the answer and nothing else: a device sign-in's URL and code, and every note, go to
+stderr. The exit status says how the turn ended:
+
+| Status | Meaning |
+|---|---|
+| 0 | the whole answer is on stdout |
+| 1 | the turn failed (network, gateway, timeout, an unexpected answer) |
+| 2 | the command line was wrong, or there was nothing to send |
+| 3 | the platform refused: moderation, budget, plan, rate limit, sign-in |
+| 4 | the answer was cut short; what arrived is on stdout |
+
+`--shell` starts the shell assistant: each answer is treated as a proposed command, shown
 in a confirm that runs it only when you press Enter — nothing is ever executed without that.
 
 ## Sign in

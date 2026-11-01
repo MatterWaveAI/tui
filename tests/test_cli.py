@@ -11,8 +11,10 @@ from typing import Any
 
 import httpx
 import keyring
+import pytest
 
 from matterwave_tui import cli
+from matterwave_tui.auth import DeviceCode, DeviceToken
 
 BASE = "https://matterwave.test"
 
@@ -27,14 +29,17 @@ ANSWER = (
 )
 
 
-def mock_api(seen: list[httpx.Request], body: str = ANSWER) -> Callable[[], httpx.AsyncClient]:
+def mock_api(
+    seen: list[httpx.Request], body: str = ANSWER, create: httpx.Response | None = None
+) -> Callable[[], httpx.AsyncClient]:
     """An HttpChatAPI's httpx.AsyncClient factory over the mocked transport,
-    recording every request the one-shot makes."""
+    recording every request the one-shot makes. `create` stands in for the
+    conversation create's answer."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
         if request.url.path == "/api/conversations" and request.method == "POST":
-            return httpx.Response(200, json=CONV)
+            return create or httpx.Response(200, json=CONV)
         if request.url.path == "/api/conversations/c1/messages":
             return httpx.Response(
                 200,
@@ -124,7 +129,7 @@ def test_shell_flag_reaches_the_app(monkeypatch):
     assert opened == [True]
 
 
-def test_a_cut_stream_warns_and_exits_one(capsys, monkeypatch):
+def test_a_cut_stream_warns_and_exits_truncated(capsys, monkeypatch):
     seen: list[httpx.Request] = []
     body = (
         'event: message\ndata: {"id": "u1", "role": "user"}\n\n'
@@ -133,10 +138,90 @@ def test_a_cut_stream_warns_and_exits_one(capsys, monkeypatch):
     )
     monkeypatch.setattr("matterwave_tui.api.httpx.AsyncClient", mock_api(seen, body))
     rc = cli.main(["--base-url", BASE, "--key", "mw_k", "-p", "hi"])
-    assert rc == 1
+    assert rc == cli.EXIT_TRUNCATED
     captured = capsys.readouterr()
-    assert "Hal" in captured.out
+    # The mocked resume replays the same body, so the part shows twice.
+    assert captured.out.startswith("Hal") and captured.out.endswith("\n")
     assert "cut short" in captured.err
+
+
+USER = 'event: message\ndata: {"id": "u1", "role": "user"}\n\n'
+DELTA = 'id: g1:0\nevent: delta\ndata: {"content": "Half", "index": 0}\n\n'
+
+
+@pytest.mark.parametrize(
+    ("body", "status", "note"),
+    [
+        (
+            USER + DELTA + 'event: done\ndata: {"id": "a1", "role": "assistant", "truncated": true}\n\n',
+            cli.EXIT_TRUNCATED,
+            "cut short",
+        ),
+        (
+            USER + 'event: error\ndata: {"detail": "The monthly token budget is used up", "code": "budget"}\n\n',
+            cli.EXIT_REFUSED,
+            "budget",
+        ),
+        (
+            USER + 'event: moderation_block\ndata: {"detail": "No.", "code": "moderation"}\n\n',
+            cli.EXIT_REFUSED,
+            "moderation",
+        ),
+        (
+            USER + DELTA + 'event: error\ndata: {"detail": "Lost the connection to the model gateway"}\n\n',
+            cli.EXIT_ERROR,
+            "gateway",
+        ),
+    ],
+)
+def test_each_ending_has_its_exit_status(capsys, monkeypatch, body, status, note):
+    seen: list[httpx.Request] = []
+    monkeypatch.setattr("matterwave_tui.api.httpx.AsyncClient", mock_api(seen, body))
+    assert cli.main(["--base-url", BASE, "--key", "mw_k", "-p", "hi"]) == status
+    captured = capsys.readouterr()
+    assert captured.out in ("", "Half\n")
+    assert note in captured.err
+
+
+@pytest.mark.parametrize(
+    ("answer", "status"),
+    [
+        (httpx.Response(402, json={"detail": "GRT Max is on Pro."}), cli.EXIT_REFUSED),
+        (httpx.Response(429, json={"detail": "Rate limit exceeded."}), cli.EXIT_REFUSED),
+        (httpx.Response(500, json={"detail": "boom"}), cli.EXIT_ERROR),
+    ],
+)
+def test_a_refused_request_is_told_apart_from_a_failed_one(capsys, monkeypatch, answer, status):
+    seen: list[httpx.Request] = []
+    monkeypatch.setattr("matterwave_tui.api.httpx.AsyncClient", mock_api(seen, create=answer))
+    assert cli.main(["--base-url", BASE, "--key", "mw_k", "-p", "hi"]) == status
+    assert capsys.readouterr().out == ""
+
+
+def test_a_device_sign_in_prints_nothing_to_stdout_but_the_answer(capsys, monkeypatch):
+    seen: list[httpx.Request] = []
+    monkeypatch.setattr("matterwave_tui.api.httpx.AsyncClient", mock_api(seen))
+    monkeypatch.delenv("MATTERWAVE_API_KEY", raising=False)
+
+    async def device_login(base_url, on_code, **_):
+        on_code(
+            DeviceCode("dc", "ABCD-EFGH", f"{BASE}/device", f"{BASE}/device?code=ABCD", 600, 1)
+        )
+        return DeviceToken("mw_device", "bearer", [])
+
+    monkeypatch.setattr(cli, "device_login", device_login)
+    assert cli.main(["--base-url", BASE, "-p", "hi"]) == cli.EXIT_OK
+    captured = capsys.readouterr()
+    assert captured.out == "Two two\n"
+    assert "ABCD-EFGH" in captured.err and "Signed in" in captured.err
+
+
+def test_help_names_the_exit_statuses(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["--help"])
+    out = capsys.readouterr().out
+    for line in ("0  the whole answer", "3  the platform refused", "4  the answer was cut short"):
+        assert line in out
 
 
 def test_a_key_is_stored_in_the_test_keyring_never_the_os_one(memory_keyring, monkeypatch):

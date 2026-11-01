@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An unknown `/command` no longer wipes the composer: the text stays and
   the warning says how to send it. `//` escapes a leading slash, so
   `//etc/hosts` sends `/etc/hosts`.
+- One-shot exit statuses tell the endings apart: 0 a whole answer, 1 a
+  failed turn, 2 a usage error, 3 a refusal (moderation, budget, plan, rate
+  limit, sign-in), 4 a cut-short answer, including a `done` marked
+  truncated, which used to exit 0. `--help` lists them. The device
+  sign-in's URL and code and every other note go to stderr, so
+  `-p "..." > answer.txt` holds only the answer.
 - The test suite signs in against an in-memory keyring, so a run no longer
   writes to the developer's OS keyring and passes on a runner without one.
 

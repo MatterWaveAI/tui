@@ -5,6 +5,10 @@
     cat notes | matterwave-tui         a piped-in prompt is the prompt
     matterwave-tui login [--key [K]]   store a key, or sign in by device code
     matterwave-tui logout              forget the stored credential
+
+stdout carries the answer and nothing else; sign-in prompts and every
+note go to stderr, so `matterwave-tui -p "..." > answer.txt` holds only
+the answer. The exit status tells a script how the turn ended (EXIT_HELP).
 """
 
 from __future__ import annotations
@@ -30,16 +34,47 @@ from .auth import (
     resolve_credential,
     save_token,
 )
+from .failures import Kind, classify
 
 # Asked for interactively when `--key` is given with no value, so the key is
 # not left in the shell history or the process list.
 _PROMPT = object()
 
+# How a one-shot ended, for a script to branch on.
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_USAGE = 2
+EXIT_REFUSED = 3
+EXIT_TRUNCATED = 4
+# The failures that are the platform saying no, rather than the turn going
+# wrong: asking again unchanged gets the same answer.
+REFUSED_KINDS: frozenset[Kind] = frozenset(
+    {"moderation", "budget", "rate_limited", "plan", "context", "session", "permission"}
+)
+EXIT_HELP = f"""exit status:
+  {EXIT_OK}  the whole answer is on stdout
+  {EXIT_ERROR}  the turn failed (network, gateway, timeout, an unexpected answer)
+  {EXIT_USAGE}  the command line was wrong, or there was nothing to send
+  {EXIT_REFUSED}  the platform refused: moderation, budget, plan, rate limit, sign-in
+  {EXIT_TRUNCATED}  the answer was cut short; what arrived is on stdout
+"""
+
+
+def _note(text: str) -> None:
+    """Everything that is not the answer goes to stderr."""
+    print(text, file=sys.stderr, flush=True)
+
+
+def exit_status(kind: Kind) -> int:
+    if kind == "truncated":
+        return EXIT_TRUNCATED
+    return EXIT_REFUSED if kind in REFUSED_KINDS else EXIT_ERROR
+
 
 def _print_code(code: DeviceCode) -> None:
     url = code.verification_uri_complete or code.verification_uri
-    print(f"To sign in, open:\n\n    {url}\n\nand enter the code:  {code.user_code}\n")
-    print("Waiting for approval…", flush=True)
+    _note(f"To sign in, open:\n\n    {url}\n\nand enter the code:  {code.user_code}\n")
+    _note("Waiting for approval…")
 
 
 def _key_arg(value: object) -> str | None:
@@ -51,16 +86,21 @@ def _key_arg(value: object) -> str | None:
 def _login(base_url: str, key: str | None) -> str:
     if key:
         save_token(base_url, key)
-        print(f"Key stored in the OS keyring for {base_url}.")
+        _note(f"Key stored in the OS keyring for {base_url}.")
         return key
     token = asyncio.run(device_login(base_url, _print_code)).access_token
     save_token(base_url, token)
-    print(f"Signed in. The credential is in the OS keyring for {base_url}.")
+    _note(f"Signed in. The credential is in the OS keyring for {base_url}.")
     return token
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="matterwave-tui", description="MatterWave in a terminal.")
+    parser = argparse.ArgumentParser(
+        prog="matterwave-tui",
+        description="MatterWave in a terminal.",
+        epilog=EXIT_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
         "--base-url", help=f"API origin (or MATTERWAVE_BASE_URL; default {DEFAULT_BASE_URL})"
     )
@@ -104,8 +144,8 @@ async def run_oneshot(
 ) -> int:
     """One answer, no interface: a conversation is made, the prompt sent
     through the SDK's stream, and the text deltas printed as they arrive.
-    0 on a whole answer, 1 when the turn failed or was cut short (whatever
-    arrived is already on stdout), 2 for a refused request."""
+    The exit status says how it ended (EXIT_HELP); whatever arrived before
+    a failure is already on stdout."""
     api = HttpChatAPI(base_url=base_url, token=credential.token)
     wrote = False
     try:
@@ -115,26 +155,28 @@ async def run_oneshot(
                 sys.stdout.write(item.content or "")
                 sys.stdout.flush()
                 wrote = wrote or bool(item.content)
-            elif isinstance(item, Cut):
-                print("\n(the answer was cut short; what arrived is above)", file=sys.stderr)
-                return 1
+            elif isinstance(item, Cut) or (
+                isinstance(item, fr.DoneFrame) and item.message.truncated
+            ):
+                _note("(the answer was cut short; what arrived is above)")
+                return EXIT_TRUNCATED
             elif isinstance(item, fr.ErrorFrame):
-                print(f"\nerror: {item.detail}", file=sys.stderr)
-                return 1
+                _note(f"error: {item.detail}")
+                return exit_status(classify(item.detail, None, item.code))
             elif isinstance(item, fr.ModerationBlockFrame):
-                print("\n(the answer was blocked by moderation)", file=sys.stderr)
-                return 1
+                _note("(the answer was blocked by moderation)")
+                return EXIT_REFUSED
     except APIConnectionError as exc:
-        print(f"could not reach {base_url}: {exc}", file=sys.stderr)
-        return 1
+        _note(f"could not reach {base_url}: {exc}")
+        return EXIT_ERROR
     except APIError as exc:
-        print(f"error: {exc} (request {exc.request_id or 'unknown'})", file=sys.stderr)
-        return 1
+        _note(f"error: {exc} (request {exc.request_id or 'unknown'})")
+        return exit_status(classify(exc.message, exc.status_code, exc.code))
     finally:
         if wrote:
             sys.stdout.write("\n")
         await api.aclose()
-    return 0
+    return EXIT_OK
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -142,16 +184,16 @@ def main(argv: list[str] | None = None) -> int:
     try:
         base_url = resolve_base_url(args.base_url, DEFAULT_BASE_URL)
     except ValueError as exc:
-        print(exc, file=sys.stderr)
-        return 2
+        _note(str(exc))
+        return EXIT_USAGE
     try:
         if args.command == "logout":
             removed = delete_token(base_url)
-            print("Signed out." if removed else "Nothing was stored for this deployment.")
-            return 0
+            _note("Signed out." if removed else "Nothing was stored for this deployment.")
+            return EXIT_OK
         if args.command == "login":
             _login(base_url, _key_arg(args.login_key) or _key_arg(args.key))
-            return 0
+            return EXIT_OK
         key = _key_arg(args.key)
         if key:
             save_token(base_url, key)
@@ -159,16 +201,16 @@ def main(argv: list[str] | None = None) -> int:
         if credential is None:
             credential = Credential(_login(base_url, None), "keyring")
     except LoginError as exc:
-        print(exc, file=sys.stderr)
-        return 1
+        _note(str(exc))
+        return EXIT_ERROR
     prompt = _oneshot_prompt(args)
     if prompt is not None:
         if not prompt:
-            print("Nothing to send: give -p a prompt or pipe one in.", file=sys.stderr)
-            return 2
+            _note("Nothing to send: give -p a prompt or pipe one in.")
+            return EXIT_USAGE
         return asyncio.run(run_oneshot(base_url, credential, prompt, args.model))
     run_app(base_url, credential, shell_mode=args.shell)
-    return 0
+    return EXIT_OK
 
 
 def run_app(base_url: str, credential: Credential, *, shell_mode: bool = False) -> None:

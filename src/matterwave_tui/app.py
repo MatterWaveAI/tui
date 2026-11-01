@@ -2080,13 +2080,17 @@ class MatterWaveApp(App[None]):
 
     async def apply_tag_create(self, name: str) -> LibraryState | None:
         """A tag of that name; the server answers the one already there
-        when the name is taken, so a write is never refused for that."""
+        when the name is taken, so a write is never refused for that, and
+        the tag the library already lists is replaced rather than added."""
         try:
             tag = await self.api.create_tag(name)
         except Exception as exc:
             self.fail_from_exception(exc)
             return None
-        self.library_tags = [*self.library_tags, tag]
+        self.library_tags = [
+            *(t for t in self.library_tags if t.get("id") != tag.get("id")),
+            tag,
+        ]
         return self._library_state(self._open_folder_id())
 
     async def apply_folder_move(self, folder_id: str | None) -> LibraryState | None:

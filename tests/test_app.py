@@ -1457,6 +1457,25 @@ async def test_a_quoted_or_home_relative_path_attaches(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_creating_a_tag_that_exists_leaves_one_row():
+    api = FakeAPI()
+    api.library_tags = [{"id": "t1", "name": "draft", "created_at": "1"}]
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("escape", "l")
+        await settle(app, pilot)
+        assert isinstance(app.screen, Library)
+        state = await app.apply_tag_create("draft")
+        assert state is not None
+        assert [tag["name"] for tag in state[1]] == ["draft"]
+        assert [tag["id"] for tag in app.library_tags] == ["t1"]
+        state = await app.apply_tag_create("later")
+        assert state is not None
+        assert [tag["name"] for tag in state[1]] == ["draft", "later"]
+
+
+@pytest.mark.asyncio
 async def test_the_feedback_dialog_carries_the_selected_replys_id():
     api = FakeAPI()
     api.tree_messages = [

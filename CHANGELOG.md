@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   truncated, which used to exit 0. `--help` lists them. The device
   sign-in's URL and code and every other note go to stderr, so
   `-p "..." > answer.txt` holds only the answer.
+- Creating a tag that already exists no longer lists it twice in the
+  library.
 - The test suite signs in against an in-memory keyring, so a run no longer
   writes to the developer's OS keyring and passes on a runner without one.
 

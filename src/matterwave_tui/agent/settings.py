@@ -136,8 +136,9 @@ class McpServerConfig:
     """One MCP server: a program spoken to over stdio (`command`) or an
     endpoint over Streamable HTTP (`url`). `tools` is the allow-list (None
     lets every tool through; a tool outside it is never offered to the
-    model); `trust` lets the server's writes run without asking in `ask`
-    and `auto-edit` mode."""
+    model); `trust` takes the server's word when it marks a tool read-only
+    (`readOnlyHint`), so that tool can be offered in `plan` mode, where it
+    asks. Every MCP call still asks in `ask` and `auto-edit` mode."""
 
     name: str
     command: str | None = None

@@ -766,7 +766,7 @@ class AgentScreen(Screen[None]):
             f"Context: ~{session.context_estimate():,} tokens of {session.window():,} "
             f"({len(session.messages)} messages)",
             "Context files: "
-            + (", ".join(name for name, _ in session.context.loaded) or "none loaded"),
+            + (", ".join(session.context.names) or "none loaded"),
         ]
         if session.context.skipped:
             lines.append("Not loaded (folder not trusted): " + ", ".join(session.context.skipped))
@@ -896,7 +896,7 @@ class AgentScreen(Screen[None]):
         if self.opened is not None:
             self.opened.trusted = True
             self.opened.settings = load_settings(session.root, trusted=True)
-        loaded = ", ".join(name for name, _ in session.context.loaded) or "no context files"
+        loaded = ", ".join(session.context.names) or "no context files"
         self.add_line(f"Trusted {session.root}. Loaded: {loaded}. Project MCP servers start next session.", "notice")
 
     def _cmd_mcp(self, rest: str) -> None:
@@ -904,10 +904,14 @@ class AgentScreen(Screen[None]):
         if session is None or session.mcp is None:
             self.add_line("No MCP servers.", "notice")
             return
-        lines = ["MCP tools:"]
+        lines = [f"MCP tools ({session.mode} mode):"]
+        registry = session.registry()
+        verbs = {"allow": "runs", "ask": "asks", "deny": "not offered"}
         for name, info in sorted(session.mcp.tools.items()):
-            kind = "read" if info.read_only else ("write, trusted" if info.trusted else "write, asks")
-            lines.append(f"  {name}  ({kind})")
+            spec = registry.get(name)
+            verb = verbs[session.decide(spec)] if spec is not None else "not offered"
+            kind = "read-only" if info.read_only else "may change things"
+            lines.append(f"  {name}  ({kind}; {verb})")
         if len(lines) == 1:
             lines.append("  (none connected)")
         lines.extend(session.mcp.notices)

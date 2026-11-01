@@ -22,6 +22,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -32,7 +33,6 @@ from typing import Any
 from matterwave_sdk import agent as contract
 
 from .settings import folder_key, state_dir
-from .tools import confine_path
 
 GIT_TIMEOUT_S = 30
 INDEX_FILE = "checkpoints.json"
@@ -195,12 +195,14 @@ class Checkpoints:
         paths = sorted({p for r in chosen for p in r.files})
         # Each path is confined again, as a write: since the snapshot a
         # folder on the way may have become a link out of the root, and the
-        # index is a file anyone with the user's rights can edit.
+        # index is a file anyone with the user's rights can edit. A
+        # protected file the agent changed (with the user's approval) is put
+        # back too: /restore is the user's own command.
         targets: dict[str, Path] = {}
         for rel in paths:
             try:
-                targets[rel] = confine_path(self.root, rel, write=True).absolute
-            except contract.PathRefused as exc:
+                targets[rel] = contract.confine(self.root, rel, write=True, approved=True).absolute
+            except (contract.PathRefused, re.error) as exc:
                 raise CheckpointError(f"{rel} cannot be put back: {exc}") from exc
         self.snapshot(paths, f"before /restore {checkpoint_id}")
         for row in reversed(chosen):

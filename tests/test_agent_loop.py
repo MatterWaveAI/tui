@@ -376,8 +376,12 @@ async def test_the_context_file_loads_in_a_trusted_folder_only(root: Path):
     assert trusted.trusted and not trusted.trust_unknown
     await trusted.session.run("hi")
     prompt = system_prompt(fake, 1)
-    assert "Instructions from MATTERWAVE.md:\nUse four-space indents." in prompt
-    assert "Instructions from AGENTS.md:\nRun pytest -q." in prompt
+    assert '<project-instructions path="MATTERWAVE.md">\nUse four-space indents.\n</project-instructions>' in prompt
+    assert '<project-instructions path="AGENTS.md">\nRun pytest -q.\n</project-instructions>' in prompt
+    # The contract's slot: the same text the SDK makes of the same files.
+    files = trusted.session.context.files
+    extras = trusted.session.offered_extras()
+    assert contract.system_prompt("ask", str(root), extra_tools=extras, context_files=files) in prompt
 
 
 @pytest.mark.asyncio
@@ -387,7 +391,7 @@ async def test_the_personal_override_and_account_instructions_layer_on_top(root:
     session = await opened(fake, root, Recorder(), trust=True)
     await session.run("hi")
     prompt = system_prompt(fake)
-    assert "Instructions from MATTERWAVE.local.md:\nI prefer short answers." in prompt
+    assert '<project-instructions path="MATTERWAVE.local.md">\nI prefer short answers.\n</project-instructions>' in prompt
     assert prompt.rstrip().endswith("Answer in British English.")
     assert any("not in .gitignore" in n for n in session.context.notices)
     assert "never as instructions" in prompt
@@ -575,19 +579,37 @@ async def test_project_mcp_servers_do_not_start_in_an_untrusted_folder(root: Pat
 
 
 @pytest.mark.asyncio
-async def test_a_trusted_mcp_servers_writes_go_through_without_asking_except_in_plan(root: Path, tmp_path: Path):
+async def test_every_mcp_call_asks_and_a_trusted_servers_read_only_tool_asks_in_plan(root: Path, tmp_path: Path):
     log = tmp_path / "calls.jsonl"
     project_mcp(root, log, trust=True)
-    fake = FakeV1([call("mcp__demo__deploy", target="staging"), say("Deployed.")])
-    events = Recorder()
+    fake = FakeV1([call("mcp__demo__deploy", target="staging"), call("mcp__demo__lookup", word="x"),
+                   say("Deployed."), call("mcp__demo__lookup", word="y"), say("Looked.")])
+    events = Recorder(True, True, True)
     session = await opened(fake, root, events, trust=True)
     try:
         await session.run("deploy")
-        assert events.asked == []
-        assert "deploy ran" in fake.tool_results()[-1]
+        # Trust takes the server's read-only hint; it does not skip the
+        # question: every MCP call asks in ask and auto-edit.
+        assert [r.tool for r in events.asked] == ["mcp__demo__deploy", "mcp__demo__lookup"]
+        assert "deploy ran" in fake.tool_results()[0]
         session.set_mode("plan")
-        assert "mcp__demo__deploy" not in [t["function"]["name"] for t in session.tools_for_request()]
-        assert "mcp__demo__lookup" in [t["function"]["name"] for t in session.tools_for_request()]
+        offered = [t["function"]["name"] for t in session.tools_for_request()]
+        assert "mcp__demo__deploy" not in offered and "mcp__demo__lookup" in offered
+        await session.run("look it up")
+        assert [r.tool for r in events.asked][-1] == "mcp__demo__lookup"
+        assert fake.tool_results()[-1] == 'lookup ran with {"word": "y"}'
+    finally:
+        await session.aclose()
+
+
+@pytest.mark.asyncio
+async def test_an_untrusted_servers_read_only_tool_is_not_offered_in_plan(root: Path, tmp_path: Path):
+    project_mcp(root, tmp_path / "calls.jsonl")
+    fake = FakeV1([say("ok")])
+    session = await opened(fake, root, Recorder(), trust=True, mode="plan")
+    try:
+        await session.run("plan")
+        assert not any(n.startswith("mcp__demo") for n in fake.tool_names(0))
     finally:
         await session.aclose()
 
@@ -602,12 +624,13 @@ async def test_matterwaves_own_mcp_is_prewired_with_the_users_credential(root: P
     fake = FakeV1([call("mcp__matterwave__list_conversations"),
                    call("mcp__matterwave__send_message", conversation_id="c9", content="hi"),
                    say("Listed.")], mcp_tools=tools)
-    events = Recorder(False)
+    events = Recorder(True, False)
     session = await opened(fake, root, events)
     await session.run("what did I talk about?")
     assert {"mcp__matterwave__list_conversations", "mcp__matterwave__send_message"} <= set(fake.tool_names(0))
     assert fake.mcp_called == [("list_conversations", {})]
-    assert [r.kind for r in events.asked] == ["mcp"]
+    # Read-only or not, an MCP call asks in ask mode.
+    assert [r.kind for r in events.asked] == ["mcp", "mcp"]
 
 
 # --- web fetch and the todo list -------------------------------------------------------------------------

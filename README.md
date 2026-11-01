@@ -42,37 +42,53 @@ as a conversation (`metadata.conversation_id`), so it opens in the web app with 
 results; `--no-store` keeps it out.
 
 **Tools.** `read_file`, `list_dir`, `glob`, `grep`, `edit`, `write_file` and `run_shell`, as
-the SDK's agent contract defines them (`matterwave_sdk.agent`, contract 1.0.0, shared with the
-VS Code extension). Every path is resolved and must stay under the root after links are followed:
-`..`, an absolute path outside the root and a link out of it are refused before anything happens.
-`.env*`, `*.pem`, `id_*`, `.git/` and anything listed in `.matterwaveignore` are refused for
-reading as well as writing. On Windows, a name the system reads as another one is refused too: an
-NTFS stream (`key.pem::$DATA`), a name ending in a dot or a space (`.git `), a device name (`CON`,
-`NUL.txt`). Search also skips what `.gitignore` ignores. A line longer than 32 KB is shown cut, a
-large file is read a window at a time without loading it whole, a pipe or device is not read, and
-`edit` / `write_file` work on files up to 8 MB. Confinement is not a sandbox: `run_shell` can
-reach anything you can, which is why commands ask.
+the SDK's agent contract defines them (`matterwave_sdk.agent`, contract 1.1.0, shared with the
+VS Code extension and the desktop app). The read tools are the SDK's own, so they read, search
+and word their results exactly as the other clients do; the TUI's tests run the contract's
+conformance cases through them. Every path is resolved and must stay under the root after links
+are followed: `..`, an absolute path outside the root and a link out of it are refused before
+anything happens. `.env*`, `*.pem`, `id_*`, `.git/` and anything listed in `.matterwaveignore`
+are refused for reading as well as writing, in any case (`.ENV`, `ID_RSA`). On every platform, a
+name Windows would read as another one is refused too: a `:` stream (`key.pem::$DATA`, `C:x`), a
+name ending in a dot or a space (`.git `), a device name (`CON`, `NUL.txt`, `COM1`) and a `\\?\`,
+`\\.\` or network path. Search (`glob`, `grep`, `list_dir`) also skips what the `.gitignore` and
+`.matterwaveignore` files from the root down ignore, ignoring case; `list_dir` still shows the
+protected files below. A `glob` pattern without a `/` matches file names at any depth (`*.ts`);
+one with a `/` matches the path under the search's `path`. `read_file` reads files up to 16 MB,
+a window of 2,000 lines or 256 KB at a time, and a line longer than that is shown cut; `grep`
+skips files over 4 MB and cuts a matching line at 400 characters; `edit` / `write_file` work on
+files up to 8 MB. Confinement is not a sandbox: `run_shell` can reach anything you can, which is
+why commands ask.
 
 **Approval modes.** The status line always shows the mode. `Shift+Tab` cycles it, and
 `/approval-mode <mode>` sets it (`--save` keeps it as your default).
 
-| Mode | Reads | File changes | Commands, web fetch, MCP writes |
-|---|---|---|---|
-| `plan` | yes | not offered | not offered |
-| `ask` (default) | yes | each shown as a diff and approved | each approved |
-| `auto-edit` | yes | applied | each approved |
-| `yolo` | yes | applied | run |
+| Mode | Reads | File changes | Commands, web fetch | MCP tools |
+|---|---|---|---|---|
+| `plan` | yes | not offered | not offered | read-only ones approved, others not offered |
+| `ask` (default) | yes | each shown as a diff and approved | each approved | each approved |
+| `auto-edit` | yes | applied | each approved | each approved |
+| `yolo` | yes | applied | run | run |
 
-`yolo` exists only when the session starts with `--yolo`, and it is never saved as a default (a
-`yolo` default in the settings is ignored). When no sandbox is on, `--yolo` warns. A change to
-the files that steer the agent itself (`.matterwave/`, `MATTERWAVE.md`, `AGENTS.md`,
-`MATTERWAVE.local.md`, and your own MatterWave config and state folders when the workspace holds
-them) is asked about in every mode, `yolo` included, since it outlasts the session. So is every
-change when the workspace is your home folder or a folder above it, where a shell profile,
-`~/.ssh/config` or the startup folder would run things later without a command being approved.
+These are the contract's decisions (`agent.allowed`): the TUI's own tools are gated by kind, so
+`web_fetch` is a network tool, an MCP server's tool an MCP one, and `todo_write`, `agent` and
+`exit_plan_mode` steer the run and are allowed in every mode. Plan mode never runs silently what
+`ask` mode would ask about. `yolo` exists only when the session starts with `--yolo`, and it is
+never saved as a default (a `yolo` default in the settings is ignored). When no sandbox is on,
+`--yolo` warns.
+
+A change to a protected file is asked about in every mode, `yolo` included, since it outlasts
+the session: `.matterwaveignore`, `.matterwave/`, `MATTERWAVE.md`, `MATTERWAVE.local.md` and
+`AGENTS.md`, the shell startup files (`.bashrc`, `.bash_profile`, `.profile`, `.zshrc`,
+`.zprofile`), `.ssh/` and `.aws/`, at any depth and in any case, and `.config/matterwave` (the
+contract's list); and your own MatterWave config and state folders wherever they are set. So is
+every change when the workspace is your home folder or a folder above it, where the startup
+folder or another profile would run things later without a command being approved. A headless
+run refuses such a change, whatever `--approval-mode` says.
 
 Each change in `ask` mode opens its unified diff: `y` applies it and `n` rejects it, leaving the
-file byte for byte as it was. Overwriting a binary file shows every line of the text replacing it.
+file byte for byte as it was; the model is told you said no, as an ordinary result, and to change
+course. Overwriting a binary file shows every line of the text replacing it.
 If the file changes, or its path comes to lead somewhere else (a folder swapped for a link), while
 the diff is up, nothing is written and the model is told to read it again. A command shows in
 full, never shortened; in `auto-edit` its approval also names the files changed without asking
@@ -82,10 +98,19 @@ Control characters in a diff, a command, a file, a command's output or the model
 spelled out (`\x1b`), as are bidi overrides and, in a dialog, zero-width characters: nothing the
 agent shows can move the cursor, redraw a dialog or write to the clipboard. Only `http` and
 `https` links in its answers open on a click; a `file:` link to a script would run it. `Esc` stops a run:
-the stream closes and a running command is killed with everything it started (the process group
-on POSIX, a job object on Windows). What a command leaves running in the background ends with it.
-A program it hands to another service (a scheduled task, WMI, a system service) is not its child
-and outlives it; only the sandbox contains that.
+the stream closes and a running command is killed with everything it started, what it detached
+included (`cmd /c start /b`, `Start-Process`, `setsid`, `nohup ... &`), and the model gets the
+output so far under "Stopped by the user". On Windows the command starts suspended and runs only
+once it is in a job object that kills its members when closed, so nothing it starts can get out
+first; if the TUI itself dies, its processes go too. On Linux it runs under a small keeper that
+is a child subreaper: a process it orphans comes back to the keeper instead of to init, and the
+keeper ends every descendant, whatever its session or process group, on Stop, at the command's
+end and when the TUI dies. macOS has no subreaper: the command's process group and every process
+still below it are ended, but a daemon whose parent has already exited belongs to launchd by then
+and is not found. When a command exits, what it left running ends with it at once, so a
+background process holding its output does not keep the call open until the timeout. A program
+it hands to another service (a scheduled task, WMI, a system service, `launchctl`) is not its
+child and outlives it on every platform; only the sandbox contains that.
 
 **Limits.** Each run (one prompt) has a cap on model calls (`--max-turns`, default 40) and on
 tokens (`--max-tokens`, default 400,000). A subagent's calls count against its parent's. A 402
@@ -181,9 +206,10 @@ In CI, run it in a container, keep `--max-turns` and `--max-tokens` low, and use
 
 - **MCP servers**: stdio (`command`, `args`, `env`) or Streamable HTTP (`url`, `headers`;
   `${VAR}` is read from the environment). `tools` is the allow-list; a tool outside it is never
-  offered to the model. A tool marks itself read-only, but only a trusted server's word is taken
-  (`"trust": true`, and MatterWave's own); every other tool asks in `ask` and `auto-edit` mode
-  (not at all on a trusted server) and is never offered in `plan`.
+  offered to the model. Every MCP call asks in `ask` and `auto-edit` mode and runs in `yolo`. A
+  tool marks itself read-only (`readOnlyHint`), but only a trusted server's word is taken
+  (`"trust": true`, and MatterWave's own): such a tool is offered in `plan`, where it asks too,
+  and every other tool is not offered there.
   MatterWave's own `/mcp` is pre-wired with your credential (`matterwaveMcp`). Tools are offered
   as `mcp__<server>__<tool>`, so none can stand in for a built-in; two that come out under one
   name are both left out, with a notice. An answer over 16 MB is refused, and `timeout_s`

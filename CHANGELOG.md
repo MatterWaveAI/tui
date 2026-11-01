@@ -12,23 +12,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Coding-agent mode: `matterwave-tui code [path]` opens the agent on a
   folder as a screen of the app (also on the command palette). It runs
   its own loop against `/v1/chat/completions` with the SDK's agent
-  contract (`matterwave_sdk.agent` 1.0.0): the seven tools (`read_file`,
+  contract (`matterwave_sdk.agent` 1.1.0): the seven tools (`read_file`,
   `list_dir`, `glob`, `grep`, `edit`, `write_file`, `run_shell`), path
   confinement through the SDK's `confine` (no `..`, nothing outside the
   root, no link out of it), the deny list (`.env*`, `*.pem`, `id_*`,
-  `.git/`, `.matterwaveignore`) for reads and writes, `.gitignore` for
-  search, and the versioned agent prompt. The server never runs a tool.
+  `.git/`, `.matterwaveignore`) for reads and writes, `.gitignore` and
+  `.matterwaveignore` for search, and the versioned agent prompt. The
+  server never runs a tool.
 - Approval modes `plan`, `ask` (the default), `auto-edit` and `yolo`;
   Shift+Tab cycles them and the status line always shows the mode. `yolo`
   needs `--yolo` each session and is never saved; `--yolo` without a
   sandbox warns. In `ask` mode each change opens its unified diff and is
   written only on `y`; `n` leaves the file byte for byte as it was.
-- Changes to the files that steer the agent (`.matterwave/`, the context
-  files) are asked about in every mode and refused headless. An approval
-  dialog takes no answer in its first moments and Enter never answers it.
+- Changes to protected files (the contract's list: `.matterwave/`, the
+  context files, `.matterwaveignore`, the shell startup files, `.ssh/`,
+  `.aws/`, `.config/matterwave`) are asked about in every mode and
+  refused headless. An approval dialog takes no answer in its first
+  moments and Enter never answers it.
 - Stop (`Esc`) closes the stream and kills a running command with
-  everything it started (process group on POSIX, job object on Windows);
-  background children end with their command.
+  everything it started, what it detached included: a job object made
+  while the command is suspended on Windows, a child-subreaper keeper on
+  Linux, the process group and its live descendants on macOS. Background
+  children end with their command.
   Each run has a turn cap and a token cap; a 402 or 429 ends it with the
   chat's own copy. The agent says it is unavailable when the org has
   switched local agent tools off (`local_agent_tools` on `/api/me`) or the
@@ -87,8 +92,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A write re-checks after the approval: if the file changed or its path
   now leads elsewhere (a folder swapped for a link), nothing is written.
   Overwriting a binary file shows the full text that replaces it.
-- On Windows, NTFS streams (`key.pem::$DATA`), names ending in a dot or a
-  space (`.git `) and device names (`CON`, `NUL.txt`) are refused.
+- NTFS streams (`key.pem::$DATA`), names ending in a dot or a space
+  (`.git `), device names (`CON`, `NUL.txt`) and `\\?\` or network paths
+  are refused, on every platform (the SDK's `confine`).
 - Every write asks, in every mode, when the workspace holds the home
   folder, and so does a write to the user's own MatterWave config or state
   folder inside the workspace. In `auto-edit`, a command's approval names
@@ -96,18 +102,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Project context files, commands and subagents are read under the tools'
   confinement (a link out of the root is not loaded); `/restore` confines
   each path again; the checkpoint store is readable by the user alone.
-- Reads are bounded: a large file is read a window at a time, a line over
-  32 KB is shown cut, pipes and devices are not read, and edits work on
-  files up to 8 MB. An HTTP MCP answer over 16 MB is refused, each MCP
+- Reads are bounded: `read_file` reads files up to 16 MB and shows a
+  window at a time, `grep` skips files over 4 MB, pipes and devices are
+  not read, and edits work on files up to 8 MB. An HTTP MCP answer over
+  16 MB is refused, each MCP
   request and each web fetch has an overall deadline, a stdio server that
   sends an unreadable line fails at once, and MCP tools that clash once
   their names are made safe are both left out.
 
 ### Changed
 
+- Agent mode follows agent contract 1.1.0, so it reads, searches, gates
+  and refuses as the VS Code extension and the desktop app do. What the
+  SDK now owns is no longer the TUI's own copy: the search rules and walk
+  (`SearchIgnore`, `walk`; matching ignores case on Linux too), the read
+  tools and their text (`run_read_file`, `run_list_dir`, `run_glob`,
+  `run_grep`), run_shell's result (`format_shell`), the decision for each
+  of the TUI's own tools by kind (`allowed`, `tools_for_mode`), the
+  refusal sentences (`refusal`), the prompt's slots for extra tools and
+  context files, the protected list and the Windows-name refusals
+  (`confine`), and the availability flags (`tools_of`,
+  `local_agent_tools_of`). The contract's conformance cases run through
+  the TUI's tools in its tests. What users and models will notice:
+  - Every MCP call asks in `ask` and `auto-edit`, a trusted server's
+    included; `"trust": true` now only takes the server's read-only hint,
+    so its read-only tools are offered in `plan`, where they ask.
+  - Protected writes, now including the home folder's shell startup files
+    and credential folders at any depth, ask in `yolo` too.
+  - A rejected call is an ordinary result in the contract's words; refusals
+    use the contract's sentences (`headless`, `needs_approval`,
+    `unknown_tool`, `mode`).
+  - `list_dir` shows protected entries (`AGENTS.md`, `.matterwaveignore`);
+    `glob("*.ts")` matches at any depth and a pattern with `/` matches
+    under `path`; grep lines are cut at 400 characters and a grep `glob`
+    with `/` is matched under `path`; read_file's cut marker and empty-file
+    text, and run_shell's status line (`Exit code N`, `Stopped after N s:
+    ...`) and middle-cut marker, are the contract's; a command's output
+    keeps its last line break.
+  - Context files go into the prompt's fenced instructions slot, cut at
+    32,768 characters; the account's instructions follow them.
+  - A command Stop ends answers its call with the output so far, under
+    "Stopped by the user", instead of a stand-in.
+  - A command that exits while something it detached holds its output
+    open ends at once, with that process, instead of running to its
+    timeout (asyncio's `wait()` waits for the pipe to close as well).
 - The SDK floor rises to `matterwave-sdk>=0.5.0`, and uv resolves the SDK
-  from the sibling `python-sdk` checkout until the release that carries
-  `matterwave_sdk.agent` is published.
+  from a sibling `python-sdk` checkout carrying agent contract 1.1 until
+  the release that carries it is published.
 - CI runs on Linux, Windows and macOS, and runs mypy.
 
 ## [0.4.0] - 2026-10-31

@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import asdict, dataclass
-from typing import Any, Protocol, cast
+from typing import Any, Protocol
 from urllib.parse import parse_qsl, quote, urlsplit
 
 import httpx
@@ -760,11 +760,11 @@ class HttpChatAPI:
         that conversation. A write: no retries, since a retried call is
         billed and stored twice. Closing the iterator closes the stream."""
         stream = await self._writes.chat.completions.create(
-            cast(Any, [dict(m) for m in messages]),
+            [dict(m) for m in messages],
             model=model,
             stream=True,
             include_usage=True,
-            tools=cast(Any, [dict(t) for t in tools]) or None,
+            tools=[dict(t) for t in tools] or None,
             conversation_id=conversation_id,
         )
         accumulator = ChatCompletionAccumulator()

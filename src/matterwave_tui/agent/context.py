@@ -12,57 +12,93 @@ Context files, layered in this order:
 The repository's files (2 and 3) are loaded only in a folder the user has
 trusted: a cloned repository can carry instructions, and the files are
 read as instructions, not as data. In a folder that is not trusted they
-are skipped with a notice.
+are skipped with a notice. The files go into the contract's prompt slot
+(`agent.system_prompt(context_files=...)`), which fences each one and cuts
+it at the contract's length; the account's instructions stay the TUI's own
+section after it.
 """
 
 from __future__ import annotations
 
+import itertools
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from matterwave_sdk import agent as contract
 
-from .ignore import GitIgnore
 from .settings import PROJECT_DIR, config_dir
-from .tools import confine_path, read_text_head
 
 DEFINITION_MAX_CHARS = 64_000
 
 PROJECT_FILES = ("MATTERWAVE.md", "AGENTS.md")
 PERSONAL_FILE = "MATTERWAVE.local.md"
-CONTEXT_FILE_MAX_CHARS = 64_000
+# The contract cuts each context file in the prompt at this many characters.
+CONTEXT_FILE_MAX_CHARS = int(contract.CONTRACT["system_prompt"]["context_files"]["max_chars"])
 MENTION_MAX_CHARS = 64_000
 MENTION_MAX_FILES = 10
+MENTION_MAX_LISTED = 200
 _MENTION = re.compile(r"(?<![\w@])@((?:[^\s\"'`]|\\ )+)")
 
 
 @dataclass
 class ContextFiles:
-    """The context files found for a root: what was loaded (name, text)
-    and what the user should be told."""
+    """The context files found for a root: the ones loaded, in the order
+    they apply (later wins), and what the user should be told."""
 
-    loaded: list[tuple[str, str]] = field(default_factory=list)
+    files: list[contract.ContextFile] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     notices: list[str] = field(default_factory=list)
 
-    def render(self, account_instructions: str | None = None) -> str:
-        """The block appended to the system prompt."""
-        blocks: list[str] = []
-        for name, text in self.loaded:
-            blocks.append(f"Instructions from {name}:\n{text.strip()}")
-        if account_instructions and account_instructions.strip():
-            blocks.append(
-                "The user's own instructions, set on their account; they take precedence "
-                f"over the files above:\n{account_instructions.strip()}"
-            )
-        return "\n\n".join(blocks)
+    @property
+    def names(self) -> list[str]:
+        return [f.path for f in self.files]
+
+    @staticmethod
+    def render_account(account_instructions: str | None) -> str:
+        """The account's custom instructions, after the files in the prompt."""
+        if not account_instructions or not account_instructions.strip():
+            return ""
+        return (
+            "The user's own instructions, set on their account; they take precedence "
+            f"over the project instructions above:\n{account_instructions.strip()}"
+        )
 
 
 def _clip(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + f"\n(cut off at {limit} characters)"
+
+
+def read_text_head(path: Path, max_bytes: int) -> tuple[str, bool]:
+    """Up to `max_bytes` of a text file, and whether there was more; a
+    character cut in half at the end is left out. ValueError for a binary
+    file or one that is not UTF-8, OSError for one that is not a regular
+    file (a pipe would never end)."""
+    if not path.is_file():
+        raise OSError(f"{path.name} is not a regular file")
+    with open(path, "rb") as handle:
+        data = handle.read(max_bytes + 1)
+    more = len(data) > max_bytes
+    data = data[:max_bytes]
+    if contract.is_binary(data):
+        raise ValueError("binary")
+    try:
+        return data.decode("utf-8"), more
+    except UnicodeDecodeError as exc:
+        if more and exc.start >= len(data) - 3:
+            return data[: exc.start].decode("utf-8"), more
+        raise
+
+
+def _shown_path(path: Path) -> str:
+    """A path outside the workspace as the prompt names it: under the home
+    folder as `~/...`."""
+    try:
+        return "~/" + path.relative_to(Path.home()).as_posix()
+    except (ValueError, RuntimeError):
+        return path.as_posix()
 
 
 def project_context_present(root: Path) -> bool:
@@ -78,13 +114,32 @@ def _read_clipped(path: Path, limit: int) -> str:
     return _clip(text, limit)
 
 
+def _read_context_file(path: Path) -> str:
+    """A context file's text, read no further than the contract's cut needs
+    (each character is at most four bytes); the prompt slot makes the cut."""
+    text, _ = read_text_head(path, (CONTEXT_FILE_MAX_CHARS + 1) * 4)
+    return text
+
+
 def project_file(root: Path, relative: str) -> Path:
     """Where a file the project supplies (a context file, a command, a
     subagent) really is, under the same confinement as the tools: a link
     that leads out of the root, or to a key or a `.env`, is refused
     (`PathRefused`), so a trusted folder's MATTERWAVE.md cannot be a link
     that uploads ~/.aws/credentials."""
-    return confine_path(root, relative).absolute
+    return contract.confine(root, relative).absolute
+
+
+def _gitignored(root: Path, name: str) -> bool:
+    """Whether the root's .gitignore ignores the file `name` at the root."""
+    try:
+        text = (root / ".gitignore").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    try:
+        return contract.IgnoreFile(text).match(name) is True
+    except re.error:
+        return False
 
 
 def load_context(root: Path, *, trusted: bool) -> ContextFiles:
@@ -92,7 +147,9 @@ def load_context(root: Path, *, trusted: bool) -> ContextFiles:
     user_file = config_dir() / "MATTERWAVE.md"
     if user_file.is_file():
         try:
-            found.loaded.append(("your MATTERWAVE.md", _read_clipped(user_file, CONTEXT_FILE_MAX_CHARS)))
+            found.files.append(
+                contract.ContextFile(_shown_path(user_file), _read_context_file(user_file), trusted=True)
+            )
         except (OSError, ValueError):
             found.notices.append(f"{user_file} could not be read.")
     for name in (*PROJECT_FILES, PERSONAL_FILE):
@@ -103,15 +160,15 @@ def load_context(root: Path, *, trusted: bool) -> ContextFiles:
             found.skipped.append(name)
             continue
         try:
-            text = _read_clipped(project_file(root, name), CONTEXT_FILE_MAX_CHARS)
+            text = _read_context_file(project_file(root, name))
         except contract.PathRefused as exc:
             found.notices.append(f"{name} was not loaded: {exc}")
             continue
-        except (OSError, ValueError):
+        except (OSError, ValueError, re.error):
             found.notices.append(f"{name} could not be read as UTF-8 text.")
             continue
-        found.loaded.append((name, text))
-        if name == PERSONAL_FILE and not GitIgnore(root).ignored(PERSONAL_FILE, False):
+        found.files.append(contract.ContextFile(name, text, trusted=True))
+        if name == PERSONAL_FILE and not _gitignored(root, PERSONAL_FILE):
             found.notices.append(
                 f"{PERSONAL_FILE} is not in .gitignore; add it so your personal notes stay yours."
             )
@@ -150,7 +207,9 @@ def expand_mentions(prompt: str, root: Path) -> Mentions:
             continue
         seen.add(raw)
         try:
-            target = confine_path(root, raw)
+            target = contract.confine(root, raw)
+        except re.error:
+            continue
         except contract.PathRefused as exc:
             if (root / raw).exists() or contract.is_absolute(raw) or ".." in raw:
                 out.notices.append(f"@{raw} was not attached: {exc}")
@@ -161,14 +220,14 @@ def expand_mentions(prompt: str, root: Path) -> Mentions:
             out.notices.append(f"@{raw} was not attached: at most {MENTION_MAX_FILES} per prompt.")
             continue
         if target.absolute.is_dir():
-            from .ignore import SearchFilter
-
-            search = SearchFilter(root)
+            # The files search would see under it, as the SDK's walk finds them.
             base = "" if target.relative == "." else target.relative
-            names = [
-                rel[len(base) + 1 :] if base else rel
-                for rel, _ in search.walk(base)
-            ][:200]
+            try:
+                found = list(itertools.islice(contract.walk(root, target.relative), MENTION_MAX_LISTED))
+            except (contract.PathRefused, contract.ToolError, OSError, re.error) as exc:
+                out.notices.append(f"@{raw} was not attached: {exc}")
+                continue
+            names = [rel[len(base) + 1 :] if base else rel for rel in found]
             blocks.append(f'<folder path="{target.relative}">\n' + "\n".join(names) + "\n</folder>")
         else:
             try:

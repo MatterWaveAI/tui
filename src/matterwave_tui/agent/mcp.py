@@ -11,10 +11,11 @@ Three kinds of server:
 
 A server's tools are offered to the model as `mcp__<server>__<tool>`, only
 the ones its allow-list (`tools`) lets through and its `exclude_tools` does
-not name. A tool the server marks `readOnlyHint` is a read; anything else
-is a write and goes through the same approval as a file change or a
-command: asked for in `ask` and `auto-edit` unless the server is trusted,
-never offered in `plan`.
+not name. Each is gated as the contract's `mcp` kind (`agent.allowed`):
+asked for in `ask` and `auto-edit`, run in `yolo`, and in `plan` asked for
+when it is read-only, never offered otherwise. A tool is read-only when the
+server marks it `readOnlyHint` and the server's word is taken: a server the
+user trusts (`"trust": true`) and MatterWave's own.
 """
 
 from __future__ import annotations
@@ -30,10 +31,11 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 import httpx
+from matterwave_sdk import agent as contract
 
 from .. import __version__
 from .settings import McpServerConfig
-from .shell import ProcessTree, child_env
+from .shell import ProcessTree, child_env, spawn
 
 PROTOCOL_VERSION = "2025-06-18"
 CLIENT_INFO = {"name": "matterwave-tui", "version": __version__}
@@ -61,17 +63,21 @@ class McpToolInfo:
     def qualified(self) -> str:
         return qualified_name(self.server, self.name)
 
-    def to_openai(self) -> dict[str, Any]:
+    def to_extra(self) -> contract.ExtraTool:
+        """The tool as the contract gates and offers it: kind `mcp`,
+        read-only when the server's word for it is taken."""
         schema = dict(self.input_schema) if self.input_schema else {"type": "object", "properties": {}}
         schema.setdefault("type", "object")
-        return {
-            "type": "function",
-            "function": {
-                "name": self.qualified,
-                "description": f"[MCP server {self.server}] {self.description}".strip(),
-                "parameters": schema,
-            },
-        }
+        return contract.ExtraTool(
+            self.qualified,
+            "mcp",
+            f"[MCP server {self.server}] {self.description}".strip(),
+            schema,
+            read_only=self.read_only,
+        )
+
+    def to_openai(self) -> dict[str, Any]:
+        return self.to_extra().to_openai()
 
 
 def qualified_name(server: str, tool: str) -> str:
@@ -139,23 +145,20 @@ class StdioServer:
             argv = ["cmd", "/c", *argv]
         env = child_env()
         env.update({k: _expand(v) for k, v in self.config.env.items()})
-        kwargs: dict[str, Any] = {}
-        if os.name != "nt":
-            kwargs["start_new_session"] = True
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
+            # The same tree as a command's: what the server starts ends
+            # with it when the session closes.
+            self._tree = await spawn(
+                argv,
                 cwd=self.cwd,
                 env=env,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
                 limit=16 * 1024 * 1024,
-                **kwargs,
             )
         except OSError as exc:
             raise McpFailure(f"{command} could not be started: {exc}") from exc
-        self._tree = ProcessTree(proc)
         self._reader = asyncio.create_task(self._read())
         await self._request(
             "initialize",

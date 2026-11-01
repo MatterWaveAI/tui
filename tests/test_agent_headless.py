@@ -14,6 +14,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from matterwave_sdk import agent as contract
 
 from matterwave_tui import cli
 from matterwave_tui.agent.headless import (
@@ -126,7 +127,8 @@ def test_a_write_under_the_default_mode_is_refused_not_prompted_and_exits_non_ze
     assert code == EXIT_REFUSED
     document = json.loads(out)
     assert document["status"] == "refused" and document["mode"] == "ask"
-    assert "never prompts" in document["message"]
+    assert document["message"].startswith(contract.refusal("headless", tool="edit", mode="ask"))
+    assert "--approval-mode auto-edit" in document["message"]
     assert (root / "src" / "util.py").read_bytes() == before
     assert len(fake.requests) == 1
 

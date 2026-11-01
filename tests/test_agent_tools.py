@@ -1,7 +1,7 @@
 """The seven contract tools on a real folder: confinement refuses before
 anything is read or written, search honours .gitignore, .matterwaveignore
 and the deny list, an edit is worked out (and its diff shown) before it is
-written."""
+written, and a protected path is worked out to be asked about."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ import sys
 from pathlib import Path
 
 import pytest
+from matterwave_sdk import agent as contract
 
-from matterwave_tui.agent.ignore import GitIgnore, SearchFilter
 from matterwave_tui.agent.tools import LocalTools, PendingWrite, ToolOutcome
 
 
@@ -121,12 +121,26 @@ def test_writes_are_confined_too(workspace: Path):
         {"path": "../outside.txt", "content": "x"},
         {"path": str(workspace.parent / "outside.txt"), "content": "x"},
         {"path": ".env", "content": "x"},
-        {"path": ".matterwaveignore", "content": "x"},
     ):
         result = tools.prepare_write("write_file", args)
         assert isinstance(result, ToolOutcome) and result.is_error, args
     assert (workspace.parent / "outside.txt").read_text(encoding="utf-8") == "secret outside"
     assert (workspace / ".env").read_text(encoding="utf-8") == "KEY=1\n"
+
+
+def test_a_protected_path_is_worked_out_to_be_asked_about_not_refused(workspace: Path):
+    tools = LocalTools(workspace)
+    for path in (".matterwaveignore", "AGENTS.md", "docs/agents.md", ".matterwave/settings.json",
+                 ".bashrc", "home/me/.ssh/config", "me/.config/matterwave/settings.json"):
+        pending = tools.prepare_write("write_file", {"path": path, "content": "x"})
+        assert isinstance(pending, PendingWrite) and pending.protected, path
+        # Without the user's approval the SDK refuses the write itself.
+        with pytest.raises(contract.PathRefused) as refused:
+            tools.confine(path, write=True)
+        assert refused.value.reason == "protected"
+    plain = tools.prepare_write("write_file", {"path": "src/new.py", "content": "x"})
+    assert isinstance(plain, PendingWrite) and not plain.protected
+    assert (workspace / ".matterwaveignore").read_text(encoding="utf-8") == "private/\n"
 
 
 # --- reading and searching ---------------------------------------------------------------
@@ -139,17 +153,22 @@ def test_read_file_numbers_lines_and_takes_a_range(workspace: Path):
     second = read(tools, "read_file", path="src/app.py", start_line=2, end_line=2)
     assert second.text == "2\t    return 1"
     past = read(tools, "read_file", path="src/app.py", start_line=9)
-    assert past.is_error and "past the end" in past.text
+    assert past.is_error and past.text == "start_line 9 is past the end of src/app.py (2 lines)."
+    backwards = read(tools, "read_file", path="src/app.py", start_line=2, end_line=1)
+    assert backwards.is_error and backwards.text == "end_line 1 is before start_line 2."
+    typed = read(tools, "read_file", path="src/app.py", start_line="2")
+    assert typed.is_error and "must be an integer" in typed.text
 
 
-def test_list_dir_leaves_out_ignored_and_denied_entries(workspace: Path):
+def test_list_dir_leaves_out_ignored_and_denied_entries_and_shows_protected_ones(workspace: Path):
     out = read(LocalTools(workspace), "list_dir")
     names = out.text.splitlines()
     assert names[0].endswith("/")  # folders first
     assert "src/" in names and "pkg/" in names
-    for hidden in (".env", "build/", "private/", "debug.log", ".matterwaveignore"):
+    for hidden in (".env", "build/", "private/", "debug.log"):
         assert hidden not in names
     assert "keep.log" in names  # negated in .gitignore
+    assert ".matterwaveignore" in names  # protected: it can be read, so it is listed
 
 
 def test_glob_honours_gitignore_nested_gitignore_and_the_deny_list(workspace: Path):
@@ -173,16 +192,28 @@ def test_grep_finds_matches_and_skips_ignored_files(workspace: Path):
     assert bad.is_error
 
 
-def test_the_gitignore_matcher_follows_gits_rules(tmp_path: Path):
+def test_the_search_rules_follow_gits_rules_and_ignore_case(tmp_path: Path):
     tree(tmp_path, {".gitignore": "*.tmp\n/top.txt\nlogs/\n!important.tmp\n", "a/.gitignore": "!x.tmp\n"})
-    rules = GitIgnore(tmp_path)
-    assert rules.ignored("x.tmp", False)
-    assert rules.ignored("deep/y.tmp", False)
-    assert not rules.ignored("important.tmp", False)
-    assert rules.ignored("top.txt", False) and not rules.ignored("sub/top.txt", False)
-    assert rules.ignored("logs", True) and not rules.ignored("logs", False)
-    assert not rules.ignored("a/x.tmp", False)  # the nested file un-ignores it
-    assert SearchFilter(tmp_path).hidden(".git", True)
+    rules = LocalTools(tmp_path).search_ignore()
+    assert rules.ignored("x.tmp")
+    assert rules.ignored("deep/y.tmp")
+    assert rules.ignored("DEEP/Y.TMP")  # on every platform
+    assert not rules.ignored("important.tmp")
+    assert rules.ignored("top.txt") and not rules.ignored("sub/top.txt")
+    assert rules.ignored("logs", is_dir=True) and not rules.ignored("logs")
+    assert not rules.ignored("a/x.tmp")  # the nested file un-ignores it
+    assert rules.ignored(".git", is_dir=True)
+
+
+def test_glob_matches_names_at_any_depth_and_a_path_pattern_under_path(workspace: Path):
+    tools = LocalTools(workspace)
+    found = read(tools, "glob", pattern="*.PY").text.splitlines()
+    assert found == ["pkg/shared.py", "src/app.py", "src/util.py"]
+    assert read(tools, "glob", pattern="src/*.py").text.splitlines() == ["src/app.py", "src/util.py"]
+    # A grep glob with a / is matched against the path under `path`.
+    assert read(tools, "grep", pattern="return", glob="src/*.py").text == "src/app.py:2:     return 1"
+    assert read(tools, "grep", pattern="return", glob="src/*.py", path="src").text == "No matches for return."
+    assert read(tools, "grep", pattern="return", glob="*.py", path="src").text == "src/app.py:2:     return 1"
 
 
 # --- writes --------------------------------------------------------------------------------

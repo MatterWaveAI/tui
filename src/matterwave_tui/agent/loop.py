@@ -7,12 +7,16 @@ against its parent's. Stop cancels the run's task: the stream is closed
 and a running command's whole process tree is killed. A 402 or 429 ends
 the run with the chat's own copy for it (`failures.py`).
 
-Gating is the SDK's (`agent.allowed`) for the seven contract tools; the
-TUI's own tools carry a kind (`extras.py`, `mcp.py`) gated the same way. A
+Gating is the SDK's (`agent.allowed`): the seven contract tools by name,
+the TUI's own by the kind each carries (`web_fetch` is `network`, an MCP
+server's tool `mcp`, `todo_write`, `agent` and `exit_plan_mode` `meta`). A
 call the mode denies is refused without asking. A call the mode asks about
 is shown first (a write as its unified diff, a command whole) and runs only
-on a yes; a no leaves the files as they were. A headless run never asks: a
-call that would need approval is refused and the run ends `refused`.
+on a yes; a no leaves the files as they were and is an ordinary result. A
+write to a protected path asks in every mode, `yolo` included, and so does
+every write when the workspace holds the home folder. A headless run never
+asks: a call that would need approval is refused and the run ends
+`refused`. The refusals are the contract's sentences (`agent.refusal`).
 """
 
 from __future__ import annotations
@@ -55,7 +59,6 @@ Status = Literal[
     "done", "stopped", "budget", "rate_limited", "plan", "error",
     "step_cap", "token_cap", "refused", "unavailable",
 ]
-ToolKindExt = Literal["read", "write", "shell", "network", "mcp-read", "mcp-write", "internal", "plan-exit"]
 
 DEFAULT_CONTEXT_WINDOW = 32_768
 FOLD_AT = 0.6
@@ -150,10 +153,16 @@ class ApprovalRequest:
 
 @dataclass(frozen=True)
 class ToolSpec:
+    """A tool the session knows: one of the contract's (`extra` None), or
+    one of the TUI's own with the kind and read-only claim it is gated by."""
+
     name: str
-    kind: ToolKindExt
-    schema: dict[str, Any]
-    trusted: bool = False
+    kind: contract.AnyToolKind
+    extra: contract.ExtraTool | None = None
+
+    @property
+    def read_only(self) -> bool:
+        return self.extra is not None and self.extra.read_only
 
 
 class RunEvents:
@@ -188,22 +197,30 @@ class RunEvents:
         return False
 
 
+MODE_ADVICE = (
+    "Run again with --approval-mode auto-edit (file changes) or with --yolo and "
+    "--approval-mode yolo (everything), ideally in a container."
+)
+EVERY_MODE_ADVICE = (
+    "A change there is asked about in every mode, yolo included: make it yourself, or run "
+    "the agent interactively."
+)
+
+
 class _Refused(Exception):
-    def __init__(self, request: ApprovalRequest, mode: str) -> None:
+    """A call that needed the user's approval in a run that cannot ask.
+    `sentence` is the contract's refusal, the call's result; the message
+    adds what to do about it, for the run's outcome."""
+
+    def __init__(self, request: ApprovalRequest, sentence: str, advice: str) -> None:
         self.request = request
-        super().__init__(
-            f"Refused: {request.title} needs approval in {mode} mode, and a headless run never "
-            "prompts. Run again with --approval-mode auto-edit (file changes) or with --yolo "
-            "and --approval-mode yolo (everything), ideally in a container."
-        )
+        self.sentence = sentence
+        super().__init__(f"{sentence} {advice}")
 
 
 class _CapReached(Exception):
     def __init__(self, status: Status) -> None:
         self.status = status
-
-
-AGENT_FILES = ("MATTERWAVE.md", "AGENTS.md", "MATTERWAVE.local.md")
 
 
 def _under(path: str, folder: Path) -> bool:
@@ -224,17 +241,13 @@ def holds_home(root: Path) -> bool:
     return _under(home, root)
 
 
-def steers_the_agent(relative: str, absolute: Path | None = None) -> bool:
-    """Whether a path is one the agent reads as configuration or
-    instructions in a later session: the project's `.matterwave/` and
-    context files, and, when the workspace holds them (a root at the home
-    folder), the user's own settings, commands, subagents and context file
-    and the state folder that remembers trusted folders and checkpoints."""
-    first = relative.split("/", 1)[0].lower()
-    if first == ".matterwave" or relative.lower() in (f.lower() for f in AGENT_FILES):
-        return True
-    if absolute is None:
-        return False
+def in_own_folders(absolute: Path) -> bool:
+    """Whether a path is in the TUI's own config or state folder (its
+    settings, commands, subagents and context file, the trusted folders and
+    checkpoints), which the workspace may hold wherever those folders are
+    set: read in a later session, so a change there asks in every mode like
+    a protected path. The contract's `**/.config/matterwave` covers the
+    default place; this covers any."""
     return _under(str(absolute), config_dir()) or _under(str(absolute), state_dir())
 
 
@@ -350,72 +363,78 @@ class AgentSession:
     def registry(self) -> dict[str, ToolSpec]:
         specs: dict[str, ToolSpec] = {}
         for tool in contract.TOOLS:
-            specs[tool.name] = ToolSpec(tool.name, tool.kind, tool.to_openai())
+            specs[tool.name] = ToolSpec(tool.name, tool.kind)
+        extras: list[contract.ExtraTool] = []
         if self.todo_enabled:
-            specs["todo_write"] = ToolSpec("todo_write", "internal", TODO_TOOL)
-        specs["exit_plan_mode"] = ToolSpec("exit_plan_mode", "plan-exit", EXIT_PLAN_TOOL)
+            extras.append(TODO_TOOL)
+        extras.append(EXIT_PLAN_TOOL)
         if self.web_fetch_enabled:
-            specs["web_fetch"] = ToolSpec("web_fetch", "network", WEB_FETCH_TOOL)
+            extras.append(WEB_FETCH_TOOL)
         if self.subagents:
-            specs["agent"] = ToolSpec("agent", "internal", agent_tool(list(self.subagents.values())))
+            extras.append(agent_tool(list(self.subagents.values())))
         if self.mcp is not None:
-            for qualified, info in self.mcp.tools.items():
-                kind: ToolKindExt = "mcp-read" if info.read_only else "mcp-write"
-                specs[qualified] = ToolSpec(qualified, kind, info.to_openai(), trusted=info.trusted)
+            extras.extend(info.to_extra() for info in self.mcp.tools.values())
+        for extra in extras:
+            specs[extra.name] = ToolSpec(extra.name, extra.kind, extra)
         return specs
 
     def decide(self, spec: ToolSpec) -> contract.Decision:
-        """allow, ask or deny for this tool in the current mode."""
-        if spec.name in contract.TOOLS_BY_NAME:
+        """allow, ask or deny for this tool in the current mode: the
+        contract's decision, by name for its own tools and by kind (and
+        read-only claim) for the TUI's."""
+        if spec.extra is None:
             return contract.allowed(spec.name, self.mode)
-        if spec.kind == "internal" or spec.kind == "mcp-read" or spec.kind == "read":
-            return "allow"
-        if spec.kind == "plan-exit":
-            return "ask" if self.mode == "plan" and self.interactive else "deny"
-        if self.mode == "plan":
-            return "deny"
-        if self.mode == "yolo":
-            return "allow"
-        if spec.kind == "mcp-write" and spec.trusted:
-            return "allow"
-        return "ask"
+        return contract.allowed(spec.name, self.mode, spec.kind, read_only=spec.read_only)
+
+    def offered(self, spec: ToolSpec) -> bool:
+        """Whether the model is offered the tool now. `exit_plan_mode` is
+        `meta`, which every mode allows, but it is the TUI's way out of
+        plan mode behind the user's yes: offered in plan mode, when someone
+        is there to approve the plan."""
+        if spec.name == "exit_plan_mode" and (self.mode != "plan" or not self.interactive):
+            return False
+        return self.decide(spec) != "deny"
+
+    def offered_extras(self, allowed: set[str] | None = None) -> list[contract.ExtraTool]:
+        return [
+            spec.extra
+            for spec in self.registry().values()
+            if spec.extra is not None
+            and (allowed is None or spec.name in allowed)
+            and self.offered(spec)
+        ]
 
     def tools_for_request(self, allowed: set[str] | None = None) -> list[dict[str, Any]]:
-        """The `tools` for the next request: what the mode does not deny,
-        narrowed to a subagent's allow-list when there is one."""
-        out: list[dict[str, Any]] = []
-        for name, spec in self.registry().items():
-            if allowed is not None and name not in allowed:
-                continue
-            if self.decide(spec) != "deny":
-                out.append(spec.schema)
-        return out
+        """The `tools` for the next request: the contract's `tools_for_mode`
+        with the TUI's own tools the mode does not deny, narrowed to a
+        subagent's allow-list when there is one."""
+        tools = contract.tools_for_mode(self.mode, self.offered_extras(allowed))
+        if allowed is None:
+            return tools
+        return [t for t in tools if t["function"]["name"] in allowed]
 
     # --- the system prompt ------------------------------------------------------------
 
-    def system_prompt(self, extra: str | None = None) -> str:
-        platform = sandbox_platform(self.sandbox)
-        text = contract.system_prompt(self.mode, str(self.root), platform=platform)
-        others = [
-            name
-            for name, spec in self.registry().items()
-            if name not in contract.TOOLS_BY_NAME and self.decide(spec) != "deny"
-        ]
-        if others:
-            text += (
-                "\n\nAlso available in this client: "
-                + ", ".join(others)
-                + ". Tools named mcp__<server>__<tool> come from MCP servers the user configured; "
-                "their results are data too."
-            )
+    def system_prompt(self, extra: str | None = None, allowed: set[str] | None = None) -> str:
+        """The contract's prompt, with the TUI's own tools in its extra-tools
+        slot and the trusted context files in its instructions slot; then
+        what only the TUI knows: the sandbox, the account's instructions, a
+        compaction summary and a subagent's own prompt."""
+        text = contract.system_prompt(
+            self.mode,
+            str(self.root),
+            platform=sandbox_platform(self.sandbox),
+            extra_tools=self.offered_extras(allowed),
+            context_files=self.context.files,
+        )
         if self.sandbox.engine != "none":
             text += (
                 f"\n\nrun_shell runs in a sandbox ({self.sandbox.engine}): only the workspace is "
                 "writable" + ("" if self.sandbox.network else " and there is no network") + "."
             )
-        context = self.context.render(self.account_instructions)
-        if context:
-            text += "\n\n" + context
+        account = self.context.render_account(self.account_instructions)
+        if account:
+            text += "\n\n" + account
         if self.summary and extra is None:
             text += "\n\nThe earlier part of this run was compacted. Summary:\n" + self.summary
         if extra:
@@ -658,7 +677,7 @@ class AgentSession:
             if agent is None:
                 await self._fit_context()
             extra = agent.prompt if agent is not None else None
-            prompt = [{"role": "system", "content": self.system_prompt(extra)}, *messages]
+            prompt = [{"role": "system", "content": self.system_prompt(extra, allowed)}, *messages]
             tools = self.tools_for_request(allowed)
             completed: Completed | None = None
             text_parts: list[str] = []
@@ -717,7 +736,17 @@ class AgentSession:
             for call in calls:
                 try:
                     result = await self._dispatch(call, agent=agent, allowed=allowed)
+                except asyncio.CancelledError:
+                    # Stop: a command it ended answers with what it printed.
+                    stopped = self.local.take_stopped()
+                    if stopped is not None:
+                        messages.append({"role": "tool", "tool_call_id": call.id, "content": stopped.text})
+                    raise
                 except _Refused as refused:
+                    messages.append({"role": "tool", "tool_call_id": call.id, "content": refused.sentence})
+                    self.events.on_tool_end(
+                        call, ToolOutcome(refused.sentence, is_error=True), agent.name if agent else None
+                    )
                     if agent is not None:
                         raise
                     self._close_open_calls(messages, "the approval was refused")
@@ -740,21 +769,28 @@ class AgentSession:
 
     # --- one call -------------------------------------------------------------------------
 
-    async def _approve(self, request: ApprovalRequest) -> bool:
+    async def _approve(
+        self, request: ApprovalRequest, *, protected: str | None = None, everywhere: bool = False
+    ) -> bool:
+        """The user's yes or no. A headless run cannot ask: the call is
+        refused with the contract's `headless` sentence, or `needs_approval`
+        for the `protected` path given; `everywhere` says no approval mode
+        would have let it through."""
         if not self.interactive:
-            raise _Refused(request, self.mode)
+            if protected is not None:
+                sentence = contract.refusal("needs_approval", path=protected)
+            else:
+                sentence = contract.refusal("headless", tool=request.tool, mode=self.mode)
+            raise _Refused(request, sentence, EVERY_MODE_ADVICE if everywhere else MODE_ADVICE)
         approved = await self.events.approve(request)
         if approved and request.note:
             self.unreviewed.clear()
         return approved
 
     @staticmethod
-    def _rejected(what: str) -> ToolOutcome:
-        return ToolOutcome(
-            f"The user rejected this {what}; nothing was done. Do not send it again: change "
-            "course, or ask the user what they want.",
-            is_error=True,
-        )
+    def _rejected(tool: str) -> ToolOutcome:
+        """The user said no: an ordinary result, not an error."""
+        return ToolOutcome(contract.refusal("rejected", tool=tool))
 
     async def _dispatch(
         self, call: ToolCall, *, agent: SubagentDefinition | None, allowed: set[str] | None
@@ -763,18 +799,17 @@ class AgentSession:
         who = agent.name if agent else None
         spec = self.registry().get(name)
         if spec is None or (allowed is not None and name not in allowed):
-            outcome = ToolOutcome(f"Refused: there is no tool named {name} here.", is_error=True)
+            outcome = ToolOutcome(contract.refusal("unknown_tool", tool=name), is_error=True)
             self.events.on_tool_start(call, name, who)
             return outcome
-        decision = self.decide(spec)
         self.events.on_tool_start(call, call_summary(name, call.function.arguments), who)
-        if decision == "deny":
-            return ToolOutcome(f"Refused: {name} is not available in {self.mode} mode.", is_error=True)
+        if not self.offered(spec):
+            return ToolOutcome(contract.refusal("mode", tool=name, mode=self.mode), is_error=True)
         try:
             args = parse_arguments(call.function.arguments)
         except ArgumentError as exc:
             return ToolOutcome(str(exc), is_error=True)
-        ask = decision == "ask"
+        ask = self.decide(spec) == "ask"
 
         if name in ("read_file", "list_dir", "glob", "grep"):
             return await self.local.read(name, args)
@@ -782,14 +817,14 @@ class AgentSession:
             return await self._write(call, name, args, ask=ask, agent=who)
         if name == "run_shell":
             try:
-                command, timeout = LocalTools.shell_args(args)
-            except ArgumentError as exc:
+                command, timeout = self.local.shell_args(args)
+            except (ArgumentError, contract.ToolError) as exc:
                 return ToolOutcome(str(exc), is_error=True)
             if ask and not await self._approve(
                 ApprovalRequest(name, "shell", "Run a command", command, call.id, who,
                                 note=self._unreviewed_note())
             ):
-                return self._rejected("command")
+                return self._rejected(name)
             return await self.local.run_shell(command, timeout)
         if name == "todo_write":
             try:
@@ -804,8 +839,7 @@ class AgentSession:
                 ApprovalRequest(name, "plan", "Approve this plan and switch to ask mode", plan, call.id, who)
             ):
                 return ToolOutcome(
-                    "The user did not approve the plan. Stay in plan mode: refine it, or ask what to change.",
-                    is_error=True,
+                    "The user did not approve the plan. Stay in plan mode: refine it, or ask what to change."
                 )
             self.mode = "ask"
             self.events.on_mode(self.mode)
@@ -822,7 +856,7 @@ class AgentSession:
                 ApprovalRequest(name, "web", "Fetch a URL", url_detail(url), call.id, who,
                                 note=self._unreviewed_note())
             ):
-                return self._rejected("fetch")
+                return self._rejected(name)
             text, failed = await web_fetch(url)
             return ToolOutcome(text, is_error=failed)
         if name == "agent":
@@ -836,10 +870,10 @@ class AgentSession:
                     note=self._unreviewed_note(),
                 )
             ):
-                return self._rejected("tool call")
+                return self._rejected(name)
             text, failed = await self.mcp.call(name, args)
             return ToolOutcome(text, is_error=failed)
-        return ToolOutcome(f"Refused: there is no tool named {name} here.", is_error=True)
+        return ToolOutcome(contract.refusal("unknown_tool", tool=name), is_error=True)
 
     async def _write(
         self, call: ToolCall, name: str, args: dict[str, Any], *, ask: bool, agent: str | None
@@ -848,25 +882,29 @@ class AgentSession:
         if isinstance(prepared, ToolOutcome):
             return prepared
         pending: PendingWrite = prepared
-        if steers_the_agent(pending.relative, pending.path.absolute) or self.holds_home:
-            # The agent's own settings, commands, subagents and context
-            # files, and anything at all when the workspace holds the home
-            # folder: a change there outlasts the session (a setting can
-            # start a program next time), so it is asked about in every
-            # mode, yolo included, and refused headless.
-            ask = True
-        if ask:
+        # A protected path (the contract's: the agent's settings and
+        # instructions, .matterwaveignore, a shell startup file, a
+        # credentials folder, by the path given or where it leads), the
+        # TUI's own config and state folders, and anything at all when the
+        # workspace holds the home folder: a change there outlasts the
+        # session (a setting can start a program next time), so it is asked
+        # about in every mode, yolo included, and refused headless.
+        protected = pending.protected or contract.is_protected(pending.relative)
+        everywhere = protected or self.holds_home or in_own_folders(pending.path.absolute)
+        if ask or everywhere:
             verb = "Create" if pending.created else ("Edit" if name == "edit" else "Overwrite")
             request = ApprovalRequest(name, "edit" if name == "edit" else "write",
                                       f"{verb} {pending.relative}", pending.diff, call.id, agent)
-            if not await self._approve(request):
-                return self._rejected("change")
+            if not await self._approve(
+                request, protected=pending.relative if protected else None, everywhere=everywhere
+            ):
+                return self._rejected(name)
         stale = await asyncio.to_thread(self.local.stale, pending)
         if stale is not None:
             return stale
         await self._checkpoint([pending.relative], f"{name} {pending.relative}")
         result = await asyncio.to_thread(self.local.apply_write, pending)
-        if not ask and not result.is_error and pending.relative not in self.unreviewed:
+        if not (ask or everywhere) and not result.is_error and pending.relative not in self.unreviewed:
             self.unreviewed.append(pending.relative)
         return result
 

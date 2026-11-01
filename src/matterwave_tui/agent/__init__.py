@@ -1,14 +1,19 @@
 """Coding-agent mode: a local tool loop against `/v1/chat/completions`.
 
-The tool contract, the approval modes, path confinement, the edit rule, the
-diff and the agent-mode system prompt are the SDK's (`matterwave_sdk.agent`);
-this package runs them on the user's machine. The server relays the tools
-and the calls and never executes one.
+The tool contract (1.1.0) is the SDK's (`matterwave_sdk.agent`): the
+approval modes and the decision for each tool kind, path confinement and
+the protected paths, the search rules, the read tools and their output,
+run_shell's result text, the refusal sentences, the edit rule, the diff
+and the agent-mode system prompt with its slots for extra tools and
+context files. This package runs them on the user's machine, and adds what
+is the TUI's own: the approval dialogs, writes re-checked before they are
+made, the process trees, MCP, subagents and the sandbox. The server relays
+the tools and the calls and never executes one.
 
     settings.py     user and project settings, the trusted-folder store
-    ignore.py       .gitignore / .matterwaveignore / deny-list walking for search
-    shell.py        run_shell: process-tree kill, timeout, output cap, sandbox
-    tools.py        the seven contract tools, split into prepare and apply
+    shell.py        run_shell: job object / keeper / group kill, timeout, output cap, sandbox
+    reaper.py       the Linux keeper: runs a command as a child subreaper
+    tools.py        the seven contract tools: the SDK's reads, writes split into prepare and apply
     checkpoints.py  file snapshots in a shadow git repo outside the project
     context.py      MATTERWAVE.md / AGENTS.md, @path mentions, custom commands
     mcp.py          MCP servers as tool sources (stdio, HTTP, MatterWave's /mcp)

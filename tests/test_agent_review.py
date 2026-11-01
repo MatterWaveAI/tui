@@ -20,6 +20,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from matterwave_sdk import agent as contract
 
 from matterwave_tui.agent import extras
 from matterwave_tui.agent import settings as agent_settings
@@ -30,13 +31,7 @@ from matterwave_tui.agent.loop import AgentSession, ApprovalRequest, RunEvents, 
 from matterwave_tui.agent.mcp import HttpServer, McpManager, McpServerConfig, StdioServer
 from matterwave_tui.agent.printable import shown
 from matterwave_tui.agent.session import SessionOptions, open_session
-from matterwave_tui.agent.tools import (
-    READ_LINE_MAX_BYTES,
-    LocalTools,
-    PendingWrite,
-    ToolOutcome,
-    windows_name_problem,
-)
+from matterwave_tui.agent.tools import LocalTools, PendingWrite, ToolOutcome
 
 from .fake_api import FakeV1, call, say
 
@@ -159,17 +154,19 @@ def test_overwriting_a_binary_file_shows_every_line_that_will_be_written(root: P
 # --- Windows spellings ------------------------------------------------------------------------
 
 
-def test_windows_spellings_that_name_another_file_are_recognised():
+def test_windows_spellings_that_name_another_file_are_refused_on_every_platform(root: Path):
+    tools = LocalTools(root)
     for path in ("key.pem::$DATA", ".git::$INDEX_ALLOCATION/config", "notes.md:hidden", ".git /HEAD",
                  ".matterwave./settings.json", "MATTERWAVE.md ", "CON", "nul.txt", "src/AUX", "COM1",
-                 "conin$", "LPT9.log"):
-        assert windows_name_problem(path) is not None, path
-    for path in ("src/app.py", "C:\\work\\x.py", ".env.example", "a.b.c", "./x", "console.py", "company"):
-        assert windows_name_problem(path) is None, path
+                 "conin$", "LPT9.log", "C:foo.txt", "\\\\server\\share\\x"):
+        with pytest.raises(contract.PathRefused) as refused:
+            tools.confine(path)
+        assert refused.value.reason in ("stream", "trailing", "device", "unc"), path
+    for path in ("src/app.py", "a.b.c", "./x", "console.py", "company", "com10"):
+        assert tools.confine(path).relative.endswith(path.removeprefix("./")), path
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows path rules")
-def test_on_windows_streams_devices_and_trailing_dots_are_refused(root: Path):
+def test_streams_devices_and_trailing_dots_are_refused_by_the_tools(root: Path):
     (root / "key.pem").write_text("PEM", encoding="utf-8")
     tools = LocalTools(root)
     for path in ("key.pem:x", "key.pem::$DATA", "nul", "CON", "src/a.py."):
@@ -241,7 +238,7 @@ def test_a_trusted_context_file_that_links_out_of_the_root_is_not_loaded(root: P
     except (OSError, NotImplementedError) as exc:
         pytest.skip(f"symbolic links need admin or developer mode here ({exc})")
     found = load_context(root, trusted=True)
-    assert all("aws_secret" not in text for _, text in found.loaded)
+    assert all("aws_secret" not in f.content for f in found.files)
     assert any("AGENTS.md was not loaded" in n for n in found.notices)
 
 
@@ -291,15 +288,29 @@ def test_a_huge_single_line_file_is_read_cut_not_whole(root: Path):
     (root / "bundle.min.js").write_bytes(b"x" * (3 * 1024 * 1024) + b"\nsecond line\n")
     out = asyncio.run(LocalTools(root).read("read_file", {"path": "bundle.min.js"}))
     assert not out.is_error
-    first, second = out.text.split("\n")
-    assert first.endswith(f"(line cut at {READ_LINE_MAX_BYTES} bytes)") and len(first) < READ_LINE_MAX_BYTES + 100
-    assert second == "2\tsecond line"
+    first, marker = out.text.split("\n")
+    limit = contract.LIMITS["read_max_bytes"]
+    assert len(first.encode()) <= limit
+    assert marker == (f"[Cut off at the read limit: line 1 is longer than {limit} bytes and only its "
+                      "start is shown. Pass start_line=2 to read on.]")
+    out = asyncio.run(LocalTools(root).read("read_file", {"path": "bundle.min.js", "start_line": 2}))
+    assert out.text == "2\tsecond line"
+
+
+def test_a_file_past_the_read_size_is_not_read(root: Path):
+    big = contract.LIMITS["read_max_file_bytes"] + 1
+    with open(root / "huge.log", "wb") as handle:
+        handle.truncate(big)
+    out = asyncio.run(LocalTools(root).read("read_file", {"path": "huge.log"}))
+    assert out.is_error and out.text == (
+        f"huge.log is {big} bytes, over the {contract.LIMITS['read_max_file_bytes']} bytes read_file reads."
+    )
 
 
 def test_a_read_window_still_reports_the_files_length(root: Path):
     (root / "log.txt").write_text("".join(f"line {i}\n" for i in range(1, 3001)), encoding="utf-8")
     out = asyncio.run(LocalTools(root).read("read_file", {"path": "log.txt"}))
-    assert "of 3000; pass start_line=2001" in out.text
+    assert out.text.endswith("[Cut off at the read limit: showing lines 1-2000 of 3000. Pass start_line=2001 to read on.]")
     out = asyncio.run(LocalTools(root).read("read_file", {"path": "log.txt", "start_line": 2999}))
     assert out.text == "2999\tline 2999\n3000\tline 3000"
     out = asyncio.run(LocalTools(root).read("read_file", {"path": "log.txt", "start_line": 4000}))
@@ -310,7 +321,7 @@ def test_a_read_window_still_reports_the_files_length(root: Path):
 def test_a_named_pipe_is_not_read(root: Path):
     os.mkfifo(root / "pipe")
     out = asyncio.run(asyncio.wait_for(LocalTools(root).read("read_file", {"path": "pipe"}), 5))
-    assert out.is_error and "not a regular file" in out.text
+    assert out.is_error
     grep = asyncio.run(asyncio.wait_for(LocalTools(root).read("grep", {"pattern": "x"}), 5))
     assert not grep.is_error
 

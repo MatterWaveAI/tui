@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -14,9 +15,10 @@ import time
 from pathlib import Path
 
 import pytest
+from matterwave_sdk import agent as contract
 
 from matterwave_tui.agent.settings import SandboxConfig
-from matterwave_tui.agent.shell import ProcessTree, build_argv, run_command
+from matterwave_tui.agent.shell import OutputBuffer, ProcessTree, build_argv, run_command
 
 PY = sys.executable
 
@@ -119,18 +121,32 @@ async def test_the_timeout_stops_the_command(tmp_path: Path):
     result = await run_command("sleep 30", tmp_path, timeout_s=1, output_max_bytes=65536)
     assert result.timed_out
     assert time.monotonic() - started < 5
-    assert "Stopped after 1s" in result.render(1)
+    assert result.render(1).startswith("Stopped after 1 s: the command ran past its timeout")
 
 
 @pytest.mark.asyncio
 async def test_output_is_capped_keeping_head_and_tail(tmp_path: Path):
     command = runner("-c \"print('A' * 5000); print('B' * 5000)\"")
-    result = await run_command(command, tmp_path, timeout_s=30, output_max_bytes=1000)
+    result = await run_command(command, tmp_path, timeout_s=30, output_max_bytes=1001)
     assert result.exit_code == 0
-    assert result.output.startswith("A" * 400)
-    assert result.output.rstrip().endswith("B" * 400)
-    assert result.omitted_bytes > 8000
-    assert "bytes omitted" in result.render(30)
+    status, head, marker, tail = result.render(30).split("\n", 3)
+    assert status == "Exit code 0" and head == "A" * 500
+    assert re.fullmatch(r"\[\.\.\. \d+ bytes of output cut from the middle \.\.\.\]", marker)
+    assert len(tail.encode()) == 501 and tail.rstrip().endswith("B" * 400)
+
+
+@pytest.mark.parametrize("cap", [5, 10, 11, 1001])
+def test_the_output_kept_is_cut_as_the_contract_cuts_the_whole(cap: int):
+    # The buffer holds only a head and a tail; what it renders is what the
+    # SDK makes of the whole output, multi-byte characters at the cuts included.
+    for whole in ("0123456789ABCDEF" * 100, "\u00e9" * 3000 + "x" + "\u20ac" * 2000, "short\n", ""):
+        data = whole.encode()
+        buffer = OutputBuffer(cap)
+        for i in range(0, len(data), 7):
+            buffer.feed(data[i : i + 7])
+        limits = {"shell_output_max_bytes": cap}
+        expected = contract.format_shell(whole, exit_code=0, limits=limits)
+        assert buffer.result(0).render(limits=limits) == expected, (cap, whole[:20])
 
 
 @pytest.mark.asyncio

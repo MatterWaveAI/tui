@@ -19,6 +19,8 @@ from matterwave_sdk.models import (
     ConversationMessage,
     Me,
     Usage,
+    local_agent_tools_of,
+    tools_of,
 )
 
 from ..thread import Divider, Thread
@@ -94,38 +96,36 @@ def model_rows(models: dict[str, Any]) -> list[dict[str, Any]]:
 
 def unavailable_reason(me: Me | None, models: dict[str, Any] | None, model_id: str | None) -> str | None:
     """Why agent mode is off for this account and model, or None when it is
-    on. A field the server does not send (an older server) allows it."""
-    if me is not None and me.local_agent_tools is False:
+    on: the SDK's `local_agent_tools_of` and `tools_of`, where only "no"
+    refuses, so a field the server does not send (an older server) allows it."""
+    if local_agent_tools_of(me) == "no":
         return (
             "Agent unavailable: your organisation has switched off local agent tools. "
             "An owner or admin can turn them on in Settings > Organisation."
         )
-    if models is not None and model_id:
-        row = model_row(models, model_id)
-        if row is not None and row.get("supports_tools") is False:
-            label = row.get("label") or model_id
-            return (
-                f"Agent unavailable: {label} cannot call tools. Pick a model that can (/model)."
-            )
+    if models is not None and model_id and tools_of(model_rows(models), model_id) == "no":
+        row = model_row(models, model_id) or {}
+        label = row.get("label") or model_id
+        return f"Agent unavailable: {label} cannot call tools. Pick a model that can (/model)."
     return None
 
 
 def pick_model(models: dict[str, Any], wanted: str | None) -> str | None:
-    """The run's model: the one asked for; else the deployment's default when
-    it can call tools; else the first included model that can; else the
-    default (and the unavailable notice says why)."""
+    """The run's model: the one asked for; else the deployment's default
+    unless it cannot call tools; else the first included model that is not
+    known to be unable to; else the default (and the unavailable notice
+    says why)."""
     if wanted:
         return wanted
     default = models.get("default_model")
     default_id = str(default) if default else None
     rows = model_rows(models)
-    if default_id:
-        row = model_row(models, default_id)
-        if row is None or row.get("supports_tools") is not False:
-            return default_id
+    if default_id and tools_of(rows, default_id) != "no":
+        return default_id
     for row in rows:
-        if row.get("included", True) is not False and row.get("supports_tools") is not False:
-            return str(row.get("id"))
+        model_id = row.get("id")
+        if row.get("included", True) is not False and tools_of(rows, str(model_id)) != "no":
+            return str(model_id)
     return default_id
 
 

@@ -93,6 +93,9 @@ async def test_an_edit_shows_its_diff_and_rejecting_it_leaves_the_file_byte_iden
         assert "-    return 1" in shown and "+    return 2" in shown
         assert "Edit src/app.py?" in shown
         assert (root / "src" / "app.py").read_bytes() == before
+        # The chat's keys stay off behind the agent and its dialogs.
+        await pilot.press("slash", "m", "ctrl+s")
+        assert isinstance(app.screen, ApprovalScreen)
         await pilot.press("n")
         await finished(pilot, screen)
         assert (root / "src" / "app.py").read_bytes() == before
@@ -302,3 +305,19 @@ async def test_chat_goes_back_to_the_conversations(root: Path):
         await send(app, pilot, "/chat")
         await pilot.pause()
         assert not any(isinstance(s, AgentScreen) for s in app.screen_stack)
+
+
+@pytest.mark.asyncio
+async def test_model_picks_the_agents_model_and_greys_out_one_without_tools(root: Path):
+    app = app_for(FakeV1(), root)
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await ready(app, pilot)
+        await send(app, pilot, "/model")
+        await until(pilot, lambda: isinstance(app.screen, PickScreen))
+        options = app.screen.query_one(OptionList)
+        assert "cannot call tools" in str(options.get_option_at_index(1).prompt)
+        await pilot.press("down", "enter")
+        await until(pilot, lambda: screen.state == "unavailable")
+        assert "agent unavailable" in status(app) and "model grt-nano" in status(app)
+        await send(app, pilot, "/model coder")
+        assert screen.state == "idle" and screen.unavailable is None

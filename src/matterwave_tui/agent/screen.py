@@ -303,7 +303,12 @@ class AgentScreen(Screen[None]):
     @work(group="agent-open", exclusive=True)
     async def start(self) -> None:
         root = self.options.root
-        self.add_line(f"Workspace {root}", "notice")
+        self.add_line(
+            f"Workspace {root}. What the agent reads, and every command's output, is sent to "
+            "MatterWave and the model; the deny list (.env, keys, .git, .matterwaveignore) is a "
+            "floor, not a guarantee.",
+            "notice",
+        )
         if self.options.trust is None and folder_trust(root) is None:
             from .context import project_context_present
 

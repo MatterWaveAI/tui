@@ -613,9 +613,14 @@ class MatterWaveApp(App[None]):
         return not (self.temporary_chat and action in ("share", "fork"))
 
     def _agent_screen(self) -> Any:
+        """The agent screen when it is open, under a modal of its own or
+        not: the chat is behind it either way."""
         from .agent.screen import AgentScreen
 
-        return self.screen if isinstance(self.screen, AgentScreen) else None
+        for screen in reversed(self.screen_stack):
+            if isinstance(screen, AgentScreen):
+                return screen
+        return None
 
     def go_offline(self) -> None:
         if self.connection != "offline":
@@ -1046,8 +1051,9 @@ class MatterWaveApp(App[None]):
         agent = self._agent_screen()
         if agent is not None:
             # Ctrl+Enter is the app's priority key; in code mode it sends
-            # to the agent.
-            agent.action_send()
+            # to the agent, and not while one of its dialogs is open.
+            if self.screen is agent:
+                agent.action_send()
             return
         composer = self.query_one("#composer", TextArea)
         text = composer.text.strip()

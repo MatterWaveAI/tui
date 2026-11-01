@@ -1,0 +1,58 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "T-061 shared policy. Pip/uv ecosystem (pyproject.toml; no lockfile is committed yet, so lockFileMaintenance is a no-op until one exists). rangeStrategy is 'auto' (not 'pin') because these repos commit lockfiles while manifests keep version ranges: Renovate updates the range in the manifest and the resolved version in the lockfile together.",
+  "extends": [
+    "config:recommended",
+    ":pinDigests",
+    "replacements:all",
+    ":semanticCommitsDisabled"
+  ],
+  "timezone": "UTC",
+  "schedule": [
+    "after 3am and before 6am on saturday"
+  ],
+  "vulnerabilityAlerts": {
+    "enabled": true
+  },
+  "osvVulnerabilityAlerts": true,
+  "separateMajorMinor": true,
+  "major": {
+    "prConcurrentLimit": 1
+  },
+  "rangeStrategy": "auto",
+  "labels": [
+    "dependencies"
+  ],
+  "commitMessagePrefix": "deps:",
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": [
+      "after 3am and before 6am on saturday"
+    ]
+  },
+  "packageRules": [
+    {
+      "description": "All minor+patch updates grouped into a single PR per ecosystem.",
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "all minor+patch"
+    },
+    {
+      "description": "Security updates need no extra rule: with vulnerabilityAlerts enabled, Renovate natively raises dedicated immediate PRs for vulnerable dependencies, bypassing the weekend schedule and the minor+patch group, labelled security.",
+      "matchUpdateTypes": [
+        "major",
+        "minor",
+        "patch"
+      ]
+    },
+    {
+      "description": "nexusql is pinned exactly on purpose — the platform's locked dependency. Renovate must not touch it.",
+      "matchPackageNames": [
+        "nexusql"
+      ],
+      "enabled": false
+    }
+  ]
+}

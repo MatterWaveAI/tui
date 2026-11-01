@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The command line's basics: `--version`; `--list-models`; one-shot
+  `--continue`, `--conversation ID` and `--temporary`; a piped stdin
+  after `-p` is the context the prompt is about; `export ID` prints a
+  conversation as Markdown, JSON or HTML (or writes a new file with
+  `-o`); `completion` prints a bash, zsh, fish or PowerShell completion
+  script; `--debug` logs each request's method, path, status and request
+  id, never what was said; and the app looks at PyPI once a day for a
+  newer release (`--no-update-check` or `MATTERWAVE_NO_UPDATE_CHECK=1`
+  turns that off).
 - Composing and getting about: `Ctrl+E` writes the message in
   `$VISUAL` / `$EDITOR`; `?` or `F1` lists every key, generated from the
   bindings; the config file's `[keys]` table moves a key (`new = "ctrl+n"`);

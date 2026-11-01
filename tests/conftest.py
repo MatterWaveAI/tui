@@ -58,6 +58,8 @@ def no_config_file(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest
     monkeypatch.setenv("MATTERWAVE_CONFIG", str(tmp_path_factory.mktemp("config") / "none.toml"))
     monkeypatch.delenv("MATTERWAVE_PROFILE", raising=False)
     monkeypatch.delenv("MATTERWAVE_MODEL", raising=False)
+    # Nor asks PyPI for a newer release.
+    monkeypatch.setenv("MATTERWAVE_NO_UPDATE_CHECK", "1")
 
 
 @pytest.fixture

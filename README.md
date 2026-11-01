@@ -54,7 +54,25 @@ piped-in stdin is the prompt, so scripts work the usual way:
 ```sh
 cat notes.md | matterwave-tui -m grt-nano
 echo "explain this trace" | matterwave-tui > answer.txt
+git diff | matterwave-tui -p "review this"        # the piped text follows the prompt
+matterwave-tui --continue -p "and in Rust?"       # the most recent conversation
+matterwave-tui --conversation c_123 -p "go on"     # that one
+matterwave-tui --temporary -p "a quick one"        # out of the history, deleted after 24 h
 ```
+
+Each one-shot otherwise makes a new saved conversation, as the web app does.
+
+The rest of the command line:
+
+| Command | Does |
+|---|---|
+| `matterwave-tui --version` | the version, and the SDK's |
+| `matterwave-tui --list-models` | the models this account can use, the default marked |
+| `matterwave-tui export ID [-f md\|json\|html] [-o FILE]` | one conversation's active path to stdout, or to a file that is not there yet |
+| `matterwave-tui completion bash\|zsh\|fish\|powershell` | the completion script, to source from the shell's profile |
+| `matterwave-tui config` | the config file, and where each setting comes from |
+| `matterwave-tui --debug [FILE]` | log each request's method, path, status and request id (never what was said) to FILE, or `debug.log` in the state directory |
+| `matterwave-tui --no-update-check` | skip the once-a-day look at PyPI for a newer release (or `MATTERWAVE_NO_UPDATE_CHECK=1`) |
 
 stdout carries the answer and nothing else: a device sign-in's URL and code, and every note, go to
 stderr. A flag the command does not use (`-m` with `logout`, say) is named there rather than
@@ -223,6 +241,7 @@ palette is remembered for the next start, unless the file names one.
 | `MATTERWAVE_MODEL` | the model, when `-m` is not given |
 | `MATTERWAVE_CONFIG` | another config file than the platform's own (see [Configuration](#configuration)) |
 | `MATTERWAVE_PROFILE` | the profile, when `--profile` is not given |
+| `MATTERWAVE_NO_UPDATE_CHECK` | `1` skips the once-a-day look for a newer release |
 | `MATTERWAVE_STATE_DIR` | where the dismissed announcements and the prompt roles are kept, as `<dir>/matterwave-tui`; else the platform's state directory: `$XDG_STATE_HOME` or `~/.local/state` on Linux, `%LOCALAPPDATA%` on Windows, `~/Library/Application Support` on macOS |
 
 ## Development

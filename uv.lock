@@ -553,6 +553,7 @@ source = { editable = "." }
 dependencies = [
     { name = "httpx" },
     { name = "keyring" },
+    { name = "markdown-it-py" },
     { name = "matterwave-sdk" },
     { name = "platformdirs" },
     { name = "textual" },
@@ -577,6 +578,7 @@ images = [
 requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "keyring", specifier = ">=25" },
+    { name = "markdown-it-py", specifier = ">=3" },
     { name = "matterwave-sdk", git = "https://github.com/MatterWaveAI/python-sdk?rev=4168d4aa1274b2199f4980eeb980c8894ec27f49" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13" },
     { name = "pillow", marker = "extra == 'images'", specifier = ">=10" },

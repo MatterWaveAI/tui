@@ -7,6 +7,9 @@
     matterwave-tui login [--key [K]]   store a key, or sign in by device code
     matterwave-tui logout [--local]    revoke the stored device key, then forget it
     matterwave-tui config              the config file, and where each setting comes from
+    matterwave-tui export ID [-f FMT]  one conversation as md, json or html, to stdout or -o
+    matterwave-tui completion SHELL    the completion script for bash, zsh, fish or powershell
+    matterwave-tui --list-models       the models this account can use
     matterwave-tui --profile work      the settings and the sign-in of one profile
 
 stdout carries the answer and nothing else; sign-in prompts and every
@@ -22,10 +25,13 @@ import getpass
 import os
 import sys
 from collections.abc import Callable, Mapping
+from pathlib import Path
 
+from matterwave_sdk import __version__ as SDK_VERSION
 from matterwave_sdk import frames as fr
 from matterwave_sdk.errors import APIConnectionError, APIError, AuthenticationError
 
+from . import __version__
 from .api import DEFAULT_BASE_URL, Cut, HttpChatAPI, key_prefix
 from .auth import (
     Credential,
@@ -38,9 +44,14 @@ from .auth import (
     resolve_credential,
     save_token,
 )
+from .completion import SHELLS, script
 from .config import Settings, config_path, keyring_entry, load_config, resolve
+from .export import EXPORTERS
 from .failures import Kind, classify
+from .paths import state_dir
 from .shell import Shell, detect_shell, run_shell_command, shell_command, shell_request
+from .thread import Thread
+from .update import DISABLE_ENV
 
 # Asked for interactively when `--key` is given with no value, so the key is
 # not left in the shell history or the process list.
@@ -173,7 +184,49 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="shell assistant: an answer is a proposed command, run only after you confirm",
     )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__} (matterwave-sdk {SDK_VERSION})",
+    )
+    parser.add_argument(
+        "--list-models", action="store_true", help="list the models this account can use, and exit"
+    )
+    where = parser.add_mutually_exclusive_group()
+    where.add_argument(
+        "--continue",
+        dest="continue_last",
+        action="store_true",
+        help="one-shot: send to the most recent conversation instead of a new one",
+    )
+    where.add_argument("--conversation", metavar="ID", help="one-shot: send to this conversation")
+    where.add_argument(
+        "--temporary",
+        action="store_true",
+        help="one-shot: a temporary conversation, out of the history and deleted after 24 h",
+    )
+    parser.add_argument(
+        "--debug",
+        nargs="?",
+        const="",
+        metavar="FILE",
+        help="log each request's method, path, status and request id (never content) to FILE "
+        "(default: debug.log in the state directory)",
+    )
+    parser.add_argument(
+        "--no-update-check",
+        action="store_true",
+        help=f"skip the once-a-day look for a newer release (or {DISABLE_ENV}=1)",
+    )
     sub = parser.add_subparsers(dest="command")
+    export = sub.add_parser("export", help="one conversation as Markdown, JSON or HTML")
+    export.add_argument("conversation_id", metavar="ID")
+    export.add_argument("-f", "--format", choices=sorted(EXPORTERS), default="md")
+    export.add_argument(
+        "-o", "--output", metavar="FILE", help="write it here (never over a file) instead of stdout"
+    )
+    completion = sub.add_parser("completion", help="print the shell completion script")
+    completion.add_argument("shell_name", metavar="SHELL", choices=SHELLS)
     sub.add_parser("config", help="show the config file and where each setting comes from")
     login = sub.add_parser("login", help="store a key, or sign in by device code")
     login.add_argument("--key", nargs="?", const=_PROMPT, dest="login_key")
@@ -208,6 +261,66 @@ def _logout(base_url: str, *, local: bool, entry: str | None = None) -> int:
     return EXIT_OK
 
 
+async def list_models(base_url: str, credential: Credential) -> int:
+    """`--list-models`: id, label and context window, the default marked,
+    a model the plan lacks named with the plan that has it."""
+    api = HttpChatAPI(base_url=base_url, token=credential.token)
+    try:
+        listed = await api.models()
+    except (APIConnectionError, APIError) as exc:
+        _note(f"The models could not be read: {exc}")
+        return EXIT_ERROR
+    finally:
+        await api.aclose()
+    default = listed.get("default_model")
+    for model in listed.get("data") or []:
+        line = f"{model.get('id')}\t{model.get('label') or ''}"
+        if model.get("context_window"):
+            line += f"\t{model['context_window']:,} tokens"
+        if model.get("included") is False:
+            line += f"\t(on {model.get('upgrade_to') or 'another plan'})"
+        if model.get("id") == default:
+            line += "\t(default)"
+        print(line)
+    return EXIT_OK
+
+
+async def export_conversation(
+    base_url: str, credential: Credential, conversation_id: str, fmt: str, output: str | None
+) -> int:
+    """`export ID`: the conversation's active path in one format, to
+    stdout or to a file that does not exist yet."""
+    api = HttpChatAPI(base_url=base_url, token=credential.token)
+    try:
+        tree = await api.tree(conversation_id)
+    except (APIConnectionError, APIError) as exc:
+        _note(f"The conversation could not be read: {exc}")
+        return EXIT_ERROR
+    finally:
+        await api.aclose()
+    thread = Thread.from_tree(tree.messages, tree.current_leaf_message_id)
+    document = EXPORTERS[fmt](tree, thread)
+    if output is None:
+        sys.stdout.buffer.write(document.encode("utf-8"))
+        return EXIT_OK
+    try:
+        await asyncio.to_thread(_write_new, Path(output), document)
+    except FileExistsError:
+        _note(f"{output} is already there; nothing was written over it.")
+        return EXIT_ERROR
+    except OSError as exc:
+        _note(f"{output} could not be written: {exc}")
+        return EXIT_ERROR
+    _note(f"Exported to {output}.")
+    return EXIT_OK
+
+
+def _write_new(path: Path, text: str) -> None:
+    """Write a file that is not there yet; one that is stays as it was."""
+    with path.open("x", encoding="utf-8") as out:
+        out.write(text)
+
+
 def _show_config(settings: Settings, base_url: str, entry: str) -> int:
     """`config`: the file, the profile, and each setting with its source,
     to stdout -- this command's output is the answer."""
@@ -234,33 +347,46 @@ def load_settings(args: argparse.Namespace) -> Settings:
     )
 
 
-def _ignored_flags(args: argparse.Namespace) -> list[str]:
+def _ignored_flags(args: argparse.Namespace, *, oneshot: bool) -> list[str]:
     """The flags this command line gives that its command does not use."""
-    if args.command not in ("login", "logout", "config"):
-        return []
+    where = [
+        ("--continue", args.continue_last),
+        ("--conversation", args.conversation is not None),
+        ("--temporary", args.temporary),
+    ]
+    if args.command is None and not args.list_models:
+        # The app: the one-shot's conversation choice means nothing there.
+        return [] if oneshot else [flag for flag, given in where if given]
     ignored = [
         flag
         for flag, given in (
             ("-p", args.prompt is not None),
-            ("-m", args.model is not None),
+            ("-m", args.model is not None and args.command != "export"),
             ("--shell", args.shell),
+            *where,
         )
         if given
     ]
-    if args.command in ("logout", "config") and args.key is not None:
+    if args.command in ("logout", "config", "completion") and args.key is not None:
         ignored.append("--key")
     return ignored
 
 
 def _oneshot_prompt(args: argparse.Namespace) -> str | None:
-    """The one-shot prompt: `-p`, else stdin when it is a pipe rather than
-    a terminal. None means interactive mode."""
+    """The one-shot prompt: `-p`, with a piped-in stdin after it as the
+    context it is about (`git diff | matterwave-tui -p "review"`), or the
+    stdin alone. None means interactive mode."""
+    piped = ""
+    if sys.stdin is not None and not sys.stdin.isatty():
+        try:
+            piped = sys.stdin.read().strip()
+        except OSError:
+            piped = ""
     flag = args.prompt
     if flag is not None:
-        return str(flag).strip()
-    if sys.stdin is not None and not sys.stdin.isatty():
-        return sys.stdin.read().strip()
-    return None
+        prompt = str(flag).strip()
+        return f"{prompt}\n\n{piped}" if prompt and piped else prompt
+    return piped if piped or (sys.stdin is not None and not sys.stdin.isatty()) else None
 
 
 async def run_oneshot(
@@ -270,6 +396,10 @@ async def run_oneshot(
     model: str | None = None,
     *,
     shell: Shell | None = None,
+    conversation_id: str | None = None,
+    continue_last: bool = False,
+    temporary: bool = False,
+    debug_log: Path | None = None,
 ) -> int:
     """One answer, no interface: a conversation is made, the prompt sent
     through the SDK's stream, and the text deltas printed as they arrive.
@@ -277,14 +407,19 @@ async def run_oneshot(
     a failure is already on stdout. With `shell`, the model is told the OS
     and shell, and the command it answers is run after a yes on the
     terminal."""
-    api = HttpChatAPI(base_url=base_url, token=credential.token)
+    api = HttpChatAPI(base_url=base_url, token=credential.token, debug_log=debug_log)
     wrote = False
     answer: list[str] = []
     if shell is not None:
         prompt = shell_request(prompt, shell)
     try:
-        conversation = await api.create_conversation(model=model)
-        async for item in api.send(conversation.id, prompt, model):
+        target = conversation_id
+        if continue_last:
+            recent = await api.list_conversations()
+            target = recent[0].id if recent else None
+        if target is None:
+            target = (await api.create_conversation(model=model, temporary=temporary)).id
+        async for item in api.send(target, prompt, model):
             if isinstance(item, fr.DeltaFrame) and not item.reasoning:
                 sys.stdout.write(item.content or "")
                 sys.stdout.flush()
@@ -339,9 +474,16 @@ async def _confirm_and_run(command: str, shell: Shell) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    for flag in _ignored_flags(args):
-        _note(f"{flag} does nothing with {args.command}; it was ignored.")
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command == "completion":
+        sys.stdout.write(script(args.shell_name, parser))
+        return EXIT_OK
+    prompt = None if args.command or args.list_models else _oneshot_prompt(args)
+    for flag in _ignored_flags(args, oneshot=prompt is not None):
+        what = args.command or ("--list-models" if args.list_models else "the app")
+        _note(f"{flag} does nothing with {what}; it was ignored.")
+    debug_log = _debug_path(args.debug)
     try:
         settings = load_settings(args)
         base_url = resolve_base_url(settings.get("base_url"), DEFAULT_BASE_URL)
@@ -376,13 +518,32 @@ def main(argv: list[str] | None = None) -> int:
     except LoginError as exc:
         _note(str(exc))
         return EXIT_ERROR
-    prompt = _oneshot_prompt(args)
+    if args.list_models:
+        return asyncio.run(list_models(base_url, credential))
+    if args.command == "export":
+        return asyncio.run(
+            export_conversation(
+                base_url, credential, args.conversation_id, args.format, args.output
+            )
+        )
     if prompt is not None:
         if not prompt:
             _note("Nothing to send: give -p a prompt or pipe one in.")
             return EXIT_USAGE
         shell = detect_shell(environ) if args.shell else None
-        return asyncio.run(run_oneshot(base_url, credential, prompt, model, shell=shell))
+        return asyncio.run(
+            run_oneshot(
+                base_url,
+                credential,
+                prompt,
+                model,
+                shell=shell,
+                conversation_id=args.conversation,
+                continue_last=args.continue_last,
+                temporary=args.temporary,
+                debug_log=debug_log,
+            )
+        )
     run_app(
         base_url,
         credential,
@@ -392,8 +553,22 @@ def main(argv: list[str] | None = None) -> int:
         theme=settings.get("theme"),
         environ=environ,
         keymap=settings.keys,
+        debug_log=debug_log,
+        update_check=not args.no_update_check and not environ.get(DISABLE_ENV),
     )
     return EXIT_OK
+
+
+def _debug_path(given: str | None) -> Path | None:
+    """`--debug`'s file: the one named, else debug.log in the state
+    directory."""
+    if given is None:
+        return None
+    if given:
+        return Path(given).expanduser()
+    path = state_dir() / "debug.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def run_app(
@@ -406,6 +581,8 @@ def run_app(
     theme: str | None = None,
     environ: Mapping[str, str] | None = None,
     keymap: Mapping[str, str] | None = None,
+    debug_log: Path | None = None,
+    update_check: bool = False,
 ) -> None:
     from .app import MatterWaveApp
 
@@ -434,7 +611,9 @@ def run_app(
     async def device(on_code: Callable[[DeviceCode], None]) -> str:
         return (await device_login(base_url, on_code)).access_token
 
-    api = HttpChatAPI(base_url=base_url, token=credential.token, refresh=refresh)
+    api = HttpChatAPI(
+        base_url=base_url, token=credential.token, refresh=refresh, debug_log=debug_log
+    )
     app = MatterWaveApp(
         api,
         relogin=device,
@@ -443,6 +622,7 @@ def run_app(
         theme=theme,
         environ=environ,
         keymap=keymap,
+        update_check=update_check,
     )
     holder["app"] = app
     app.run()

@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 from matterwave_sdk import frames as fr
 from matterwave_sdk.errors import APIConnectionError, APIError, ConflictError
 from matterwave_sdk.models import Attachment, Conversation, ConversationMessage, UsageBalance
@@ -28,7 +29,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widget import Widget
 from textual.widgets import Footer, Input, Label, ListItem, ListView, Static, TextArea
 
-from . import images
+from . import __version__, images
 from .api import NOTIFICATIONS_PAGE, ChatAPI, Cut, Opened, StreamItem
 from .dictation import MEDIA_TYPES, MicRecorder, media_type_for, mic_available
 from .export import conversation_markdown, export_filename, free_path
@@ -63,6 +64,8 @@ from .screens import (
 )
 from .shell import detect_shell, run_shell_command, shell_command, shell_request
 from .thread import Divider, Message, Thread
+from .update import STATE_FILE as UPDATE_STATE_FILE
+from .update import check_for_update
 from .widgets import DividerView, ImageView, MessageView, ThumbClicked, code_blocks
 
 # How often a stream redraws the answer in progress. A redraw per delta is
@@ -419,9 +422,12 @@ class MatterWaveApp(App[None]):
         theme: str | None = None,
         environ: Mapping[str, str] | None = None,
         keymap: Mapping[str, str] | None = None,
+        update_check: bool = False,
     ) -> None:
         super().__init__()
         self.api = api
+        # The once-a-day look for a newer release; the CLI turns it on.
+        self.update_check = update_check
         # The config file's [keys]: binding id -> key, over the defaults.
         self.keymap_overrides = dict(keymap or {})
         # Hands the composer's file to the editor; a test stands in.
@@ -566,6 +572,16 @@ class MatterWaveApp(App[None]):
             )
         self.set_keymap({k: v for k, v in self.keymap_overrides.items() if k in known})
 
+    @work(group="update", exclusive=True)
+    async def look_for_update(self) -> None:
+        async with httpx.AsyncClient() as http:
+            latest = await check_for_update(__version__, state_dir() / UPDATE_STATE_FILE, http=http)
+        if latest:
+            self.notify(
+                f"matterwave-tui {latest} is out (this is {__version__}): "
+                "uv tool upgrade matterwave-tui."
+            )
+
     def _remember_theme(self, theme: Any) -> None:
         save_theme(str(getattr(theme, "name", theme)))
 
@@ -646,6 +662,8 @@ class MatterWaveApp(App[None]):
                 )
         self.theme_changed_signal.subscribe(self, self._remember_theme)
         self._apply_keymap()
+        if self.update_check:
+            self.look_for_update()
         self.set_interval(LIVE_REDRAW_S, self._flush_live)
         self.set_interval(1.0, self._tick_rate_limit)
         if self.image_backend is not None:

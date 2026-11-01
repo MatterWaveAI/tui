@@ -17,8 +17,10 @@ budget, keys, feedback) are flattened here, at the edge.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import parse_qsl, quote, urlsplit
 
@@ -346,6 +348,30 @@ def key_prefix(token: str) -> str | None:
     return None
 
 
+def _debug_hook(path: Path) -> Callable[[httpx.Response], Awaitable[None]]:
+    """`--debug`: a line per response in `path` -- the time, the method,
+    the path without its query, the status, the request id. Never a body,
+    a header or a query string: those carry what people wrote."""
+    log = logging.getLogger("matterwave_tui.http")
+    log.setLevel(logging.INFO)
+    log.propagate = False
+    handler = logging.FileHandler(path, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    log.addHandler(handler)
+
+    async def on_response(response: httpx.Response) -> None:
+        request = response.request
+        log.info(
+            "%s %s %s %s",
+            request.method,
+            request.url.path,
+            response.status_code,
+            response.headers.get("x-request-id", "-"),
+        )
+
+    return on_response
+
+
 def _path(*segments: str) -> str:
     return "/api/" + "/".join(quote(s, safe="") for s in segments)
 
@@ -371,9 +397,15 @@ class HttpChatAPI:
         token: str,
         refresh: TokenRefresher | None = None,
         http_client: httpx.AsyncClient | None = None,
+        debug_log: Path | None = None,
     ) -> None:
         self._owns_http = http_client is None
-        self._http = http_client or httpx.AsyncClient()
+        if http_client is not None:
+            self._http = http_client
+        elif debug_log is not None:
+            self._http = httpx.AsyncClient(event_hooks={"response": [_debug_hook(debug_log)]})
+        else:
+            self._http = httpx.AsyncClient()
         credential = _Credential(token, refresh)
         self._credential = credential
         common: dict[str, Any] = {

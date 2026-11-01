@@ -192,11 +192,12 @@ def test_completion_scripts_carry_every_flag_and_command(capsys):
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="no bash here")
-def test_the_bash_script_parses(tmp_path, capsys):
+def test_the_bash_script_parses(capsys):
     cli.main(["completion", "bash"])
-    script = tmp_path / "completion.bash"
-    script.write_text(capsys.readouterr().out, encoding="utf-8", newline="\n")
-    checked = subprocess.run(["bash", "-n", str(script)], capture_output=True)  # noqa: S603, S607
+    # On stdin rather than by path: on Windows the bash found first may be
+    # WSL's, which cannot open a Windows temp path.
+    script = capsys.readouterr().out.encode("utf-8")
+    checked = subprocess.run(["bash", "-n"], input=script, capture_output=True)  # noqa: S603, S607
     assert checked.returncode == 0, checked.stderr
 
 

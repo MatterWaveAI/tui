@@ -47,9 +47,11 @@ def test_ci_scans_the_whole_history_for_secrets():
     assert "./gitleaks git --redact" in ci
 
 
-def test_ci_runs_on_every_branch_and_pull_request():
+def test_ci_runs_on_develop_and_main_and_on_pull_requests_into_them():
     ci = read("ci.yml")
-    assert 'push:\n    branches: ["**"]\n  pull_request:' in ci
+    assert (
+        "push:\n    branches: [develop, main]\n  pull_request:\n    branches: [develop, main]" in ci
+    )
 
 
 def test_a_tag_publishes_only_its_own_version_with_notes_and_an_sbom():

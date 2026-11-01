@@ -64,3 +64,10 @@ def test_ci_refuses_private_ticket_ids_in_tracked_files():
     assert "run: sh scripts/check-ticket-ids.sh" in read("ci.yml")
     script = (WORKFLOWS.parents[1] / "scripts" / "check-ticket-ids.sh").read_text(encoding="utf-8")
     assert "git grep -nIE" in script and "[TB]-[0-9]{3,4}" in script
+
+
+def test_every_path_has_a_code_owner():
+    owners = (WORKFLOWS.parent / "CODEOWNERS").read_text(encoding="utf-8").splitlines()
+    rules = [line.split() for line in owners if line.strip() and not line.startswith("#")]
+    assert ["*", "@MatterWaveAI/maintainers"] in rules
+    assert ["/.github/", "@MatterWaveAI/maintainers"] in rules

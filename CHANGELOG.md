@@ -49,6 +49,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The test suite signs in against an in-memory keyring, so a run no longer
   writes to the developer's OS keyring and passes on a runner without one.
 
+### Changed
+
+- The model list, conversation create (temporary included), delete, pin,
+  unpin, archive, unarchive and a conversation's ratings go through the
+  SDK's typed methods instead of hand-built requests; only the routes the
+  SDK has no method for (an upload's scan status, accounts, imports,
+  speech, the account export) are still built here.
+
 ## [0.4.0] - 2026-10-31
 
 ### Added

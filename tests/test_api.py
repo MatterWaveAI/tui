@@ -203,7 +203,9 @@ async def test_the_picker_routes_go_through_the_same_client_as_the_tui():
         return httpx.Response(200, json={**CONV, "default_model": "grt-max"})
 
     api = make(handler)
-    assert (await api.models())["default_model"] == "m"
+    models = await api.models()
+    assert models["default_model"] == "m"
+    assert models["data"][0]["id"] == "m"
     updated = await api.set_default_model("c1", "grt-max")
     assert updated.default_model == "grt-max"
     patch = seen[-1]
@@ -277,7 +279,8 @@ async def test_a_delete_is_a_bare_write_that_is_never_retried():
     assert calls == 1
 
     def gone(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(204)
+        # The platform's own answer.
+        return httpx.Response(200, json={"status": "deleted"})
 
     await make(gone).delete_conversation("c1")
 
@@ -450,6 +453,54 @@ async def test_an_attachment_is_uploaded_as_multipart():
     attachment = await make(handler).upload_attachment(b"PNGDATA", "picture.png", "c1")
     assert attachment.id == "att1"
     assert attachment.content_type == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_create_sends_temporary_only_when_it_is_on_and_is_never_retried():
+    seen: list[tuple[str, str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, json.loads(request.content)))
+        if len(seen) == 3:
+            return httpx.Response(503, json={"detail": "busy"})
+        return httpx.Response(201, json=CONV)
+
+    api = make(handler)
+    await api.create_conversation(model="grt-nano")
+    await api.create_conversation(temporary=True)
+    with pytest.raises(ServerError):
+        await api.create_conversation(title="once")
+    assert seen == [
+        ("POST", "/api/conversations", {"model": "grt-nano"}),
+        ("POST", "/api/conversations", {"temporary": True}),
+        ("POST", "/api/conversations", {"title": "once"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_conversations_ratings_are_read_from_its_route():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert (request.method, request.url.path) == ("GET", "/api/conversations/c1/feedback")
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "message_id": "a1",
+                        "rating": -1,
+                        "reasons": ["wrong"],
+                        "comment": "no",
+                        "created_at": "1",
+                        "updated_at": "1",
+                    }
+                ]
+            },
+        )
+
+    rows = await make(handler).conversation_feedback("c1")
+    assert [(r["message_id"], r["rating"], r["reasons"], r["comment"]) for r in rows] == [
+        ("a1", -1, ["wrong"], "no")
+    ]
 
 
 @pytest.mark.asyncio

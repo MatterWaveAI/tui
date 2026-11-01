@@ -1,17 +1,17 @@
 """The `/api` routes the TUI uses, behind a Protocol the app is written against.
 
-The wire is the SDK's: `AsyncMatterWave.conversations` for the routes, its
-`AsyncConversationStream` for a turn (named events, typed frames, one resume
-by `Last-Event-ID`), its errors with the request id on them, and the typed
-`notifications`, `announcements`, `shares`, `library`, `budget`,
-`attachments.download` and `messages` resources.
+The wire is the SDK's: `AsyncMatterWave.conversations` for the routes
+(create, temporary or not, delete, pin and archive included), `app_models`
+for the picker, its `AsyncConversationStream` for a turn (named events, typed
+frames, one resume by `Last-Event-ID`), its errors with the request id on
+them, and the typed `notifications`, `announcements`, `shares`, `library`,
+`budget`, `keys`, `attachments` and `messages` resources.
 What stays here is the TUI's own policy: a 401 is answered once with a fresh
 credential before it stands, a write is never retried, and the routes the SDK
-has no usable method for yet (`/api/models`, the conversation delete, pin and
-archive routes, the per-conversation feedback list, an upload's scan status,
-and the account, import, speech and export routes) go through the same client. The typed rows the app
-reads as plain dicts (notifications, announcements, shares, library, budget)
-are flattened here, at the edge.
+has no method for (an upload's scan status, and the account, import, speech
+and export routes) go through the same client. The typed rows the app reads
+as plain dicts (models, notifications, announcements, shares, library,
+budget, keys, feedback) are flattened here, at the edge.
 """
 
 from __future__ import annotations
@@ -337,7 +337,7 @@ class HttpChatAPI:
         body: dict[str, Any] | None = None,
         files: dict[str, tuple[str, bytes, str]] | None = None,
     ) -> dict[str, Any]:
-        """A route the SDK has no method for yet, sent the way its own are.
+        """A route the SDK has no method for, sent the way its own are.
         `files` turns it multipart; the extra fields a route wants beside
         the file ride as empty-named file parts (the way the SPA's FormData
         would send them), since httpx drops a json body when files are set."""
@@ -346,23 +346,21 @@ class HttpChatAPI:
         )
         return sdk_base.parse_json_object(response)
 
-    async def _app_none(
-        self, client: _Client, method: str, path: str, body: dict[str, Any] | None = None
-    ) -> None:
-        """As `_app_json`, for a route that answers no body."""
-        response = await client._send(sdk_base.Request(method, path, body, True, False))
-        await response.aclose()
-
     # --- routes --------------------------------------------------------------
 
     async def me(self) -> Me:
         return await self._reads.me()
 
     async def models(self) -> dict[str, Any]:
-        """`GET /api/models`: the picker's rows, with each model's plan
-        gating; the SDK's `models.list()` is `/v1/models`, which has none
-        of that."""
-        return await self._app_json(self._reads, "GET", _path("models"))
+        """`GET /api/models` by way of the SDK's `app_models`: the picker's
+        rows, with each model's plan gating and price (the SDK's
+        `models.list()` is `/v1/models`, which has neither), flattened to
+        the dicts the app reads."""
+        listed = await self._reads.app_models()
+        return {
+            "data": [_row_dict(model) for model in listed.data],
+            "default_model": listed.default_model,
+        }
 
     async def list_conversations(self, filter: str = "default") -> list[Conversation]:
         return (await self._reads.conversations.list(filter=filter)).data
@@ -374,19 +372,11 @@ class HttpChatAPI:
     async def create_conversation(
         self, title: str | None = None, model: str | None = None, temporary: bool = False
     ) -> Conversation:
-        """`POST /api/conversations`. `temporary` is fixed at creation and
-        the key is sent only when it is on; the SDK's `create` has no
-        `temporary` yet, so that one goes through the raw client."""
-        if not temporary:
-            return await self._writes.conversations.create(title=title, model=model)
-        body: dict[str, Any] = {}
-        if title is not None:
-            body["title"] = title
-        if model is not None:
-            body["model"] = model
-        body["temporary"] = True
-        return Conversation.from_dict(
-            await self._app_json(self._writes, "POST", _path("conversations"), body)
+        """`POST /api/conversations` by way of the SDK. `temporary` is fixed
+        at creation, and the key is sent only when it is on. A write: no
+        retries."""
+        return await self._writes.conversations.create(
+            title=title, model=model, temporary=True if temporary else None
         )
 
     async def tree(self, conversation_id: str) -> Conversation:
@@ -407,28 +397,31 @@ class HttpChatAPI:
         return await self._reads.conversations.update(conversation_id, title=title)
 
     async def delete_conversation(self, conversation_id: str) -> None:
-        """`DELETE /api/conversations/{id}`: gone for good, answered with no
-        body. A delete that lands twice deletes the same nothing, but a
-        delete is still a write: no retries."""
-        await self._app_none(self._writes, "DELETE", _path("conversations", conversation_id))
+        """`DELETE /api/conversations/{id}` by way of the SDK: gone from
+        every list at once, the row itself after the server's grace period.
+        The answer (`{"status": "deleted"}`) carries nothing the app shows.
+        A delete that lands twice deletes the same nothing, but a delete is
+        still a write: no retries."""
+        await self._writes.conversations.delete(conversation_id)
 
     async def set_pinned(self, conversation_id: str, pinned: bool) -> Conversation:
-        """`PUT` / `DELETE /api/conversations/{id}/pin`, answered with the
-        updated conversation."""
-        method = "PUT" if pinned else "DELETE"
-        return Conversation.from_dict(
-            await self._app_json(self._reads, method, _path("conversations", conversation_id, "pin"))
-        )
+        """`PUT` / `DELETE /api/conversations/{id}/pin` by way of the SDK,
+        answered with the updated conversation. Set and clear are separate
+        methods, so a retried request cannot land in the opposite state:
+        the reads' retries do no harm."""
+        conversations = self._reads.conversations
+        if pinned:
+            return await conversations.pin(conversation_id)
+        return await conversations.unpin(conversation_id)
 
     async def set_archived(self, conversation_id: str, archived: bool) -> Conversation:
-        """`PUT` / `DELETE /api/conversations/{id}/archive`, answered with
-        the updated conversation."""
-        method = "PUT" if archived else "DELETE"
-        return Conversation.from_dict(
-            await self._app_json(
-                self._reads, method, _path("conversations", conversation_id, "archive")
-            )
-        )
+        """`PUT` / `DELETE /api/conversations/{id}/archive` by way of the
+        SDK, answered with the updated conversation; idempotent by method,
+        as pinning is."""
+        conversations = self._reads.conversations
+        if archived:
+            return await conversations.archive(conversation_id)
+        return await conversations.unarchive(conversation_id)
 
     async def fork_conversation(
         self, conversation_id: str, message_id: str, title: str | None = None
@@ -478,14 +471,11 @@ class HttpChatAPI:
         return await self._writes.messages.delete_feedback(message_id)
 
     async def conversation_feedback(self, conversation_id: str) -> list[dict[str, Any]]:
-        """`GET /api/conversations/{id}/feedback`: the caller's own ratings
-        in the thread, to mark the transcript with when it opens. The SDK
-        has no method for the route yet."""
-        body = await self._app_json(
-            self._reads, "GET", _path("conversations", conversation_id, "feedback")
-        )
-        rows = body.get("data")
-        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+        """`GET /api/conversations/{id}/feedback` by way of the SDK: the
+        caller's own ratings in the thread, to mark the transcript with when
+        it opens, flattened to the dicts the app reads."""
+        page = await self._reads.messages.list_feedback(conversation_id)
+        return [_row_dict(row) for row in page.data]
 
     async def notifications(
         self, *, unread: bool = False, limit: int = NOTIFICATIONS_PAGE

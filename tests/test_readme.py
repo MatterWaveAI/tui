@@ -92,6 +92,7 @@ def test_every_key_in_the_table_is_bound():
         ("Shares (`S`)", screens.Shares),
         ("Prompt roles (`L`)", screens.Roles),
         ("Pending files (`I`)", screens.PendingAttachments),
+        ("Account (`U`)", screens.Account),
     ],
 )
 def test_every_dialog_key_is_in_its_row(dialog, screen):

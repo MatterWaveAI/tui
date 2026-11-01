@@ -177,9 +177,33 @@ class ChatAPI(Protocol):
 
     async def revoke_share(self, share_id: str) -> dict[str, Any]: ...
 
+    def own_key_prefix(self) -> str | None: ...
+
     async def api_keys(self) -> list[dict[str, Any]]: ...
 
+    async def rotate_key(self, key_id: str) -> dict[str, Any]: ...
+
     async def revoke_key(self, key_id: str) -> None: ...
+
+    async def sessions(self) -> list[dict[str, Any]]: ...
+
+    async def revoke_session(self, session_id: str) -> None: ...
+
+    async def preferences(self) -> dict[str, Any]: ...
+
+    async def set_preferences(self, preferences: dict[str, Any]) -> dict[str, Any]: ...
+
+    async def user_instructions(self) -> dict[str, str]: ...
+
+    async def set_user_instructions(self, about: str, style: str) -> dict[str, str]: ...
+
+    async def entitlements(self) -> dict[str, Any]: ...
+
+    async def billing_status(self) -> dict[str, Any]: ...
+
+    async def plans(self) -> list[dict[str, Any]]: ...
+
+    async def enforcement(self) -> dict[str, Any]: ...
 
     async def accounts(self) -> dict[str, Any]: ...
 
@@ -298,6 +322,14 @@ class _Client(AsyncMatterWave):
             return await super()._send(request, timeout=timeout, max_retries=max_retries)
 
 
+def key_prefix(token: str) -> str | None:
+    """The part of an `mw_` key the server lists it by (`mw_` and eight
+    characters, then `_`), as the platform's own `prefix_of` cuts it."""
+    if token.startswith("mw_") and len(token) > 12 and token[11] == "_":
+        return token[:11]
+    return None
+
+
 def _path(*segments: str) -> str:
     return "/api/" + "/".join(quote(s, safe="") for s in segments)
 
@@ -327,6 +359,7 @@ class HttpChatAPI:
         self._owns_http = http_client is None
         self._http = http_client or httpx.AsyncClient()
         credential = _Credential(token, refresh)
+        self._credential = credential
         common: dict[str, Any] = {
             "base_url": base_url,
             "http_client": self._http,
@@ -579,6 +612,11 @@ class HttpChatAPI:
         await self._writes.shares.revoke(share_id)
         return {}
 
+    def own_key_prefix(self) -> str | None:
+        """The listed prefix of the key this client sends, so the account
+        screen can tell it from the others."""
+        return key_prefix(self._credential.token)
+
     async def api_keys(self) -> list[dict[str, Any]]:
         """`GET /api/keys` by way of the SDK: the org's keys, never their
         secrets, revoked ones included. A key without `keys:manage` (a
@@ -590,6 +628,67 @@ class HttpChatAPI:
         """`DELETE /api/keys/{id}` by way of the SDK: the key stops working
         at once; a key may always revoke itself. A write: no retries."""
         await self._writes.keys.revoke(key_id)
+
+    async def rotate_key(self, key_id: str) -> dict[str, Any]:
+        """`POST /api/keys/{id}/rotate` by way of the SDK: a new secret for
+        the same key, in this answer and nowhere else; the old one works
+        until `previous_valid_until`. A write: no retries."""
+        return _row_dict(await self._writes.keys.rotate(key_id))
+
+    async def sessions(self) -> list[dict[str, Any]]:
+        """`GET /api/me/sessions`: the caller's live browser sessions."""
+        body = await self._app_json(self._reads, "GET", _path("me", "sessions"))
+        rows = body.get("sessions")
+        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+    async def revoke_session(self, session_id: str) -> None:
+        """`DELETE /api/me/sessions/{id}`: that browser is signed out. A
+        write: no retries."""
+        await self._app_json(self._writes, "DELETE", _path("me", "sessions", session_id))
+
+    async def preferences(self) -> dict[str, Any]:
+        """`GET /api/me/preferences`: the email and notification switches
+        and the locale, as every client of the account reads them."""
+        return await self._app_json(self._reads, "GET", _path("me", "preferences"))
+
+    async def set_preferences(self, preferences: dict[str, Any]) -> dict[str, Any]:
+        """`PUT /api/me/preferences`: the whole shape, answered as saved. A
+        PUT of the same shape twice saves it twice, so it may take the
+        reads' retries."""
+        return await self._app_json(self._reads, "PUT", _path("me", "preferences"), preferences)
+
+    async def user_instructions(self) -> dict[str, str]:
+        """`GET /api/me/instructions` by way of the SDK: what the assistant
+        should know about the person, and how they want answers."""
+        saved = await self._reads.instructions.user()
+        return {"about": saved.about, "style": saved.style}
+
+    async def set_user_instructions(self, about: str, style: str) -> dict[str, str]:
+        """`PUT /api/me/instructions` by way of the SDK: the pair, replaced
+        whole (a plan without custom instructions is the server's 402)."""
+        saved = await self._writes.instructions.update_user(about=about, style=style)
+        return {"about": saved.about, "style": saved.style}
+
+    async def entitlements(self) -> dict[str, Any]:
+        """`GET /api/entitlements` by way of the SDK: the org's plan, seats
+        and what it may do."""
+        return _row_dict(await self._reads.entitlements.get())
+
+    async def billing_status(self) -> dict[str, Any]:
+        """`GET /api/billing/status`: how the org pays and whether it is
+        behind, readable by any member."""
+        return await self._app_json(self._reads, "GET", _path("billing", "status"))
+
+    async def plans(self) -> list[dict[str, Any]]:
+        """`GET /api/plans`: the public catalog, cheapest first."""
+        body = await self._app_json(self._reads, "GET", _path("plans"))
+        rows = body.get("data")
+        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+    async def enforcement(self) -> dict[str, Any]:
+        """`GET /api/me/enforcement`: any moderation action that applies to
+        the caller now (`{"state": "none"}` for nearly everyone)."""
+        return await self._app_json(self._reads, "GET", _path("me", "enforcement"))
 
     async def accounts(self) -> dict[str, Any]:
         """`GET /api/accounts`: who is signed in, the acting account first,

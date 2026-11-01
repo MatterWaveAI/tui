@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import replace
 from typing import Any
@@ -276,6 +277,47 @@ class FakeAPI:
             "member_exhausted": False,
         }
         self.tree_reads = 0
+        # The person's own account: keys (this terminal's is `mw_mine0000`),
+        # browser sessions, preferences, instructions and the plan.
+        self.key_rows: list[dict[str, Any]] = [
+            {
+                "id": "k1",
+                "prefix": "mw_mine0000",
+                "name": "matterwave-tui",
+                "kind": "device",
+                "revoked_at": None,
+                "last_used_at": "2026-10-31T00:00:00Z",
+            },
+            {
+                "id": "k2",
+                "prefix": "mw_ci000000",
+                "name": "CI",
+                "kind": "user",
+                "revoked_at": None,
+                "last_used_at": None,
+            },
+        ]
+        self.keys_revoked: list[str] = []
+        self.keys_rotated: list[str] = []
+        self.session_rows: list[dict[str, Any]] = [
+            {
+                "id": "s1",
+                "current": False,
+                "created_at": "2026-10-01T00:00:00Z",
+                "last_seen_at": "2026-10-30T00:00:00Z",
+                "user_agent": "Firefox",
+                "ip": "10.0.0.2",
+            },
+        ]
+        self.sessions_revoked: list[str] = []
+        self.preferences_state: dict[str, Any] = {
+            "email": {"product_updates": False, "usage_alerts": True, "billing_receipts": True},
+            "locale": None,
+            "notifications": {"budget_warn": True},
+        }
+        self.preferences_puts: list[dict[str, Any]] = []
+        self.user_instructions_state = {"about": "", "style": ""}
+        self.user_instructions_puts: list[tuple[str, str]] = []
         self.usage_reads = 0
         self.budget_reads = 0
         self.streams_closed = 0
@@ -707,6 +749,74 @@ class FakeAPI:
     async def budget(self) -> dict[str, Any]:
         self.budget_reads += 1
         return dict(self.budget_payload)
+
+    # --- the person's own account ----------------------------------------------------
+
+    def own_key_prefix(self) -> str | None:
+        return "mw_mine0000"
+
+    async def api_keys(self) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.key_rows]
+
+    async def rotate_key(self, key_id: str) -> dict[str, Any]:
+        self.keys_rotated.append(key_id)
+        row = next(r for r in self.key_rows if r["id"] == key_id)
+        return {**row, "key": "mw_rotated1_testsecret"}
+
+    async def revoke_key(self, key_id: str) -> None:
+        self.keys_revoked.append(key_id)
+        for row in self.key_rows:
+            if row["id"] == key_id:
+                row["revoked_at"] = "2026-10-31T01:00:00Z"
+
+    async def sessions(self) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.session_rows]
+
+    async def revoke_session(self, session_id: str) -> None:
+        self.sessions_revoked.append(session_id)
+        self.session_rows = [r for r in self.session_rows if r["id"] != session_id]
+
+    async def preferences(self) -> dict[str, Any]:
+        return copy.deepcopy(self.preferences_state)
+
+    async def set_preferences(self, preferences: dict[str, Any]) -> dict[str, Any]:
+        self.preferences_puts.append(copy.deepcopy(preferences))
+        self.preferences_state = copy.deepcopy(preferences)
+        return copy.deepcopy(preferences)
+
+    async def user_instructions(self) -> dict[str, str]:
+        return dict(self.user_instructions_state)
+
+    async def set_user_instructions(self, about: str, style: str) -> dict[str, str]:
+        self.user_instructions_puts.append((about, style))
+        self.user_instructions_state = {"about": about, "style": style}
+        return dict(self.user_instructions_state)
+
+    async def entitlements(self) -> dict[str, Any]:
+        return {
+            "plan": "pro",
+            "plan_name": "Pro",
+            "status": "active",
+            "per_seat": False,
+            "seats": 1,
+            "writes_blocked": False,
+        }
+
+    async def billing_status(self) -> dict[str, Any]:
+        return {
+            "billing_enabled": True,
+            "collection_method": "charge_automatically",
+            "dunning": None,
+        }
+
+    async def plans(self) -> list[dict[str, Any]]:
+        return [
+            {"code": "free", "name": "Free", "price_cents_monthly": 0, "per_seat": False},
+            {"code": "pro", "name": "Pro", "price_cents_monthly": 2000, "per_seat": False},
+        ]
+
+    async def enforcement(self) -> dict[str, Any]:
+        return {"state": "none"}
 
     def _replace(self, conversation_id: str, **fields: Any) -> Conversation:
         conv = replace(self._find(conversation_id), **fields)

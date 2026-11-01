@@ -33,7 +33,10 @@ from .models import is_image_filename, model_accepts_images, model_window, visio
 from .paths import migrate_legacy_state, state_dir
 from .roles import load_roles, roles_path, save_roles
 from .screens import (
+    Account,
+    AccountActions,
     Accounts,
+    AccountState,
     Confirm,
     DeviceLogin,
     DeviceLoginFn,
@@ -252,6 +255,11 @@ class TuiCommands(Provider):
 
     ENTRIES: tuple[tuple[str, str, str], ...] = (
         (
+            "Account…",
+            "API keys, signed-in browsers, preferences, your instructions and the plan",
+            "action_account",
+        ),
+        (
             "Switch account…",
             "who is signed in here, and make another one acting",
             "action_switch_account",
@@ -330,6 +338,7 @@ class MatterWaveApp(App[None]):
         Binding("R", "report", "Report"),
         Binding("N", "notifications", "Inbox"),
         Binding("A", "dismiss_announcements", "Dismiss"),
+        Binding("U", "account", "Account"),
         Binding("w", "export_markdown", "Export"),
         Binding("i", "attach", "Attach"),
         Binding("I", "detach", "Detach"),
@@ -1810,6 +1819,120 @@ class MatterWaveApp(App[None]):
             await self.open_conversation(self.conversations[0].id)
         self.render_status()
 
+    # --- the person's own account ------------------------------------------------------
+
+    @work(group="action")
+    async def action_account(self) -> None:
+        """`U`: keys, browsers, preferences, instructions and the plan."""
+        state = await self._account_state()
+        if state is None:
+            return
+        self.push_screen(
+            Account(
+                state,
+                AccountActions(
+                    revoke_key=self.apply_key_revoke,
+                    rotate_key=self.apply_key_rotate,
+                    revoke_session=self.apply_session_revoke,
+                    set_preferences=self.apply_preferences,
+                    set_instructions=self.apply_user_instructions,
+                ),
+            )
+        )
+
+    async def _account_state(self) -> AccountState | None:
+        """Everything the account screen shows, read fresh. The keys, the
+        preferences and the instructions are the screen; a summary line
+        whose route this deployment or this key cannot read is left out."""
+        try:
+            keys, preferences, instructions = await asyncio.gather(
+                self.api.api_keys(), self.api.preferences(), self.api.user_instructions()
+            )
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return None
+        reads = await asyncio.gather(
+            self.api.entitlements(),
+            self.api.billing_status(),
+            self.api.plans(),
+            self.api.enforcement(),
+            self.api.sessions(),
+            return_exceptions=True,
+        )
+        entitlements, billing, plans, enforcement, sessions = (
+            None if isinstance(r, BaseException) else r for r in reads
+        )
+        return AccountState(
+            summary=account_summary(entitlements, billing, plans, enforcement),
+            keys=keys,
+            sessions=sessions if isinstance(sessions, list) else [],
+            preferences=preferences,
+            instructions=instructions,
+            own_prefix=self.api.own_key_prefix(),
+        )
+
+    async def _after_account_write(self) -> AccountState | None:
+        return await self._account_state()
+
+    async def apply_key_revoke(self, key_id: str) -> AccountState | None:
+        try:
+            await self.api.revoke_key(key_id)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return None
+        self.notify("Key revoked.")
+        return await self._after_account_write()
+
+    async def apply_key_rotate(self, key_id: str) -> tuple[AccountState, str] | None:
+        try:
+            rotated = await self.api.rotate_key(key_id)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return None
+        state = await self._after_account_write()
+        secret = str(rotated.get("key") or "")
+        if state is None or not secret:
+            return None
+        return state, secret
+
+    async def apply_session_revoke(self, session_id: str) -> AccountState | None:
+        try:
+            await self.api.revoke_session(session_id)
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return None
+        self.notify("That browser is signed out.")
+        return await self._after_account_write()
+
+    async def apply_preferences(self, preferences: dict[str, Any]) -> AccountState | None:
+        """The whole preferences shape, as every client of the account
+        reads it; the server refuses what it would not keep (a malformed
+        locale, receipts turned off), and that refusal is what shows."""
+        try:
+            await self.api.set_preferences(preferences)
+        except APIError as exc:
+            self.notify(exc.message or "The preferences were not saved.", severity="warning")
+            return None
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return None
+        self.notify("Preferences saved.")
+        return await self._after_account_write()
+
+    async def apply_user_instructions(self, about: str, style: str) -> AccountState | None:
+        """The person's own instructions; a plan without them is the
+        server's refusal, said in passing."""
+        try:
+            await self.api.set_user_instructions(about, style)
+        except APIError as exc:
+            self.notify(exc.message or "The instructions were not saved.", severity="warning")
+            return None
+        except Exception as exc:
+            self.fail_from_exception(exc)
+            return None
+        self.notify("Instructions saved.")
+        return await self._after_account_write()
+
     # --- importing --------------------------------------------------------------------
 
     def action_import(self) -> None:
@@ -2805,6 +2928,44 @@ class MatterWaveApp(App[None]):
 
         self.push_screen(DeviceLogin(self.relogin_fn), done)
         return await future
+
+
+def account_summary(
+    entitlements: dict[str, Any] | None,
+    billing: dict[str, Any] | None,
+    plans: list[dict[str, Any]] | None,
+    enforcement: dict[str, Any] | None,
+) -> list[str]:
+    """The account screen's read-only lines: the plan, how it is paid,
+    what else is on offer, and any moderation action in force."""
+    lines: list[str] = []
+    if entitlements:
+        plan = str(entitlements.get("plan_name") or entitlements.get("plan") or "?")
+        line = f"Plan: {plan} ({entitlements.get('status') or 'active'})"
+        if entitlements.get("per_seat"):
+            line += f", {entitlements.get('seats')} seats"
+        if entitlements.get("writes_blocked"):
+            line += f" — read-only: {entitlements.get('read_only_reason') or 'over the plan'}"
+        lines.append(line)
+    if billing:
+        method = "invoices" if billing.get("collection_method") == "send_invoice" else "card"
+        line = f"Billing: {method}"
+        if not billing.get("billing_enabled", True):
+            line = "Billing: not enabled on this deployment"
+        if billing.get("dunning"):
+            line += " — a payment is late; the web app's billing page says what happens next"
+        lines.append(line)
+    if plans:
+        offered = ", ".join(
+            f"{p.get('name') or p.get('code')} ${int(p.get('price_cents_monthly') or 0) / 100:,.0f}"
+            + ("/seat" if p.get("per_seat") else "")
+            for p in plans
+        )
+        lines.append(f"Plans (a month): {offered}; change it in the web app")
+    if enforcement and enforcement.get("state") not in (None, "none"):
+        reason = enforcement.get("reason") or enforcement.get("message") or ""
+        lines.append(f"Moderation: {enforcement.get('state')}" + (f" — {reason}" if reason else ""))
+    return lines or ["The plan and billing are not readable with this key."]
 
 
 def _part_from(frame: fr.PartStartFrame) -> dict[str, Any]:

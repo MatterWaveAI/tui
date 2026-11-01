@@ -110,6 +110,7 @@ PowerShell or cmd.exe on Windows (whichever started the TUI) and `$SHELL` elsewh
 | `R` | anywhere | report the conversation, or the selected answer, as unsafe or unhelpful |
 | `N` | anywhere | the notifications inbox |
 | `A` | anywhere | dismiss the announcements banner (a critical one stays) |
+| `U` | anywhere | your account: API keys, signed-in browsers, preferences, your own instructions, the plan |
 | `y` | transcript | copy the selected message (or the last answer) to the clipboard |
 | `Y` | transcript | copy just the fenced code blocks of that message |
 | `Ctrl+Q` | anywhere | quit |
@@ -126,12 +127,14 @@ Inside the dialogs:
 | Shares (`S`) | `x` revoke the highlighted link |
 | Prompt roles (`L`) | `Enter` apply, `a` add, `d` delete |
 | Pending files (`I`) | `Enter`, `x` or `Delete` take the highlighted file off |
+| Account (`U`) | `Enter` toggle a preference or edit the locale or an instruction, `x` or `Delete` revoke the highlighted key or browser (asks first), `o` rotate the highlighted key and show its new secret once; this terminal's own key is left to `logout` |
 | Instructions (`t`), feedback (`b`) | `Ctrl+T` save |
 | Every dialog | `Esc` closes it without a change |
 
 The command palette (`Ctrl+P`) adds what has no key of its own, beside Textual's own (the theme
 among them):
 
+- **Account…** — the same screen as `U`
 - **Switch account…**
 - **Import a ChatGPT or Claude export…**
 - **Export this account's data…** — the whole account as one JSON file, saved beside the terminal

@@ -23,6 +23,7 @@ from matterwave_tui.app import (
 )
 from matterwave_tui.auth import DeviceCode
 from matterwave_tui.screens import (
+    Account,
     Accounts,
     Confirm,
     DeviceLogin,
@@ -35,6 +36,7 @@ from matterwave_tui.screens import (
     Notifications,
     PendingAttachments,
     Prompt,
+    SecretShown,
     Shares,
 )
 from matterwave_tui.widgets import DividerView, ImageView, MessageView
@@ -1703,6 +1705,103 @@ def sidebar_titles_with_more(app: MatterWaveApp) -> list[str]:
         else:
             out.append(item.conversation.title)
     return out
+
+
+def account_row(app: MatterWaveApp, prefix: str) -> int:
+    """The index of the account screen's row whose label starts so."""
+    screen = app.screen
+    assert isinstance(screen, Account)
+    options = screen.query_one("#account-rows", OptionList)
+    for index in range(options.option_count):
+        if str(options.get_option_at_index(index).prompt).startswith(prefix):
+            return index
+    raise AssertionError(f"no row starting {prefix!r}")
+
+
+@pytest.mark.asyncio
+async def test_the_account_screen_shows_the_plan_keys_browsers_and_settings():
+    api = FakeAPI()
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("escape", "U")
+        await settle(app, pilot)
+        screen = app.screen
+        assert isinstance(screen, Account)
+        summary = str(screen.query_one("#account-summary", Static).render())
+        assert "Plan: Pro (active)" in summary and "Free $0, Pro $20" in summary
+        labels = [
+            str(screen.query_one("#account-rows", OptionList).get_option_at_index(i).prompt)
+            for i in range(screen.query_one("#account-rows", OptionList).option_count)
+        ]
+        assert any("mw_mine0000" in label and "this terminal" in label for label in labels)
+        assert any(label.startswith("Firefox") for label in labels)
+        assert "Usage alert emails: on" in labels and "Locale: not set" in labels
+
+
+@pytest.mark.asyncio
+async def test_account_writes_reach_their_routes_and_this_terminals_key_is_left_alone():
+    api = FakeAPI()
+    app = MatterWaveApp(api)
+    shown = capture_notify(app)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("escape", "U")
+        await settle(app, pilot)
+        rows = app.screen.query_one("#account-rows", OptionList)
+        # This terminal's own key: not revoked, not rotated from here.
+        rows.highlighted = account_row(app, "matterwave-tui")
+        await pilot.press("x")
+        await settle(app, pilot)
+        assert api.keys_revoked == []
+        assert any("logout" in s for s in shown)
+        # Another key: rotated (its secret shown once), then revoked.
+        rows.highlighted = account_row(app, "CI")
+        await pilot.press("o")
+        await settle(app, pilot)
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.keys_rotated == ["k2"]
+        assert isinstance(app.screen, SecretShown)
+        assert "mw_rotated1_testsecret" in str(app.screen.query_one("#secret", Static).render())
+        await pilot.press("escape")
+        await settle(app, pilot)
+        rows.highlighted = account_row(app, "CI")
+        await pilot.press("x")
+        await settle(app, pilot)
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.keys_revoked == ["k2"]
+        # A browser signed out.
+        rows.highlighted = account_row(app, "Firefox")
+        await pilot.press("x")
+        await settle(app, pilot)
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.sessions_revoked == ["s1"]
+        # A switch toggled: the whole shape goes back.
+        rows.highlighted = account_row(app, "Product update emails")
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.preferences_puts[-1]["email"]["product_updates"] is True
+        assert api.preferences_puts[-1]["email"]["billing_receipts"] is True
+        # The locale, by a prompt.
+        rows.highlighted = account_row(app, "Locale")
+        await pilot.press("enter")
+        await settle(app, pilot)
+        app.screen.query_one("#prompt-input", Input).value = "en-GB"
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert api.preferences_puts[-1]["locale"] == "en-GB"
+        # The person's own instructions.
+        rows.highlighted = account_row(app, "About you")
+        await pilot.press("enter")
+        await settle(app, pilot)
+        app.screen.query_one("#text", TextArea).text = "I write Rust."
+        await pilot.press("ctrl+t")
+        await settle(app, pilot)
+        assert api.user_instructions_puts == [("I write Rust.", "")]
+        assert account_row(app, "About you: I write Rust.") >= 0
 
 
 @pytest.mark.asyncio

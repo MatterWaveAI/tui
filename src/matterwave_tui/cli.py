@@ -24,7 +24,7 @@ from collections.abc import Callable
 from matterwave_sdk import frames as fr
 from matterwave_sdk.errors import APIConnectionError, APIError, AuthenticationError
 
-from .api import DEFAULT_BASE_URL, Cut, HttpChatAPI
+from .api import DEFAULT_BASE_URL, Cut, HttpChatAPI, key_prefix
 from .auth import (
     Credential,
     DeviceCode,
@@ -78,14 +78,6 @@ def _print_code(code: DeviceCode) -> None:
     url = code.verification_uri_complete or code.verification_uri
     _note(f"To sign in, open:\n\n    {url}\n\nand enter the code:  {code.user_code}\n")
     _note("Waiting for approval…")
-
-
-def key_prefix(token: str) -> str | None:
-    """The part of an `mw_` key the server lists it by (`mw_` and eight
-    characters, then `_`), as the platform's own `prefix_of` cuts it."""
-    if token.startswith("mw_") and len(token) > 12 and token[11] == "_":
-        return token[:11]
-    return None
 
 
 async def revoke_stored(base_url: str, token: str) -> str:

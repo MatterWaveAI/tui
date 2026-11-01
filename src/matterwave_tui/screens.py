@@ -3,13 +3,16 @@ prompt and yes/no the conversation actions share, the per-thread custom
 instructions editor, the reply-feedback dialog, the notifications inbox,
 the share-links list, the library of folders and tags, the prompt roles
 library and its editor, the files waiting for the next message, the account
-switcher and the microphone clip recorder."""
+switcher, the person's own account (keys, sessions, preferences,
+instructions, plan) and the microphone clip recorder."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from matterwave_sdk import FEEDBACK_REASONS
@@ -629,6 +632,345 @@ class Accounts(ModalScreen[dict[str, Any] | None]):
         index = int(option_id.removeprefix("account-"))
         if index < len(self.rows):
             self.dismiss(self.rows[index])
+
+    def action_dismiss_none(self) -> None:
+        self.dismiss(None)
+
+
+@dataclass(frozen=True)
+class AccountState:
+    """What the account screen draws: the summary lines (plan, billing,
+    moderation), the API keys, the browser sessions, the preferences and
+    the person's own instructions, with the listed prefix of this
+    terminal's own key."""
+
+    summary: list[str]
+    keys: list[dict[str, Any]]
+    sessions: list[dict[str, Any]]
+    preferences: dict[str, Any]
+    instructions: dict[str, str]
+    own_prefix: str | None
+
+
+# The preference switches the screen offers, by their place in the shape.
+PREFERENCE_SWITCHES: tuple[tuple[tuple[str, str], str], ...] = (
+    (("email", "product_updates"), "Product update emails"),
+    (("email", "usage_alerts"), "Usage alert emails"),
+    (("notifications", "budget_warn"), "Budget warning notifications"),
+)
+
+
+@dataclass(frozen=True)
+class AccountActions:
+    """The account screen's writes; each answers the state to redraw from,
+    or None when it did not land (the app has said why)."""
+
+    revoke_key: Callable[[str], Awaitable[AccountState | None]]
+    rotate_key: Callable[[str], Awaitable[tuple[AccountState, str] | None]]
+    revoke_session: Callable[[str], Awaitable[AccountState | None]]
+    set_preferences: Callable[[dict[str, Any]], Awaitable[AccountState | None]]
+    set_instructions: Callable[[str, str], Awaitable[AccountState | None]]
+
+
+class Account(ModalScreen[None]):
+    """The person's own account: the plan and billing state, moderation,
+    API keys, browser sessions, preferences and instructions. Enter
+    toggles a preference or edits the locale or an instruction, `x`
+    revokes the highlighted key or session after a confirm, `o` rotates
+    the highlighted key and shows its new secret once, Esc closes. This
+    terminal's own key is marked and left alone: `logout` is how it
+    goes."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss_none", "Close"),
+        Binding("x,delete", "revoke", "Revoke"),
+        Binding("o", "rotate", "Rotate"),
+    ]
+    DEFAULT_CSS = """
+    Account { align: center middle; }
+    Account > Vertical { width: 90; height: auto; max-height: 90%;
+        border: round $accent; background: $surface; padding: 0 1; }
+    Account #account-summary { color: $text-muted; }
+    """
+
+    def __init__(self, state: AccountState, actions: AccountActions) -> None:
+        super().__init__()
+        self.state = state
+        self.actions = actions
+        self.rows: list[tuple[str, Any]] = []
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(self._summary(), id="account-summary", markup=False)
+            yield OptionList(*self._options(), id="account-rows")
+            yield Static(
+                "Enter toggles or edits, x revokes a key or session, o rotates a key, Esc closes.",
+                classes="hint",
+                markup=False,
+            )
+
+    def on_mount(self) -> None:
+        self.query_one("#account-rows", OptionList).focus()
+
+    def _summary(self) -> str:
+        return "\n".join(self.state.summary)
+
+    def _options(self) -> list[Option]:
+        self.rows = []
+        options: list[Option] = []
+
+        def heading(title: str) -> None:
+            self.rows.append(("head", None))
+            options.append(Option(f"— {title} —", id=f"row-{len(self.rows)}", disabled=True))
+
+        def row(kind: str, payload: Any, label: str) -> None:
+            self.rows.append((kind, payload))
+            options.append(Option(label, id=f"row-{len(self.rows)}"))
+
+        heading("API keys")
+        for key in self.state.keys:
+            mine = self.state.own_prefix and key.get("prefix") == self.state.own_prefix
+            state = "revoked" if key.get("revoked_at") else str(key.get("kind") or "user")
+            used = str(key.get("last_used_at") or "never")[:10]
+            label = f"{key.get('name') or key.get('prefix')} · {key.get('prefix')} · {state}"
+            label += f" · last used {used}" + (" · this terminal" if mine else "")
+            row("key", key, label)
+        heading("Signed-in browsers")
+        for session in self.state.sessions:
+            agent = str(session.get("user_agent") or "unknown browser")
+            label = f"{agent[:50]} · {session.get('ip') or '?'}"
+            label += f" · last seen {str(session.get('last_seen_at') or '')[:10]}"
+            row("session", session, label)
+        heading("Preferences")
+        prefs = self.state.preferences
+        for path, name in PREFERENCE_SWITCHES:
+            group = prefs.get(path[0]) if isinstance(prefs.get(path[0]), dict) else {}
+            on = bool(group.get(path[1])) if isinstance(group, dict) else False
+            row("switch", path, f"{name}: {'on' if on else 'off'}")
+        row("locale", None, f"Locale: {prefs.get('locale') or 'not set'}")
+        heading("Your instructions")
+        for field_name, name in (("about", "About you"), ("style", "How to answer")):
+            text = self.state.instructions.get(field_name) or "(empty)"
+            flat = " ".join(text.split())
+            row(
+                "instructions", field_name, f"{name}: {flat[:60] + ('…' if len(flat) > 60 else '')}"
+            )
+        return options
+
+    def _redraw(self, state: AccountState | None) -> None:
+        if state is None:
+            return
+        self.state = state
+        option_list = self.query_one("#account-rows", OptionList)
+        keep = option_list.highlighted
+        self.query_one("#account-summary", Static).update(self._summary())
+        option_list.set_options(self._options())
+        if keep is not None and option_list.option_count:
+            option_list.highlighted = min(keep, option_list.option_count - 1)
+
+    def _highlighted(self) -> tuple[str, Any]:
+        index = self.query_one("#account-rows", OptionList).highlighted
+        if index is None or index >= len(self.rows):
+            return ("head", None)
+        return self.rows[index]
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        kind, payload = self._highlighted()
+        if kind == "switch":
+            self.run_worker(self._toggle(payload), exclusive=True)
+        elif kind == "locale":
+            self._edit_locale()
+        elif kind == "instructions":
+            self._edit_instructions(payload)
+        elif kind in ("key", "session"):
+            self.notify("x revokes it" + (", o rotates it." if kind == "key" else "."))
+
+    async def _toggle(self, path: tuple[str, str]) -> None:
+        prefs = copy.deepcopy(self.state.preferences)
+        group = prefs.setdefault(path[0], {})
+        group[path[1]] = not bool(group.get(path[1]))
+        self._redraw(await self.actions.set_preferences(prefs))
+
+    def _edit_locale(self) -> None:
+        def chosen(locale: str | None) -> None:
+            if locale is None:
+                return
+            prefs = copy.deepcopy(self.state.preferences)
+            prefs["locale"] = locale.strip() or None
+            self.run_worker(self._saved_preferences(prefs), exclusive=True)
+
+        self.app.push_screen(
+            Prompt(
+                "Locale, as a language tag (en, en-GB); empty clears it:",
+                str(self.state.preferences.get("locale") or ""),
+            ),
+            chosen,
+        )
+
+    async def _saved_preferences(self, prefs: dict[str, Any]) -> None:
+        self._redraw(await self.actions.set_preferences(prefs))
+
+    def _edit_instructions(self, field_name: str) -> None:
+        def written(text: str | None) -> None:
+            if text is None:
+                return
+            pair = dict(self.state.instructions)
+            pair[field_name] = text
+            self.run_worker(
+                self._saved_instructions(pair.get("about", ""), pair.get("style", "")),
+                exclusive=True,
+            )
+
+        title = "About you" if field_name == "about" else "How to answer"
+        self.app.push_screen(
+            TextEditor(
+                f"{title} — your instructions, in every conversation that has none of its own.",
+                self.state.instructions.get(field_name, ""),
+            ),
+            written,
+        )
+
+    async def _saved_instructions(self, about: str, style: str) -> None:
+        self._redraw(await self.actions.set_instructions(about, style))
+
+    def _is_own(self, key: dict[str, Any]) -> bool:
+        return bool(self.state.own_prefix) and key.get("prefix") == self.state.own_prefix
+
+    def action_revoke(self) -> None:
+        kind, payload = self._highlighted()
+        if kind == "key":
+            if self._is_own(payload):
+                self.notify("That is this terminal's own key: `matterwave-tui logout` revokes it.")
+                return
+            if payload.get("revoked_at"):
+                self.notify("That key is already revoked.")
+                return
+            key_id = str(payload.get("id") or "")
+            question = f"Revoke the key “{payload.get('name') or payload.get('prefix')}”? "
+            question += "Everything using it stops working at once."
+
+            def chosen(confirmation: bool | None) -> None:
+                if confirmation:
+                    self.run_worker(self._revoked_key(key_id), exclusive=True)
+
+            self.app.push_screen(Confirm(question), chosen)
+        elif kind == "session":
+            session_id = str(payload.get("id") or "")
+
+            def signed_out(confirmation: bool | None) -> None:
+                if confirmation:
+                    self.run_worker(self._revoked_session(session_id), exclusive=True)
+
+            self.app.push_screen(Confirm("Sign that browser out?"), signed_out)
+        else:
+            self.notify("Highlight a key or a browser to revoke it.")
+
+    async def _revoked_key(self, key_id: str) -> None:
+        self._redraw(await self.actions.revoke_key(key_id))
+
+    async def _revoked_session(self, session_id: str) -> None:
+        self._redraw(await self.actions.revoke_session(session_id))
+
+    def action_rotate(self) -> None:
+        kind, payload = self._highlighted()
+        if kind != "key":
+            self.notify("Highlight a key to rotate it.")
+            return
+        if self._is_own(payload):
+            self.notify("That is this terminal's own key; sign in again to replace it.")
+            return
+        if payload.get("revoked_at"):
+            self.notify("A revoked key cannot be rotated.")
+            return
+        key_id = str(payload.get("id") or "")
+
+        def chosen(confirmation: bool | None) -> None:
+            if confirmation:
+                self.run_worker(self._rotated(key_id), exclusive=True)
+
+        self.app.push_screen(
+            Confirm(
+                f"Rotate “{payload.get('name') or payload.get('prefix')}”? It gets a new secret; "
+                "the old one keeps working for a grace period."
+            ),
+            chosen,
+        )
+
+    async def _rotated(self, key_id: str) -> None:
+        rotated = await self.actions.rotate_key(key_id)
+        if rotated is None:
+            return
+        state, secret = rotated
+        self._redraw(state)
+        self.app.push_screen(SecretShown(secret))
+
+    def action_dismiss_none(self) -> None:
+        self.dismiss(None)
+
+
+class SecretShown(ModalScreen[None]):
+    """A new key's secret, shown the one time the server sends it: `y`
+    copies it, Esc closes and it is gone."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss_none", "Close"),
+        Binding("y", "copy", "Copy"),
+    ]
+    DEFAULT_CSS = """
+    SecretShown { align: center middle; }
+    SecretShown > Vertical { width: 80; height: auto; border: round $warning;
+        background: $surface; padding: 1 2; }
+    """
+
+    def __init__(self, secret: str) -> None:
+        super().__init__()
+        self.secret = secret
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static("The new secret — copy it now; it is not shown again:", markup=False)
+            yield Static(self.secret, id="secret", markup=False)
+            yield Static("y copies it, Esc closes.", classes="hint", markup=False)
+
+    def action_copy(self) -> None:
+        self.app.copy_to_clipboard(self.secret)
+        self.notify("Copied.")
+
+    def action_dismiss_none(self) -> None:
+        self.dismiss(None)
+
+
+class TextEditor(ModalScreen[str | None]):
+    """A few lines of text under a title: Ctrl+T hands them back, Esc
+    hands back None."""
+
+    BINDINGS = [
+        Binding("ctrl+t", "save", "Save"),
+        Binding("escape", "dismiss_none", "Cancel"),
+    ]
+    DEFAULT_CSS = """
+    TextEditor { align: center middle; }
+    TextEditor > Vertical { width: 70; height: auto; max-height: 85%;
+        border: round $accent; background: $surface; padding: 1 2; }
+    TextEditor TextArea { height: 8; }
+    """
+
+    def __init__(self, title: str, text: str = "") -> None:
+        super().__init__()
+        self.title_text = title
+        self.initial = text
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(self.title_text, markup=False)
+            yield TextArea(self.initial, id="text")
+            yield Static("Ctrl+T saves, Esc cancels.", classes="hint", markup=False)
+
+    def on_mount(self) -> None:
+        self.query_one("#text", TextArea).focus()
+
+    def action_save(self) -> None:
+        self.dismiss(self.query_one("#text", TextArea).text)
 
     def action_dismiss_none(self) -> None:
         self.dismiss(None)

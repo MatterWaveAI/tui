@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- An account screen (`U`, or "Account…" on the palette): the plan,
+  billing and any moderation action in force; your API keys, to rotate
+  (the new secret shown once) or revoke, with this terminal's own key
+  marked and left to `logout`; the browsers signed in as you, to sign
+  out; the email and notification preferences and the locale every client
+  of the account reads; and your own instructions, about you and how to
+  answer.
 - The library manages what it lists: `r` renames a folder, `x` deletes a
   folder (its conversations return to the main list) or a tag (it comes
   off every conversation), and `Enter` narrows the sidebar to the

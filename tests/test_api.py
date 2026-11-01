@@ -9,7 +9,7 @@ from matterwave_sdk import frames as fr
 from matterwave_sdk.errors import AuthenticationError, ServerError
 from matterwave_sdk.models import Conversation
 
-from matterwave_tui.api import Cut, HttpChatAPI, Opened
+from matterwave_tui.api import Cut, HttpChatAPI, Opened, key_prefix
 
 BASE = "https://matterwave.test"
 
@@ -601,6 +601,74 @@ async def test_folders_rename_and_delete_and_tags_delete_on_their_routes():
         ("DELETE", "/api/library/tags/t1"),
     ]
     assert json.loads(seen[0][2]) == {"name": "Home"}
+
+
+@pytest.mark.asyncio
+async def test_the_account_routes_take_their_methods():
+    seen: list[tuple[str, str, bytes]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, request.content))
+        path = request.url.path
+        if path == "/api/keys/k2/rotate":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "k2",
+                    "prefix": "mw_new00000",
+                    "name": "CI",
+                    "kind": "user",
+                    "scopes": [],
+                    "created_at": "1",
+                    "key": "mw_new00000_testsecret",
+                },
+            )
+        if path == "/api/me/sessions" and request.method == "GET":
+            return httpx.Response(200, json={"current_id": None, "sessions": [{"id": "s1"}]})
+        if path == "/api/me/sessions/s1":
+            return httpx.Response(200, json={"status": "revoked", "current": False})
+        if path == "/api/me/preferences":
+            body = json.loads(request.content) if request.content else {"locale": None}
+            return httpx.Response(200, json=body)
+        if path == "/api/me/instructions":
+            body = json.loads(request.content) if request.content else {"about": "", "style": ""}
+            return httpx.Response(200, json=body)
+        if path == "/api/plans":
+            return httpx.Response(200, json={"data": [{"code": "free"}], "models": []})
+        return httpx.Response(200, json={"state": "none", "billing_enabled": True})
+
+    api = make(handler)
+    assert api.own_key_prefix() is None  # "mw_one" is no listed key's prefix
+    assert (await api.rotate_key("k2"))["key"] == "mw_new00000_testsecret"
+    assert [row["id"] for row in await api.sessions()] == ["s1"]
+    await api.revoke_session("s1")
+    assert (await api.preferences())["locale"] is None
+    assert (await api.set_preferences({"locale": "en"}))["locale"] == "en"
+    await api.user_instructions()
+    assert await api.set_user_instructions("me", "short") == {"about": "me", "style": "short"}
+    assert [p["code"] for p in await api.plans()] == ["free"]
+    assert (await api.billing_status())["billing_enabled"] is True
+    assert (await api.enforcement())["state"] == "none"
+    assert [(m, p) for m, p, _ in seen] == [
+        ("POST", "/api/keys/k2/rotate"),
+        ("GET", "/api/me/sessions"),
+        ("DELETE", "/api/me/sessions/s1"),
+        ("GET", "/api/me/preferences"),
+        ("PUT", "/api/me/preferences"),
+        ("GET", "/api/me/instructions"),
+        ("PUT", "/api/me/instructions"),
+        ("GET", "/api/plans"),
+        ("GET", "/api/billing/status"),
+        ("GET", "/api/me/enforcement"),
+    ]
+    assert json.loads(seen[4][2]) == {"locale": "en"}
+    assert json.loads(seen[6][2]) == {"about": "me", "style": "short"}
+
+
+def test_a_key_is_listed_by_its_prefix():
+    assert key_prefix("mw_abcd1234_rest") == "mw_abcd1234"
+    assert key_prefix("mw_short") is None
+    assert key_prefix("sk_abcd1234_rest") is None
 
 
 @pytest.mark.asyncio

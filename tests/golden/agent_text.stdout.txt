@@ -1,0 +1,2 @@
+Reading it.
+VALUE is 2.

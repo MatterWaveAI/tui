@@ -49,10 +49,13 @@ path = "src/matterwave_tui/__init__.py"
 packages = ["src/matterwave_tui"]
 
 [tool.uv.sources]
-# matterwave-sdk is not on PyPI, so uv resolves it from the SDK's repository at
-# the commit this tree is tested against (uv.lock pins it). The published
-# metadata carries only the version range above.
-matterwave-sdk = { git = "https://github.com/MatterWaveAI/python-sdk", rev = "4168d4aa1274b2199f4980eeb980c8894ec27f49" }
+# matterwave-sdk is not on PyPI. Agent mode imports `matterwave_sdk.agent` at
+# agent contract 1.2.0, which is not yet on the SDK's repository, so until it
+# is uv resolves the SDK from a python-sdk checkout beside this one that
+# carries it (uv.lock records the checkout); then this goes back to a `git`
+# source at a pinned `rev`. pip ignores this table, and so does the published
+# metadata, which carries only the version range above.
+matterwave-sdk = { path = "../python-sdk", editable = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

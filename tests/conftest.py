@@ -72,6 +72,18 @@ def symbols_with_words() -> Iterator[None]:
     markers.configure(False)
 
 
+@pytest.fixture(autouse=True)
+def private_dirs(
+    state_home: Path, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path]:
+    """Agent mode's config directory is a scratch one too, so nothing a test
+    does (trusted folders, checkpoints, settings, recorded runs) reaches the
+    real home directory or another test."""
+    config = tmp_path_factory.mktemp("agent-config")
+    monkeypatch.setenv("MATTERWAVE_CONFIG_DIR", str(config))
+    return state_home, config
+
+
 @pytest.fixture
 def recorded():
     def load(name: str) -> str:

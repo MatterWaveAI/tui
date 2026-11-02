@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from matterwave_sdk import frames as fr
@@ -41,6 +41,10 @@ from textual.widget import Widget
 from textual.widgets import Footer, Input, Label, ListItem, ListView, Static, TextArea
 
 from . import __version__, images, markers
+from .agent.session import SessionOptions
+
+if TYPE_CHECKING:
+    from .agent.screen import AgentScreen
 from .api import NOTIFICATIONS_PAGE, ChatAPI, Cut, Opened, StreamItem
 from .dictation import MEDIA_TYPES, MicRecorder, media_type_for, mic_available
 from .export import conversation_markdown, export_filename, free_path
@@ -389,6 +393,11 @@ class TuiCommands(Provider):
             "action_dictate",
         ),
         ("Prompt roles…", "named system prompts to apply to this conversation", "action_roles"),
+        (
+            "Coding agent in this folder…",
+            "read, edit and run commands here, with approvals",
+            "action_open_agent",
+        ),
     )
 
     def _offered(self, action: str) -> bool:
@@ -406,6 +415,50 @@ class TuiCommands(Provider):
         for name, help_text, action in self.ENTRIES:
             if self._offered(action) and (match := matcher.match(name)) > 0:
                 yield Hit(match, matcher.highlight(name), getattr(self.app, action), help=help_text)
+
+
+# The chat's own key actions, switched off while the agent screen is in front
+# (its composer takes the letters; elsewhere they would act on the chat
+# hidden behind it).
+CHAT_ACTIONS = frozenset(
+    {
+        "new",
+        "search",
+        "pick_model",
+        "pick_preset",
+        "edit",
+        "regenerate",
+        "branch",
+        "toggle_originals",
+        "compact",
+        "instructions",
+        "feedback",
+        "rename",
+        "toggle_pin",
+        "toggle_archive",
+        "delete_conversation",
+        "fork",
+        "share",
+        "my_shares",
+        "library",
+        "roles",
+        "report",
+        "notifications",
+        "dismiss_announcements",
+        "export_markdown",
+        "attach",
+        "dictate",
+        "cycle_filter",
+        "copy",
+        "copy_code",
+        "leave_composer",
+        "account",
+        "pick_files",
+        "detach",
+        "edit_in_editor",
+        "help",
+    }
+)
 
 
 class MatterWaveApp(App[None]):
@@ -485,9 +538,14 @@ class MatterWaveApp(App[None]):
         update_check: bool = False,
         show_answer_usage: bool = True,
         plain: bool = False,
+        agent: SessionOptions | None = None,
     ) -> None:
         super().__init__()
         self.api = api
+        # `matterwave-tui code [path]`: the agent screen opens over the chat,
+        # and the chat's own loading waits until the person goes to it.
+        self.agent_options = agent
+        self._chat_loaded = False
         # `--plain`: every mark drawn as its word, no symbols.
         markers.configure(plain)
         # Tokens and cost under each answer this session streamed, by
@@ -751,7 +809,34 @@ class MatterWaveApp(App[None]):
             self.set_interval(IMAGE_REFRESH_S, self._refresh_images)
         self.render_status()
         self.query_one("#composer", TextArea).focus()
-        self.load_initial()
+        if self.agent_options is not None:
+            self.open_agent(self.agent_options)
+        else:
+            self._load_chat()
+
+    def _load_chat(self) -> None:
+        if not self._chat_loaded:
+            self._chat_loaded = True
+            self.load_initial()
+
+    # --- the coding agent ------------------------------------------------------------
+
+    def open_agent(self, options: SessionOptions) -> None:
+        """The agent screen over the chat. The API adapter is the wire: its
+        `/v1` and `/mcp` methods are the agent's."""
+        from typing import cast
+
+        from .agent.screen import AgentScreen
+        from .agent.wire import AgentWire
+
+        def leave() -> None:
+            self.pop_screen()
+            self._load_chat()
+
+        self.push_screen(AgentScreen(cast(AgentWire, self.api), options, leave=leave))
+
+    def action_open_agent(self) -> None:
+        self.open_agent(SessionOptions(root=Path.cwd()))
 
     async def on_unmount(self) -> None:
         await self.api.aclose()
@@ -965,6 +1050,9 @@ class MatterWaveApp(App[None]):
         only when the org has presets or one is in force on the conversation,
         and the announcements banner offers its dismiss key only while it
         stands."""
+        if action in CHAT_ACTIONS and self._agent_screen() is not None:
+            # The agent screen is in front: the chat's keys wait behind it.
+            return False
         if action == "dismiss_announcements":
             return bool(self.announcements)
         if action == "pick_preset":
@@ -972,6 +1060,16 @@ class MatterWaveApp(App[None]):
         if self.connector_source is not None and action in ("edit", "regenerate"):
             return False
         return not (self.temporary_chat and action in ("share", "fork"))
+
+    def _agent_screen(self) -> AgentScreen | None:
+        """The agent screen when it is open, under a modal of its own or
+        not: the chat is behind it either way."""
+        from .agent.screen import AgentScreen
+
+        for screen in reversed(self.screen_stack):
+            if isinstance(screen, AgentScreen):
+                return screen
+        return None
 
     # --- a connector's conversation ---------------------------------------------
 
@@ -1580,6 +1678,14 @@ class MatterWaveApp(App[None]):
         self.render_status()
 
     def action_send(self) -> None:
+        agent = self._agent_screen()
+        if agent is not None:
+            # Ctrl+Enter is the app's priority key; in code mode it sends
+            # to the agent, and not while one of its dialogs is open.
+            front: object = self.screen
+            if front is agent:
+                agent.action_send()
+            return
         composer = self.query_one("#composer", TextArea)
         text = composer.text.strip()
         if not text:

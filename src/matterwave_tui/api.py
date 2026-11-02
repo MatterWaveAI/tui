@@ -25,10 +25,10 @@ from typing import Any, Protocol
 from urllib.parse import parse_qsl, quote, urlsplit
 
 import httpx
-from matterwave_sdk import AsyncConversationStream, AsyncMatterWave
+from matterwave_sdk import AsyncConversationStream, AsyncMatterWave, ChatCompletionAccumulator
 from matterwave_sdk import _base as sdk_base
 from matterwave_sdk._client import USER_AGENT as SDK_USER_AGENT
-from matterwave_sdk.errors import APIConnectionError, AuthenticationError
+from matterwave_sdk.errors import APIConnectionError, AuthenticationError, McpToolError
 from matterwave_sdk.frames import TERMINAL_FRAMES, ConversationFrame
 from matterwave_sdk.models import (
     Attachment,
@@ -45,6 +45,7 @@ from matterwave_sdk.models import (
 )
 
 from . import __version__
+from .agent.wire import Completed, CompletionEvent, TextDelta
 
 # A local API; anything else comes from --base-url or MATTERWAVE_BASE_URL.
 DEFAULT_BASE_URL = "http://localhost:8000"
@@ -1020,6 +1021,65 @@ class HttpChatAPI:
                 conversation_id, message_id, model=model, temperature=temperature
             )
         )
+
+    # --- agent mode: /v1 and /mcp ---------------------------------------------
+
+    async def complete(
+        self,
+        messages: Sequence[dict[str, Any]],
+        *,
+        model: str | None,
+        tools: Sequence[dict[str, Any]],
+        conversation_id: str | None,
+    ) -> AsyncIterator[CompletionEvent]:
+        """One `POST /v1/chat/completions` of an agent run, streamed: the
+        text as it arrives, then the whole reply with its tool calls (the
+        SDK's accumulator puts them back together) and the usage. The
+        server runs none of the calls. `conversation_id` stores the round in
+        that conversation. A write: no retries, since a retried call is
+        billed and stored twice. Closing the iterator closes the stream."""
+        stream = await self._writes.chat.completions.create(
+            [dict(m) for m in messages],
+            model=model,
+            stream=True,
+            include_usage=True,
+            tools=[dict(t) for t in tools] or None,
+            conversation_id=conversation_id,
+        )
+        accumulator = ChatCompletionAccumulator()
+        try:
+            async for chunk in stream:
+                accumulator.add(chunk)
+                if chunk.content:
+                    yield TextDelta(chunk.content)
+        finally:
+            await stream.close()
+        yield Completed(
+            accumulator.message(), accumulator.usage, accumulator.finish_reason, stream.request_id
+        )
+
+    async def mcp_tools(self) -> list[dict[str, Any]]:
+        """MatterWave's own `/mcp` tools for the caller's credential, by way
+        of the SDK's MCP client, in the shape an MCP server lists them."""
+        tools = await self._reads.mcp.list_tools()
+        return [
+            {
+                "name": t.name,
+                "description": t.description,
+                "inputSchema": t.input_schema,
+                "annotations": t.annotations,
+            }
+            for t in tools
+        ]
+
+    async def mcp_call(self, name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
+        """One `/mcp` tool call by way of the SDK: its text, and whether the
+        tool refused (a budget, a missing conversation)."""
+        try:
+            result = await self._writes.mcp.call_tool(name, arguments)
+        except McpToolError as exc:
+            return str(exc), True
+        return result.text, False
 
     # --- the stream ----------------------------------------------------------
 

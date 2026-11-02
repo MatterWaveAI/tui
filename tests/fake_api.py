@@ -1,13 +1,16 @@
-"""An in-memory `ChatAPI` that streams scripted frames."""
+"""An in-memory `ChatAPI` that streams scripted frames, and `FakeV1`: a
+scripted `/v1` (with the routes an agent run touches) under the real adapter."""
 
 from __future__ import annotations
 
 import asyncio
 import copy
-from collections.abc import AsyncIterator, Sequence
+import json as _json
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import replace
 from typing import Any
 
+import httpx
 from matterwave_sdk import frames as fr
 from matterwave_sdk.errors import ConflictError
 from matterwave_sdk.models import (
@@ -22,7 +25,7 @@ from matterwave_sdk.models import (
     UsageBalance,
 )
 
-from matterwave_tui.api import NOTIFICATIONS_PAGE, Opened, SearchPage, StreamItem
+from matterwave_tui.api import NOTIFICATIONS_PAGE, HttpChatAPI, Opened, SearchPage, StreamItem
 
 # The fake's search answers this many hits a page, so paging is exercised.
 SEARCH_PAGE = 2
@@ -967,3 +970,424 @@ def happy_script(text: str = "Hello there") -> list[StreamItem]:
         fr.ContextFrame(150, 20, 8192),
         fr.DoneFrame(done),
     ]
+
+
+# --- a scripted /v1 for agent runs --------------------------------------------------
+#
+# The agent talks HTTP through the real adapter (`HttpChatAPI`) and the
+# SDK, so the fake sits under them, as an httpx transport: /v1/chat/completions
+# answers from a script (streamed as SSE the way the API streams it), and the
+# /api routes a run touches (me, models, conversations, tree, compact) and
+# /mcp answer from memory. A stored run is kept the way the API keeps one:
+# the user's text, then one assistant message whose parts grow by tool_call
+# and tool_result, so --resume reads back what a real server would hand it.
+
+V1_BASE = "https://matterwave.test"
+
+AGENT_MODELS: dict[str, Any] = {
+    "data": [
+        {
+            "id": "coder",
+            "label": "Coder",
+            "included": True,
+            "supports_tools": True,
+            "context_window": 65536,
+        },
+        {
+            "id": "grt-nano",
+            "label": "GRT Nano",
+            "included": True,
+            "supports_tools": False,
+            "context_window": 8192,
+        },
+    ],
+    "default_model": "coder",
+}
+
+
+def say(text: str, *, usage: tuple[int, int] = (100, 20)) -> dict[str, Any]:
+    """A reply in words, no tool call."""
+    return {"text": text, "calls": [], "usage": usage}
+
+
+def call(
+    name: str, _text: str = "", *, usage: tuple[int, int] = (100, 20), **args: Any
+) -> dict[str, Any]:
+    """A reply that asks for one tool call."""
+    return {"text": _text, "calls": [(name, args)], "usage": usage}
+
+
+def calls(
+    *pairs: tuple[str, dict[str, Any]], text: str = "", usage: tuple[int, int] = (100, 20)
+) -> dict[str, Any]:
+    return {"text": text, "calls": list(pairs), "usage": usage}
+
+
+def refuse(status: int, message: str, code: str | None = None, **headers: str) -> dict[str, Any]:
+    """The request is refused with OpenAI's error envelope."""
+    return {"status": status, "message": message, "code": code, "headers": headers}
+
+
+Reply = dict[str, Any] | Callable[[dict[str, Any]], dict[str, Any]]
+
+
+class FakeV1:
+    def __init__(
+        self,
+        script: list[Reply] | None = None,
+        *,
+        repeat: Reply | None = None,
+        me: dict[str, Any] | None = None,
+        models: dict[str, Any] | None = None,
+        mcp_tools: list[dict[str, Any]] | None = None,
+        instructions: str | None = None,
+    ) -> None:
+        self.script = list(script or [])
+        # `repeat`: what to answer once the script runs out (a looping model).
+        self.repeat = repeat
+        self.me = (
+            me
+            if me is not None
+            else {
+                "subject": "u1",
+                "kind": "user",
+                "email": "dev@matterwave.test",
+                "roles": [],
+                "local_agent_tools": True,
+            }
+        )
+        self.models = models if models is not None else AGENT_MODELS
+        self.mcp_tools = mcp_tools if mcp_tools is not None else []
+        self.mcp_called: list[tuple[str, dict[str, Any]]] = []
+        self.instructions = instructions
+        self.requests: list[dict[str, Any]] = []
+        self.conversations: dict[str, dict[str, Any]] = {}
+        self.stored: dict[str, list[dict[str, Any]]] = {}
+        self.compactions = 0
+        # Rounds the API would have stored on a branch (see _store_request).
+        self.branched = 0
+        self.calls_made = 0
+        self._ids = 0
+
+    # --- the client ---------------------------------------------------------------
+
+    def api(self) -> HttpChatAPI:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(self.handle))
+        return HttpChatAPI(base_url=V1_BASE, token="mw_test", http_client=client)
+
+    def _next_id(self, prefix: str) -> str:
+        self._ids += 1
+        return f"{prefix}{self._ids}"
+
+    # --- routes -----------------------------------------------------------------------
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        body = _json.loads(request.content) if request.content else {}
+        if path == "/v1/chat/completions":
+            return self._complete(body)
+        if path == "/api/me":
+            return httpx.Response(200, json=self.me)
+        if path == "/api/models":
+            return httpx.Response(200, json=self.models)
+        if path == "/api/conversations" and request.method == "POST":
+            cid = f"conv-{len(self.conversations) + 1}"
+            row = {
+                "id": cid,
+                "title": body.get("title") or "New chat",
+                "created_at": "1",
+                "updated_at": "1",
+                "default_model": body.get("model"),
+            }
+            self.conversations[cid] = row
+            self.stored[cid] = []
+            return httpx.Response(200, json=row)
+        if path == "/mcp":
+            return self._mcp(body)
+        parts = path.split("/")
+        if len(parts) >= 4 and parts[1] == "api" and parts[2] == "conversations":
+            cid = parts[3]
+            if cid not in self.conversations:
+                return httpx.Response(404, json={"detail": "Not Found"})
+            tail = parts[4] if len(parts) > 4 else ""
+            if tail == "tree":
+                return httpx.Response(200, json=self._tree(cid))
+            if tail == "compact":
+                return self._compact(cid)
+            if tail == "":
+                row = dict(self.conversations[cid])
+                effective = self.instructions or ""
+                row["instructions"] = {
+                    "org": None,
+                    "user": None,
+                    "conversation": None,
+                    "user_overridden": False,
+                    "effective": effective,
+                }
+                return httpx.Response(200, json=row)
+        return httpx.Response(404, json={"detail": "Not Found"})
+
+    def _tree(self, cid: str) -> dict[str, Any]:
+        row = dict(self.conversations[cid])
+        messages = self.stored[cid]
+        row["messages"] = messages
+        row["current_leaf_message_id"] = messages[-1]["id"] if messages else None
+        return row
+
+    def _compact(self, cid: str) -> httpx.Response:
+        self.compactions += 1
+        messages = self.stored[cid]
+        summary = {
+            "id": self._next_id("s"),
+            "conversation_id": cid,
+            "role": "system",
+            "content": "",
+            "created_at": "2",
+            "parent_id": messages[-1]["id"] if messages else None,
+            "parts": [
+                {
+                    "type": "summary",
+                    "text": "The run so far, summarised.",
+                    "covers_from": messages[0]["id"] if messages else None,
+                    "covers_to": messages[-1]["id"] if messages else None,
+                }
+            ],
+        }
+        messages.append(summary)
+        return httpx.Response(200, json=summary)
+
+    # --- storing a run the way the API does -----------------------------------------------
+
+    def _store_request(self, cid: str, messages: list[dict[str, Any]]) -> None:
+        stored = self.stored[cid]
+        last = messages[-1]
+        if last.get("role") == "user":
+            stored.append(
+                {
+                    "id": self._next_id("m"),
+                    "conversation_id": cid,
+                    "role": "user",
+                    "content": last.get("content") or "",
+                    "created_at": "1",
+                    "parent_id": stored[-1]["id"] if stored else None,
+                    "parts": [{"type": "text", "text": last.get("content") or ""}],
+                }
+            )
+        elif last.get("role") == "tool":
+            start = len(messages)
+            while start > 0 and messages[start - 1].get("role") == "tool":
+                start -= 1
+            ids = (
+                {c.get("id") for c in (messages[start - 1].get("tool_calls") or [])}
+                if start
+                else set()
+            )
+            holder = next(
+                (
+                    m
+                    for m in reversed(stored)
+                    if m["role"] == "assistant"
+                    and any(p.get("type") == "tool_call" and p.get("id") in ids for p in m["parts"])
+                ),
+                None,
+            )
+            if holder is None:
+                return
+            if holder is not stored[-1]:
+                # As the API does: a round closed anywhere but at the end of
+                # the thread is stored on a branch beside its call, the way a
+                # retried request is, and what came after it leaves the path.
+                self.branched += 1
+                holder = {
+                    **holder,
+                    "id": self._next_id("m"),
+                    "parts": [dict(p) for p in holder["parts"]],
+                }
+                stored.append(holder)
+            parts = holder["parts"]
+            have = {p.get("id") for p in parts if p.get("type") == "tool_result"}
+            called = {p.get("id") for p in parts if p.get("type") == "tool_call"}
+            for m in messages[start:]:
+                ident = m.get("tool_call_id")
+                if ident in called and ident not in have:
+                    parts.append({"type": "tool_result", "id": ident, "output": m.get("content")})
+
+    def _store_reply(self, cid: str, text: str, tool_calls: list[dict[str, Any]]) -> None:
+        stored = self.stored[cid]
+        parts: list[dict[str, Any]] = []
+        if text:
+            parts.append({"type": "text", "text": text})
+        for c in tool_calls:
+            parts.append(
+                {
+                    "type": "tool_call",
+                    "id": c["id"],
+                    "name": c["function"]["name"],
+                    "arguments": c["function"]["arguments"],
+                }
+            )
+        if stored and stored[-1]["role"] == "assistant":
+            stored[-1]["parts"].extend(parts)
+            stored[-1]["content"] = (stored[-1].get("content") or "") + text
+        else:
+            stored.append(
+                {
+                    "id": self._next_id("m"),
+                    "conversation_id": cid,
+                    "role": "assistant",
+                    "content": text,
+                    "created_at": "1",
+                    "model": "coder",
+                    "parent_id": stored[-1]["id"] if stored else None,
+                    "parts": parts,
+                }
+            )
+
+    # --- /v1/chat/completions ------------------------------------------------------------
+
+    def _complete(self, body: dict[str, Any]) -> httpx.Response:
+        self.requests.append(body)
+        if self.script:
+            reply = self.script.pop(0)
+        elif self.repeat is not None:
+            reply = self.repeat
+        else:
+            reply = say("(the script ran out)")
+        if callable(reply):
+            reply = reply(body)
+        if "status" in reply:
+            envelope = {
+                "error": {
+                    "message": reply["message"],
+                    "type": "invalid_request_error",
+                    "param": None,
+                    "code": reply.get("code"),
+                }
+            }
+            headers = {
+                "x-request-id": f"req-refused-{len(self.requests)}",
+                **reply.get("headers", {}),
+            }
+            return httpx.Response(reply["status"], json=envelope, headers=headers)
+        cid = (body.get("metadata") or {}).get("conversation_id")
+        if cid in self.stored:
+            self._store_request(cid, body["messages"])
+        tool_calls = []
+        for name, args in reply["calls"]:
+            self.calls_made += 1
+            tool_calls.append(
+                {
+                    "id": f"call_{self.calls_made}",
+                    "type": "function",
+                    "function": {"name": name, "arguments": _json.dumps(args)},
+                }
+            )
+        if cid in self.stored:
+            self._store_reply(cid, reply["text"], tool_calls)
+        return httpx.Response(
+            200,
+            headers={
+                "content-type": "text/event-stream",
+                "x-request-id": f"req-{len(self.requests)}",
+            },
+            text=self._sse(reply["text"], tool_calls, reply["usage"]),
+        )
+
+    @staticmethod
+    def _sse(text: str, tool_calls: list[dict[str, Any]], usage: tuple[int, int]) -> str:
+        def frame(delta: dict[str, Any], finish: str | None = None) -> str:
+            chunk = {
+                "id": "chatcmpl-1",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "coder",
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+            }
+            return f"data: {_json.dumps(chunk)}\n\n"
+
+        out = [frame({"role": "assistant"})]
+        if text:
+            half = max(1, len(text) // 2)
+            out.append(frame({"content": text[:half]}))
+            if text[half:]:
+                out.append(frame({"content": text[half:]}))
+        for index, c in enumerate(tool_calls):
+            args = c["function"]["arguments"]
+            out.append(
+                frame(
+                    {
+                        "tool_calls": [
+                            {
+                                "index": index,
+                                "id": c["id"],
+                                "type": "function",
+                                "function": {"name": c["function"]["name"], "arguments": ""},
+                            }
+                        ]
+                    }
+                )
+            )
+            cut = len(args) // 2
+            out.append(
+                frame({"tool_calls": [{"index": index, "function": {"arguments": args[:cut]}}]})
+            )
+            out.append(
+                frame({"tool_calls": [{"index": index, "function": {"arguments": args[cut:]}}]})
+            )
+        out.append(frame({}, "tool_calls" if tool_calls else "stop"))
+        prompt, completion = usage
+        tail = {
+            "id": "chatcmpl-1",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "coder",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "total_tokens": prompt + completion,
+            },
+        }
+        out.append(f"data: {_json.dumps(tail)}\n\n")
+        out.append("data: [DONE]\n\n")
+        return "".join(out)
+
+    # --- /mcp ------------------------------------------------------------------------------
+
+    def _mcp(self, body: dict[str, Any]) -> httpx.Response:
+        method = body.get("method")
+        if "id" not in body:
+            return httpx.Response(202)
+        if method == "initialize":
+            result: dict[str, Any] = {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "matterwave", "version": "test"},
+            }
+        elif method == "tools/list":
+            result = {"tools": self.mcp_tools}
+        elif method == "tools/call":
+            params = body.get("params") or {}
+            self.mcp_called.append((params.get("name"), params.get("arguments") or {}))
+            result = {
+                "content": [{"type": "text", "text": f"ran {params.get('name')}"}],
+                "isError": False,
+            }
+        else:
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": body["id"],
+                    "error": {"code": -32601, "message": "no such method"},
+                },
+            )
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": result})
+
+    # --- what the tests read ------------------------------------------------------------------
+
+    def tool_names(self, index: int = -1) -> list[str]:
+        return [t["function"]["name"] for t in self.requests[index].get("tools") or []]
+
+    def tool_results(self, index: int = -1) -> list[str]:
+        return [m["content"] for m in self.requests[index]["messages"] if m.get("role") == "tool"]

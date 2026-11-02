@@ -4,6 +4,8 @@
     matterwave-tui -p "prompt" [-m M]  one-shot: the answer, then exit
     matterwave-tui --shell -p "..."    one-shot shell assistant: a command, run on y
     cat notes | matterwave-tui         a piped-in prompt is the prompt
+    matterwave-tui code [path]         the coding agent in a folder (the cwd by default)
+    matterwave-tui -p "task" --output-format json   the agent, headless (any agent flag)
     matterwave-tui login [--key [K]]   store a key, or sign in by device code
     matterwave-tui logout [--local]    revoke the stored device key, then forget it
     matterwave-tui config              the config file, and where each setting comes from
@@ -11,6 +13,13 @@
     matterwave-tui completion SHELL    the completion script for bash, zsh, fish or powershell
     matterwave-tui --list-models       the models this account can use
     matterwave-tui --profile work      the settings and the sign-in of one profile
+
+`-p` alone is the chat one-shot it has always been, and `--continue` with
+it sends to the most recent conversation. With `code`, or with any agent
+option (`--output-format`, `--approval-mode`, `--max-turns`,
+`--max-tokens`, `--resume`, `--yolo`, `--trust`, `--sandbox`,
+`--no-store`), it is a headless agent run in the folder instead, and
+`--continue` continues the folder's last run.
 
 stdout carries the answer and nothing else; sign-in prompts and every
 note go to stderr, so `matterwave-tui -p "..." > answer.txt` holds only
@@ -28,10 +37,14 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from matterwave_sdk import __version__ as SDK_VERSION
+from matterwave_sdk import agent as contract
 from matterwave_sdk import frames as fr
 from matterwave_sdk.errors import APIConnectionError, APIError, AuthenticationError
 
 from . import __version__
+from .agent.headless import EXIT_CODES, OUTPUT_FORMATS, run_headless
+from .agent.session import OpenError, SessionOptions, resolve_root
+from .agent.shell import SANDBOX_ENGINES
 from .api import DEFAULT_BASE_URL, Cut, HttpChatAPI, key_prefix
 from .auth import (
     Credential,
@@ -74,6 +87,10 @@ EXIT_HELP = f"""exit status:
   {EXIT_USAGE}  the command line was wrong, or there was nothing to send
   {EXIT_REFUSED}  the platform refused: moderation, budget, plan, rate limit, sign-in
   {EXIT_TRUNCATED}  the answer was cut short; what arrived is on stdout
+
+A headless agent run has its own: 0 done, 1 an error or stopped, 2 a usage
+error, 3 budget, rate limit or plan, 4 a call needing approval the mode
+does not give, 5 the turn or token cap.
 """
 
 
@@ -148,6 +165,100 @@ def _login(base_url: str, key: str | None, entry: str | None = None) -> str:
     return token
 
 
+def _positive(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number") from exc
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return value
+
+
+# The options that make `-p` an agent run. `--continue` is not one: alone
+# with `-p` it is the chat one-shot's, and it continues the folder's last
+# run only once one of these, or `code`, has chosen the agent.
+AGENT_FLAGS = (
+    "output_format",
+    "approval_mode",
+    "max_turns",
+    "max_tokens",
+    "resume",
+    "yolo",
+    "trust",
+    "sandbox",
+    "no_store",
+)
+
+
+def _add_agent_options(parser: argparse.ArgumentParser, *, again: bool) -> None:
+    """The agent's options. `again` is the `code` subcommand's copy, which
+    leaves an option it was not given to the main parser's value; the main
+    parser's `--continue` is the one-shot's, which the agent shares."""
+
+    def default(value: object) -> object:
+        return argparse.SUPPRESS if again else value
+
+    group = parser.add_argument_group("agent mode")
+    group.add_argument(
+        "--output-format",
+        choices=OUTPUT_FORMATS,
+        default=default(None),
+        help="headless agent output (default text)",
+    )
+    group.add_argument(
+        "--approval-mode",
+        choices=contract.MODE_NAMES,
+        default=default(None),
+        help="plan, ask (default), auto-edit; yolo needs --yolo too",
+    )
+    group.add_argument(
+        "--max-turns", type=_positive, default=default(None), help="the run's cap on model calls"
+    )
+    group.add_argument(
+        "--max-tokens", type=_positive, default=default(None), help="the run's cap on tokens"
+    )
+    if again:
+        group.add_argument(
+            "--continue",
+            dest="continue_last",
+            action="store_true",
+            default=default(False),
+            help="continue the last run in this folder",
+        )
+    group.add_argument(
+        "--resume",
+        metavar="ID",
+        default=default(None),
+        help="continue the stored run (conversation) ID",
+    )
+    group.add_argument(
+        "--yolo",
+        action="store_true",
+        default=default(False),
+        help="allow the yolo mode this session (never saved)",
+    )
+    group.add_argument(
+        "--trust",
+        action="store_true",
+        default=default(False),
+        help="trust this folder for this run (its context files and settings)",
+    )
+    group.add_argument(
+        "--sandbox",
+        choices=SANDBOX_ENGINES,
+        default=default(None),
+        help="run commands in a sandbox (default: the settings', else none)",
+    )
+    group.add_argument(
+        "--no-store",
+        dest="no_store",
+        action="store_true",
+        default=default(False),
+        help="do not store the run as a conversation",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="matterwave-tui",
@@ -197,7 +308,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--continue",
         dest="continue_last",
         action="store_true",
-        help="one-shot: send to the most recent conversation instead of a new one",
+        help="one-shot: send to the most recent conversation instead of a new one; "
+        "with the agent, continue the last run in this folder",
     )
     where.add_argument("--conversation", metavar="ID", help="one-shot: send to this conversation")
     where.add_argument(
@@ -223,7 +335,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=f"skip the once-a-day look for a newer release (or {DISABLE_ENV}=1)",
     )
+    _add_agent_options(parser, again=False)
     sub = parser.add_subparsers(dest="command")
+    code = sub.add_parser("code", help="the coding agent in a folder")
+    code.add_argument("path", nargs="?", default=None, help="the workspace root (default: cwd)")
+    code.add_argument("-p", "--prompt", default=argparse.SUPPRESS, help="run headless")
+    code.add_argument("-m", "--model", default=argparse.SUPPRESS)
+    _add_agent_options(code, again=True)
     export = sub.add_parser("export", help="one conversation as Markdown, JSON or HTML")
     export.add_argument("conversation_id", metavar="ID")
     export.add_argument("-f", "--format", choices=sorted(EXPORTERS), default="md")
@@ -352,13 +470,18 @@ def load_settings(args: argparse.Namespace) -> Settings:
     )
 
 
-def _ignored_flags(args: argparse.Namespace, *, oneshot: bool) -> list[str]:
+def _ignored_flags(args: argparse.Namespace, *, oneshot: bool, agent: bool = False) -> list[str]:
     """The flags this command line gives that its command does not use."""
     where = [
         ("--continue", args.continue_last),
         ("--conversation", args.conversation is not None),
         ("--temporary", args.temporary),
     ]
+    if agent:
+        # The agent picks its run with --continue and --resume, and runs
+        # commands through its own shell tool.
+        chat_only = [("--shell", args.shell), *where[1:]]
+        return [flag for flag, given in chat_only if given]
     if args.command is None and not args.list_models:
         # The app: the one-shot's conversation choice means nothing there.
         return [] if oneshot else [flag for flag, given in where if given]
@@ -478,14 +601,36 @@ async def _confirm_and_run(command: str, shell: Shell) -> None:
     _note(f"(exit {status})" if status is not None else "(stopped after thirty seconds)")
 
 
+def agent_options(args: argparse.Namespace, *, interactive: bool) -> SessionOptions:
+    return SessionOptions(
+        root=resolve_root(getattr(args, "path", None)),
+        mode=args.approval_mode,
+        yolo=bool(args.yolo),
+        model=args.model,
+        max_turns=args.max_turns,
+        max_tokens=args.max_tokens,
+        trust=True if args.trust else None,
+        resume=args.resume,
+        continue_last=bool(args.continue_last),
+        sandbox=args.sandbox,
+        store=not args.no_store,
+        interactive=interactive,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "completion":
         sys.stdout.write(script(args.shell_name, parser))
         return EXIT_OK
-    prompt = None if args.command or args.list_models else _oneshot_prompt(args)
-    for flag in _ignored_flags(args, oneshot=prompt is not None):
+    given_agent = [flag for flag in AGENT_FLAGS if getattr(args, flag, None)]
+    if given_agent and args.command != "code" and (args.command or args.prompt is None):
+        parser.error("the agent options need `code` (interactive) or -p (headless)")
+    wants_agent = args.command == "code" or bool(given_agent)
+    reads_prompt = args.command in (None, "code") and not args.list_models
+    prompt = _oneshot_prompt(args) if reads_prompt else None
+    for flag in _ignored_flags(args, oneshot=prompt is not None, agent=wants_agent):
         what = args.command or ("--list-models" if args.list_models else "the app")
         _note(f"{flag} does nothing with {what}; it was ignored.")
     debug_log = _debug_path(args.debug)
@@ -531,7 +676,32 @@ def main(argv: list[str] | None = None) -> int:
                 base_url, credential, args.conversation_id, args.format, args.output
             )
         )
-    if prompt is not None:
+    agent: SessionOptions | None = None
+    if wants_agent:
+        try:
+            agent = agent_options(args, interactive=prompt is None)
+        except OpenError as exc:
+            _note(str(exc))
+            return EXIT_USAGE
+        if prompt is not None:
+            if not prompt:
+                _note("Nothing to send: give -p a prompt or pipe one in.")
+                return EXIT_USAGE
+            try:
+                return asyncio.run(
+                    run_agent_headless(
+                        base_url,
+                        credential,
+                        agent,
+                        prompt,
+                        args.output_format or "text",
+                        debug_log=debug_log,
+                    )
+                )
+            except KeyboardInterrupt:
+                _note("Stopped.")
+                return EXIT_CODES["stopped"]
+    elif prompt is not None:
         if not prompt:
             _note("Nothing to send: give -p a prompt or pipe one in.")
             return EXIT_USAGE
@@ -562,8 +732,26 @@ def main(argv: list[str] | None = None) -> int:
         update_check=not args.no_update_check and not environ.get(DISABLE_ENV),
         show_answer_usage=(settings.get("answer_usage") or "show") not in ("hide", "off"),
         plain=args.plain,
+        agent=agent,
     )
     return EXIT_OK
+
+
+async def run_agent_headless(
+    base_url: str,
+    credential: Credential,
+    options: SessionOptions,
+    prompt: str,
+    output_format: str,
+    *,
+    debug_log: Path | None = None,
+) -> int:
+    """`-p` in agent mode: one run in the folder, then exit with its code."""
+    api = HttpChatAPI(base_url=base_url, token=credential.token, debug_log=debug_log)
+    try:
+        return await run_headless(api, options, prompt, output_format=output_format)
+    finally:
+        await api.aclose()
 
 
 def _debug_path(given: str | None) -> Path | None:
@@ -592,6 +780,7 @@ def run_app(
     update_check: bool = False,
     show_answer_usage: bool = True,
     plain: bool = False,
+    agent: SessionOptions | None = None,
 ) -> None:
     from .app import MatterWaveApp
 
@@ -639,6 +828,7 @@ def run_app(
         update_check=update_check,
         show_answer_usage=show_answer_usage,
         plain=plain,
+        agent=agent,
     )
     holder["app"] = app
     app.run()

@@ -16,12 +16,231 @@ uv tool install "matterwave-tui[images] @ git+https://github.com/MatterWaveAI/tu
 
 From a checkout of this repo: `uv sync && uv run matterwave-tui`.
 
+Until agent contract 1.2 is on the SDK's repository, the SDK comes from a `python-sdk` checkout
+beside this one instead of the pinned commit (see [Development](#development)), so install from a
+checkout with that SDK beside it.
+
 Two extras add what a terminal may not need:
 
 | Extra | Adds |
 |---|---|
 | `images` | Pillow: sixel images, and JPEG/GIF/WebP on the kitty protocol (PNG needs nothing) |
 | `dictation` | sounddevice: dictation from the microphone (without it, dictation transcribes a file) |
+
+## Coding agent: `matterwave-tui code`
+
+```sh
+matterwave-tui code              # the agent in the current folder
+matterwave-tui code ~/src/app    # or in another one; that folder is the workspace root
+```
+
+The agent reads and searches the folder, edits files and runs commands, with your approval. It
+runs its own loop against `/v1/chat/completions`: the server passes the tools to the model,
+returns the calls it makes, and never runs one. Every tool runs here, as you. The run is stored
+as a conversation (`metadata.conversation_id`), so it opens in the web app with its tool calls and
+results; `--no-store` keeps it out.
+
+**Tools.** `read_file`, `list_dir`, `glob`, `grep`, `edit`, `write_file` and `run_shell`, as
+the SDK's agent contract defines them (`matterwave_sdk.agent`, contract 1.2.0, shared with the
+VS Code extension and the desktop app). The read tools are the SDK's own, so they read, search
+and word their results exactly as the other clients do; the TUI's tests run the contract's
+conformance cases through them. Every path is resolved and must stay under the root after links
+are followed: `..`, an absolute path outside the root, a link out of it and a loop of links are
+refused before anything happens. `.env*`, `*.pem`, `id_*`, `.git/` and anything listed in
+`.matterwaveignore` are refused for reading as well as writing, in any case (`.ENV`, `ID_RSA`). On
+every platform, a name Windows would read as another one is refused too: a `:` stream
+(`key.pem::$DATA`, `C:x`), a name ending in a dot or a space (`.git `), a device name (`CON`,
+`NUL.txt`, `COM1`) and a `\\?\`, `\\.\` or network path. Search (`glob`, `grep`, `list_dir`) also
+skips what the `.gitignore` and `.matterwaveignore` files from the root down ignore, ignoring case;
+`list_dir` still shows the protected files below. A `glob` pattern without a `/` matches file names
+at any depth (`*.ts`); one with a `/` matches the path under the search's `path`. `read_file` reads
+files up to 16 MB, a window of 2,000 lines or 256 KB at a time, and a line longer than that is
+shown cut; `grep` skips files over 4 MB and cuts a matching line at 400 characters, and runs in a
+Python process of its own that is stopped after 30 seconds, so a pattern that backtracks without end
+cannot freeze the TUI; a pipe, socket or device is not opened; `edit` / `write_file` work on files
+up to 8 MB. Confinement is not a sandbox: `run_shell` can reach anything you can, which is why
+commands ask.
+
+**Approval modes.** The status line always shows the mode. `Shift+Tab` cycles it, and
+`/approval-mode <mode>` sets it (`--save` keeps it as your default).
+
+| Mode | Reads | File changes | Commands, web fetch | MCP tools |
+|---|---|---|---|---|
+| `plan` | yes | not offered | not offered | read-only ones approved, others not offered |
+| `ask` (default) | yes | each shown as a diff and approved | each approved | each approved |
+| `auto-edit` | yes | applied | each approved | each approved |
+| `yolo` | yes | applied | run | run |
+
+These are the contract's decisions (`agent.allowed`): the TUI's own tools are gated by kind, so
+`web_fetch` is a network tool, an MCP server's tool an MCP one, and `todo_write`, `agent` and
+`exit_plan_mode` steer the run and are allowed in every mode. Plan mode never runs silently what
+`ask` mode would ask about. `yolo` exists only when the session starts with `--yolo`, and it is
+never saved as a default (a `yolo` default in the settings is ignored). When no sandbox is on,
+`--yolo` warns.
+
+A change to a protected file is asked about in every mode, `yolo` included, since it outlasts
+the session: `.matterwaveignore`, `.matterwave/`, `MATTERWAVE.md`, `MATTERWAVE.local.md` and
+`AGENTS.md`, the shell startup files (`.bashrc`, `.bash_profile`, `.profile`, `.zshrc`,
+`.zprofile`), `.ssh/` and `.aws/`, at any depth and in any case, and `.config/matterwave` (the
+contract's list); and your own MatterWave config and state folders wherever they are set. So is
+every change when the workspace is your home folder or a folder above it, where the startup
+folder or another profile would run things later without a command being approved. A headless
+run refuses such a change, whatever `--approval-mode` says.
+
+Each change in `ask` mode opens its unified diff: `y` applies it and `n` rejects it, leaving the
+file byte for byte as it was; the model is told you said no, as an ordinary result, and to change
+course. Overwriting a binary file shows every line of the text replacing it.
+If the file changes, or its path comes to lead somewhere else (a folder swapped for a link), while
+the diff is up, nothing is written and the model is told to read it again. A command shows in
+full, never shortened; in `auto-edit` its approval also names the files changed without asking
+since your last approval, which the command may run (a `conftest.py`, a build script). A dialog
+takes no answer in its first half second, so keys typed for something else cannot answer it.
+Control characters in a diff, a command, a file, a command's output or the model's answer are
+spelled out (`\x1b`), as are bidi overrides and, in a dialog, zero-width characters: nothing the
+agent shows can move the cursor, redraw a dialog or write to the clipboard. Only `http` and
+`https` links in its answers open on a click; a `file:` link to a script would run it. `Esc` stops a run:
+the stream closes and a running command is killed with everything it started, what it detached
+included (`cmd /c start /b`, `Start-Process`, `setsid`, `nohup ... &`), and the model gets the
+output so far under "Stopped by the user". On Windows the command starts suspended and runs only
+once it is in a job object that kills its members when closed, so nothing it starts can get out
+first; if the TUI itself dies, its processes go too. On Linux it runs under a small keeper that
+is a child subreaper: a process it orphans comes back to the keeper instead of to init, and the
+keeper ends every descendant, whatever its session or process group, on Stop, at the command's
+end and when the TUI dies. macOS has no subreaper: the command's process group and every process
+still below it are ended, but a daemon whose parent has already exited belongs to launchd by then
+and is not found. When a command exits, what it left running ends with it at once, so a
+background process holding its output does not keep the call open until the timeout. A program
+it hands to another service (a scheduled task, WMI, a system service, `launchctl`) is not its
+child and outlives it on every platform; only the sandbox contains that.
+
+**Limits.** Each run (one prompt) has a cap on model calls (`--max-turns`, default 40) and on
+tokens (`--max-tokens`, default 400,000). A subagent's calls count against its parent's. A 402
+or 429 from `/v1` ends the run with the same copy the chat shows.
+
+**Unavailable.** The agent stays off, with the reason, when your organisation has switched local
+agent tools off (`/api/me` `local_agent_tools`) or the model cannot call tools (`supports_tools`
+on `/api/models`; `/model` picks another). A server that sends neither field allows it.
+
+**Context.** `MATTERWAVE.md` in the config folder (for every project), then `MATTERWAVE.md` and
+`AGENTS.md` at the root, then your own `MATTERWAVE.local.md` (keep it in `.gitignore`) are read as
+instructions in that order, so the more personal file wins, with your account's custom
+instructions on top. A repository can carry instructions, so the root's files and `.matterwave/`
+settings load only in a folder you trust: the first time a folder has any, you are asked, and the
+answer is remembered (`/trust` changes it). `/init` has the agent draft a `MATTERWAVE.md`. `@path`
+in a prompt attaches that file or folder, under the same confinement. The project's context
+files, commands and subagents are read under it as well, so a `MATTERWAVE.md` that is a link to a
+file outside the root is not loaded.
+
+**Checkpoints.** Before each applied change, the touched files' bytes go into a shadow git
+repository in the state folder, outside the project, one per workspace and readable by you alone.
+`/restore` lists the checkpoints and puts the files back as they were before the one you pick,
+each path confined again as a write; the project's own `.git` is never touched.
+
+**Commands** (in the composer):
+
+| Command | Does |
+|---|---|
+| `/help` | the commands and keys |
+| `/model [id]` | pick the agent's model |
+| `/approval-mode [mode] [--save]` | show or set the mode |
+| `/compact` | fold old tool output, then summarise the run (stored runs) |
+| `/context` | tokens in use, context files, tools offered, the task list |
+| `/restore [id]` | list checkpoints, or restore one |
+| `/init` | draft a `MATTERWAVE.md` |
+| `/resume [id]` | list this folder's stored runs, or continue one |
+| `/trust`, `/mcp`, `/agents`, `/clear`, `/chat` | trust the folder, list MCP tools, list subagents, start over, back to the chat |
+
+A Markdown file in `commands/` of the config folder, or `.matterwave/commands/` of a trusted
+project, is a custom command: `git/review.md` is `/git:review`, and `$ARGUMENTS` in it is replaced
+by what follows the name.
+
+When the history fills the model's context window, old tool output is folded first, without a
+model call. In the middle of a run the oldest rounds are then left out of the prompt (the stored
+conversation keeps them); before the next prompt, a stored run is summarised by the
+conversation's compaction, and the summary rides in the system prompt so the stored turns stay
+yours. A summary written mid-round would put the round's results on a branch of the conversation.
+
+### Headless: `-p` in agent mode
+
+`-p` alone is the chat one-shot above (and `--continue` with it the chat's most recent
+conversation). With `code`, or with any agent option, it is one agent run:
+
+```sh
+matterwave-tui -p "add a test for parse_args, then run the tests" --approval-mode auto-edit
+matterwave-tui code ./repo -p "why does CI fail?" --output-format json
+matterwave-tui code -p "and the other module?" --continue   # the last run in this folder
+matterwave-tui -p "carry on" --resume <conversation-id>     # a stored run, tool rounds included
+```
+
+`--output-format text` (the answer on stdout, tool lines on stderr), `json` (one document: the
+result, usage, `is_error`, the status and its message) or `stream-json` (one JSON event per line,
+then the same result). A headless run never prompts: a call that the mode would ask about is
+refused and the run ends. The exit code says how it ended:
+
+| Code | Meaning |
+|---|---|
+| 0 | done |
+| 1 | an error, the agent unavailable, or stopped |
+| 2 | a usage error (a bad option, `yolo` without `--yolo`, a run that is not there) |
+| 3 | budget, rate limit or plan (402 / 429) |
+| 4 | a call needed approval the mode does not give |
+| 5 | the turn or token cap |
+
+In CI, run it in a container, keep `--max-turns` and `--max-tokens` low, and use `yolo` (with
+`--yolo`) only there. `--trust` trusts the folder for one run without remembering it.
+
+### Settings
+
+`settings.json` in the config folder (`MATTERWAVE_CONFIG_DIR`, else `XDG_CONFIG_HOME`, else
+`~/.config`, then `matterwave/`), and `.matterwave/settings.json` in a trusted project, on top:
+
+```json
+{
+  "agent": {"default_mode": "ask", "model": "glm-4.6", "max_turns": 40, "max_tokens": 400000},
+  "mcpServers": {
+    "docs": {"command": "npx", "args": ["-y", "some-mcp-server"], "tools": ["search"]},
+    "tracker": {"url": "https://mcp.example.com/mcp", "headers": {"Authorization": "Bearer ${TRACKER_TOKEN}"},
+                "trust": false}
+  },
+  "matterwaveMcp": {"enabled": true},
+  "sandbox": {"engine": "podman", "image": "docker.io/library/python:3.12-slim-bookworm", "network": false}
+}
+```
+
+- **MCP servers**: stdio (`command`, `args`, `env`) or Streamable HTTP (`url`, `headers`;
+  `${VAR}` is read from the environment). `tools` is the allow-list; a tool outside it is never
+  offered to the model. Every MCP call asks in `ask` and `auto-edit` mode and runs in `yolo`. A
+  tool marks itself read-only (`readOnlyHint`), but only a trusted server's word is taken
+  (`"trust": true`, and MatterWave's own): such a tool is offered in `plan`, where it asks too,
+  and every other tool is not offered there.
+  MatterWave's own `/mcp` is pre-wired with your credential (`matterwaveMcp`). Tools are offered
+  as `mcp__<server>__<tool>`, so none can stand in for a built-in; two that come out under one
+  name are both left out, with a notice. An answer over 16 MB is refused, and `timeout_s`
+  (default 60) bounds each request as a whole, so a server that trickles cannot hold a run.
+- **Subagents**: Markdown files in `agents/` of the config folder or `.matterwave/agents/` of a
+  trusted project, with `name`, `description`, `tools` (the allow-list) and `max_turns` in the
+  front matter and the prompt as the body. The model hands one a task through the `agent` tool;
+  it runs under the same mode, approvals and caps.
+- **Sandbox**: off by default. `podman` or `docker` run each command in a container that sees
+  only the root (mounted at `/workspace`), with a read-only filesystem elsewhere and no network
+  unless `"network": true`. `bwrap` (Linux) and `seatbelt` (macOS) keep writes to the root and
+  cut the network the same way, but the rest of your files stay readable to the command (a key
+  it copies into the root is then one `read_file` from the model), so only a container keeps
+  your home folder out of reach. The root's `.git` and `.matterwave` stay read-only inside all
+  of them. Stop removes the container. `--sandbox` picks one for a session.
+- **Web fetch** (`web_fetch`) and the **task list** (`todo_write`) are on unless
+  `"agent": {"web_fetch": false}` / `{"todo": false}`. A fetch is asked for in `ask` and
+  `auto-edit` mode, never sends your MatterWave credential and does not follow a redirect (the
+  model is told where it leads and asks again). Its approval names the host the request really
+  goes to when the URL spells it otherwise (an international look-alike, a `user@` part), and a
+  fetch stops after 60 s however slowly the server sends.
+
+**What leaves your machine.** Every file the agent reads, every command's output and every page
+it fetches is sent to MatterWave and to the model behind it, and is metered. The deny list is a
+floor, not a guarantee: keep secrets out of the workspace, or list them in `.matterwaveignore`.
+`MATTERWAVE_API_KEY` is taken out of a command's environment, but a command runs as you and can
+read what you can, the system keyring (where the TUI keeps your credential) included. The sandbox
+is what keeps a command away from them.
 
 ## Sign in
 
@@ -67,6 +286,7 @@ The rest of the command line:
 | Command | Does |
 |---|---|
 | `matterwave-tui --version` | the version, and the SDK's |
+| `matterwave-tui code [path]` | the coding agent in a folder (see [Coding agent](#coding-agent-matterwave-tui-code)) |
 | `matterwave-tui --list-models` | the models this account can use, the default marked |
 | `matterwave-tui export ID [-f md\|json\|html] [-o FILE]` | one conversation's active path to stdout, or to a file that is not there yet |
 | `matterwave-tui completion bash\|zsh\|fish\|powershell` | the completion script, to source from the shell's profile |
@@ -170,6 +390,7 @@ among them):
 - **Export this account's data…** — the whole account as one JSON file, saved beside the terminal
 - **Dictate audio…**
 - **Prompt roles…**
+- **Coding agent in this folder…** — the agent screen on the working directory, as `matterwave-tui code`
 
 Typing while an answer streams queues the prompt; it sends itself when the answer finishes, and
 `Esc` stops the stream and puts it back in the composer. A leading `/` in the composer is a
@@ -254,7 +475,8 @@ palette is remembered for the next start, unless the file names one.
 | `MATTERWAVE_PROFILE` | the profile, when `--profile` is not given |
 | `MATTERWAVE_NO_UPDATE_CHECK` | `1` skips the once-a-day look for a newer release |
 | `NO_COLOR` | any value: the app draws without colour (`--plain` sets it) |
-| `MATTERWAVE_STATE_DIR` | where the dismissed announcements and the prompt roles are kept, as `<dir>/matterwave-tui`; else the platform's state directory: `$XDG_STATE_HOME` or `~/.local/state` on Linux, `%LOCALAPPDATA%` on Windows, `~/Library/Application Support` on macOS |
+| `MATTERWAVE_CONFIG_DIR` | agent mode's config folder, as `<dir>/matterwave` (its `settings.json`, `commands/` and `agents/`); else `$XDG_CONFIG_HOME`, else `~/.config` |
+| `MATTERWAVE_STATE_DIR` | where the dismissed announcements, the prompt roles and agent mode's trusted folders, runs and checkpoints are kept, as `<dir>/matterwave-tui`; else the platform's state directory: `$XDG_STATE_HOME` or `~/.local/state` on Linux, `%LOCALAPPDATA%` on Windows, `~/Library/Application Support` on macOS |
 
 ## Development
 
@@ -264,7 +486,17 @@ uv run ruff check . && uv run ruff format --check . && uv run mypy --strict && u
 pre-commit install   # once per clone: gitleaks refuses a commit that adds a secret
 ```
 
-CI runs the same checks, the suite on Linux and Windows, and a gitleaks scan of the whole history.
+`tests/fake_api.py` holds `FakeAPI` (the chat, in memory) and `FakeV1`, a scripted `/v1` under
+the real adapter for the agent's tests. `UPDATE_GOLDEN=1` rewrites the headless golden files in
+`tests/golden/`.
+
+Agent mode needs the SDK's `matterwave_sdk.agent` (the tool contract, confinement, the edit rule,
+the diff and the agent prompt) at contract 1.2. Until that is on the SDK's repository, `uv sync`
+resolves the SDK from the sibling checkout (`../python-sdk`) through `[tool.uv.sources]`, and
+`uv.lock` records it; with pip, install that checkout first (`pip install -e ../python-sdk`).
+
+CI runs the same checks, the suite on Linux, Windows and macOS (the agent's shell tool kills
+process trees differently on each), and a gitleaks scan of the whole history.
 
 The wire is the Python SDK's: `client.conversations.*` with its typed frames and its stream
 resume, and the typed resources for the rest (models, attachments, shares, library, notifications,

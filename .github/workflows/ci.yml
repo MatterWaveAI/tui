@@ -18,15 +18,29 @@ jobs:
   # What a developer runs before a commit: lint, format and types, once.
   checks:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tui
     steps:
+      # Agent mode needs the SDK's agent contract 1.2, which uv takes from
+      # a python-sdk checkout beside this one (pyproject's
+      # [tool.uv.sources]) until it is on the SDK's repository at a commit
+      # the lockfile can pin; the two checkouts sit side by side here too.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: tui
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: MatterWaveAI/python-sdk
+          ref: develop
+          path: python-sdk
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           python-version: "3.12"
           enable-cache: true
-      # The lockfile is the install: matterwave-sdk resolves from its git
-      # source (pyproject's [tool.uv.sources]), which pip would not read.
-      # The images extra is in, so mypy checks the sixel encoder against
+      # The lockfile is the install: matterwave-sdk resolves from its source
+      # (pyproject's [tool.uv.sources]), which pip would not read. The
+      # images extra is in, so mypy checks the sixel encoder against
       # Pillow's own types.
       - name: Install
         run: uv sync --locked --extra dev --extra images
@@ -39,17 +53,28 @@ jobs:
       - name: Types
         run: uv run mypy --strict
 
-  # The suite on every Python the package supports, on Linux and on
-  # Windows, which is a terminal the TUI ships for.
+  # The suite on every Python the package supports, on Linux, Windows and
+  # macOS: Windows is a terminal the TUI ships for, and the agent's shell
+  # tool kills process trees differently on each of the three.
   test:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
         python: ["3.11", "3.12", "3.13", "3.14"]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: tui
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: tui
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: MatterWaveAI/python-sdk
+          ref: develop
+          path: python-sdk
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           python-version: ${{ matrix.python }}

@@ -477,6 +477,9 @@ palette is remembered for the next start, unless the file names one.
 | `NO_COLOR` | any value: the app draws without colour (`--plain` sets it) |
 | `MATTERWAVE_CONFIG_DIR` | agent mode's config folder, as `<dir>/matterwave` (its `settings.json`, `commands/` and `agents/`); else `$XDG_CONFIG_HOME`, else `~/.config` |
 | `MATTERWAVE_STATE_DIR` | where the dismissed announcements, the prompt roles and agent mode's trusted folders, runs and checkpoints are kept, as `<dir>/matterwave-tui`; else the platform's state directory: `$XDG_STATE_HOME` or `~/.local/state` on Linux, `%LOCALAPPDATA%` on Windows, `~/Library/Application Support` on macOS |
+| `MATTERWAVE_PI_BIN` | override path to the `pi` executable used by `matterwave-tui pi` and `PiRpcBridge` |
+| `MATTERWAVE_PRESET_ID` | preset identifier passed to `pi` when launching with a MatterWave preset |
+| `MATTERWAVE_TEMPORARY` | `1` when `pi` is launched in a temporary MatterWave session |
 
 ## Development
 

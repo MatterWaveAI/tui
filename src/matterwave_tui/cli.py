@@ -32,6 +32,7 @@ import argparse
 import asyncio
 import getpass
 import os
+import subprocess
 import sys
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -62,6 +63,7 @@ from .config import Settings, config_path, keyring_entry, load_config, resolve
 from .export import EXPORTERS
 from .failures import Kind, classify
 from .paths import state_dir
+from .pi_runner import PiRpcBridge, build_pi_argv, build_pi_launch_env, find_pi_binary
 from .shell import Shell, detect_shell, run_shell_command, shell_command, shell_request
 from .thread import Thread
 from .update import DISABLE_ENV
@@ -342,6 +344,18 @@ def build_parser() -> argparse.ArgumentParser:
     code.add_argument("-p", "--prompt", default=argparse.SUPPRESS, help="run headless")
     code.add_argument("-m", "--model", default=argparse.SUPPRESS)
     _add_agent_options(code, again=True)
+    pi = sub.add_parser("pi", help="launch the Pi 1.0 coding agent with MatterWave credentials")
+    pi.add_argument(
+        "--mode",
+        choices=("interactive", "rpc"),
+        default="interactive",
+        help="launch interactive pi or pi --mode rpc",
+    )
+    pi.add_argument(
+        "-p", "--prompt", default=argparse.SUPPRESS, help="run headless via pi --mode rpc"
+    )
+    pi.add_argument("-m", "--model", default=argparse.SUPPRESS)
+    pi.add_argument("--preset", default=None, help="MatterWave preset ID for pi")
     export = sub.add_parser("export", help="one conversation as Markdown, JSON or HTML")
     export.add_argument("conversation_id", metavar="ID")
     export.add_argument("-f", "--format", choices=sorted(EXPORTERS), default="md")
@@ -482,6 +496,16 @@ def _ignored_flags(args: argparse.Namespace, *, oneshot: bool, agent: bool = Fal
         # commands through its own shell tool.
         chat_only = [("--shell", args.shell), *where[1:]]
         return [flag for flag, given in chat_only if given]
+    if args.command == "pi":
+        return [
+            flag
+            for flag, given in (
+                ("--shell", args.shell),
+                ("--continue", args.continue_last),
+                ("--conversation", args.conversation is not None),
+            )
+            if given
+        ]
     if args.command is None and not args.list_models:
         # The app: the one-shot's conversation choice means nothing there.
         return [] if oneshot else [flag for flag, given in where if given]
@@ -628,7 +652,7 @@ def main(argv: list[str] | None = None) -> int:
     if given_agent and args.command != "code" and (args.command or args.prompt is None):
         parser.error("the agent options need `code` (interactive) or -p (headless)")
     wants_agent = args.command == "code" or bool(given_agent)
-    reads_prompt = args.command in (None, "code") and not args.list_models
+    reads_prompt = args.command in (None, "code", "pi") and not args.list_models
     prompt = _oneshot_prompt(args) if reads_prompt else None
     for flag in _ignored_flags(args, oneshot=prompt is not None, agent=wants_agent):
         what = args.command or ("--list-models" if args.list_models else "the app")
@@ -675,6 +699,20 @@ def main(argv: list[str] | None = None) -> int:
             export_conversation(
                 base_url, credential, args.conversation_id, args.format, args.output
             )
+        )
+    if args.command == "pi":
+        if args.prompt is not None and not prompt:
+            _note("Nothing to send: give -p a prompt or pipe one in.")
+            return EXIT_USAGE
+        return run_pi_command(
+            base_url,
+            credential,
+            mode=getattr(args, "mode", "interactive"),
+            model=model,
+            preset_id=getattr(args, "preset", None),
+            temporary=bool(args.temporary),
+            prompt=prompt or None,
+            environ=environ,
         )
     agent: SessionOptions | None = None
     if wants_agent:
@@ -752,6 +790,63 @@ async def run_agent_headless(
         return await run_headless(api, options, prompt, output_format=output_format)
     finally:
         await api.aclose()
+
+
+async def _run_pi_rpc_oneshot(
+    argv: list[str],
+    env: Mapping[str, str],
+    prompt: str,
+) -> int:
+    wrote = False
+    async with PiRpcBridge(argv, env=env) as bridge:
+        async for event in bridge.prompt(prompt):
+            if event.type == "text_delta" and event.text:
+                sys.stdout.write(event.text)
+                sys.stdout.flush()
+                wrote = True
+            elif event.type == "error":
+                if wrote:
+                    sys.stdout.write("\n")
+                _note(f"error: {event.error or 'pi rpc error'}")
+                return EXIT_ERROR
+    if wrote:
+        sys.stdout.write("\n")
+    return EXIT_OK
+
+
+def run_pi_command(
+    base_url: str,
+    credential: Credential,
+    *,
+    mode: str = "interactive",
+    model: str | None = None,
+    preset_id: str | None = None,
+    temporary: bool = False,
+    prompt: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> int:
+    """Launch Pi 1.0 (`pi` or `pi --mode rpc`) pre-configured for MatterWave."""
+    pi_bin = find_pi_binary(environ)
+    if pi_bin is None:
+        _note("pi binary not found on PATH (set MATTERWAVE_PI_BIN or install pi).")
+        return EXIT_ERROR
+    env = build_pi_launch_env(
+        credential.token,
+        base_url,
+        preset_id=preset_id,
+        model=model,
+        temporary=temporary,
+        base_env=environ,
+    )
+    effective_mode = "rpc" if prompt is not None else mode
+    argv = build_pi_argv(pi_bin, mode=effective_mode, model=model)
+    if prompt is not None:
+        if not prompt:
+            _note("Nothing to send: give -p a prompt or pipe one in.")
+            return EXIT_USAGE
+        return asyncio.run(_run_pi_rpc_oneshot(argv, env, prompt))
+    completed = subprocess.run(argv, env=env, check=False)  # noqa: S603
+    return int(completed.returncode)
 
 
 def _debug_path(given: str | None) -> Path | None:

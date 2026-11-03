@@ -93,8 +93,9 @@ def capture_notify(app: MatterWaveApp) -> list[str]:
 
 async def settle(app: MatterWaveApp, pilot) -> None:
     await pilot.pause()
-    await app.workers.wait_for_complete()
-    await pilot.pause()
+    while list(app.workers):
+        await app.workers.wait_for_complete()
+        await pilot.pause()
 
 
 def http_api(handler, **kwargs) -> HttpChatAPI:
@@ -119,6 +120,7 @@ def json_routes(request: httpx.Request) -> httpx.Response | None:
         return httpx.Response(404, json={"detail": "Not Found"})
     if path in (
         "/api/me/notifications",
+        "/api/me/preferences",
         "/api/announcements",
         "/api/budget",
         "/api/library",
@@ -566,6 +568,30 @@ async def test_the_picked_model_is_checked_then_kept_on_the_conversation():
         await pilot.press("h", "i", "ctrl+s")
         await settle(app, pilot)
         assert api.sent == [("c1", "hi", "other-7b")]
+
+
+@pytest.mark.asyncio
+async def test_default_model_preference_syncs_on_startup_and_when_picked():
+    api = FakeAPI()
+    api.preferences_state["default_model"] = "other-7b"
+    app = MatterWaveApp(api)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert app.default_model == "other-7b"
+        assert app.model == "other-7b"
+        assert "model other-7b" in status(app)
+
+        app.apply_model("lab-x")
+        await settle(app, pilot)
+        assert app.model == "lab-x"
+        assert api.preferences_puts[-1]["default_model"] == "lab-x"
+        assert api.preferences_state["default_model"] == "lab-x"
+
+    # An explicit --model override takes precedence over the saved preference.
+    overridden = MatterWaveApp(api, model="grt-nano")
+    async with overridden.run_test() as pilot:
+        await settle(overridden, pilot)
+        assert overridden.model == "grt-nano"
 
 
 @pytest.mark.asyncio

@@ -18,8 +18,9 @@ from .fake_api import FakeAPI
 
 async def settle(app: MatterWaveApp, pilot) -> None:
     await pilot.pause()
-    await app.workers.wait_for_complete()
-    await pilot.pause()
+    while list(app.workers):
+        await app.workers.wait_for_complete()
+        await pilot.pause()
 
 
 def test_the_editor_is_visual_then_editor_then_the_platforms_own(monkeypatch):

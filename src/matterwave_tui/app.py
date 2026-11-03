@@ -588,6 +588,7 @@ class MatterWaveApp(App[None]):
         # `-m` at launch: the model for every turn, whatever a conversation
         # was last on, until the picker chooses another.
         self.model_override = model
+        self.preferences: dict[str, Any] = {}
         # The org's live presets (GET /api/org/presets), the preset chosen
         # before a conversation exists (or on the open conversation), and a
         # deleted preset the open conversation is still on.
@@ -1148,6 +1149,7 @@ class MatterWaveApp(App[None]):
                 severity="warning",
             )
             self.model = self.model_override = None
+        pref_model = await self.load_preferences()
         await self.load_presets()
         await self.refresh_conversations()
         self.refresh_account_lines()
@@ -1155,7 +1157,29 @@ class MatterWaveApp(App[None]):
         self.load_library()
         if self.conversations:
             await self.open_conversation(self.conversations[0].id)
+        if pref_model and not self.model_override:
+            self.model = pref_model
         self.render_status()
+
+    async def load_preferences(self) -> str | None:
+        try:
+            prefs = await self.api.preferences()
+        except Exception:
+            return None
+        if not isinstance(prefs, dict):
+            return None
+        self.preferences = dict(prefs)
+        pref_model = prefs.get("default_model")
+        if (
+            isinstance(pref_model, str)
+            and pref_model
+            and (not self.models_list or self.model_allowed(pref_model))
+        ):
+            self.default_model = pref_model
+            if not self.model_override:
+                self.model = pref_model
+            return pref_model
+        return None
 
     async def load_models(self) -> bool:
         try:
@@ -1641,8 +1665,22 @@ class MatterWaveApp(App[None]):
                 return
             self.conversation = replace(self.conversation, default_model=updated.default_model)
         self.model = model_id
+        self.default_model = model_id
         self.model_override = None
         self.render_status()
+        await self._sync_default_model_preference(model_id)
+
+    async def _sync_default_model_preference(self, model_id: str) -> None:
+        """Best-effort persist the picked default model to `/api/me/preferences`."""
+        with contextlib.suppress(Exception):
+            try:
+                current = await self.api.preferences()
+            except Exception:
+                current = self.preferences
+            prefs = dict(current) if isinstance(current, dict) else {}
+            prefs["default_model"] = model_id
+            saved = await self.api.set_preferences(prefs)
+            self.preferences = dict(saved) if isinstance(saved, dict) else prefs
 
     @work(group="action")
     async def action_pick_preset(self) -> None:
@@ -2516,12 +2554,15 @@ class MatterWaveApp(App[None]):
         self.editing = None
         self.live = None
         await self.render_thread()
+        pref_model = await self.load_preferences()
         await self.load_presets()
         await self.refresh_conversations()
         self.refresh_account_lines()
         self.load_announcements()
         if self.conversations:
             await self.open_conversation(self.conversations[0].id)
+        if pref_model and not self.model_override:
+            self.model = pref_model
         self.render_status()
 
     # --- the person's own account ------------------------------------------------------
@@ -2614,13 +2655,14 @@ class MatterWaveApp(App[None]):
         reads it; the server refuses what it would not keep (a malformed
         locale, receipts turned off), and that refusal is what shows."""
         try:
-            await self.api.set_preferences(preferences)
+            saved = await self.api.set_preferences(preferences)
         except APIError as exc:
             self.notify(exc.message or "The preferences were not saved.", severity="warning")
             return None
         except Exception as exc:
             self.fail_from_exception(exc)
             return None
+        self.preferences = dict(saved) if isinstance(saved, dict) else dict(preferences)
         self.notify("Preferences saved.")
         return await self._after_account_write()
 

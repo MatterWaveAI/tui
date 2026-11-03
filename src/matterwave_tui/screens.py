@@ -1279,7 +1279,10 @@ class Notifications(ModalScreen[None]):
             yield OptionList(*self._options(), id="notification-rows")
 
     def on_mount(self) -> None:
-        self.query_one("#notification-rows", OptionList).focus()
+        option_list = self.query_one("#notification-rows", OptionList)
+        if option_list.option_count and option_list.highlighted is None:
+            option_list.highlighted = 0
+        option_list.focus()
 
     @staticmethod
     def _one_line(text: str, limit: int = 100) -> str:
@@ -1326,9 +1329,11 @@ class Notifications(ModalScreen[None]):
     @work(exclusive=True)
     async def action_read(self) -> None:
         option_list = self.query_one("#notification-rows", OptionList)
-        index = option_list.highlighted
         slice_rows = self._slice()
-        if index is None or index >= len(slice_rows):
+        if not slice_rows:
+            return
+        index = option_list.highlighted if option_list.highlighted is not None else 0
+        if index >= len(slice_rows):
             return
         notification_id = str(slice_rows[index].get("id") or "")
         if not notification_id:

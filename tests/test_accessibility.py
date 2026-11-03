@@ -17,8 +17,9 @@ from .fake_api import FakeAPI, announcement, conversation, happy_script, notific
 
 async def settle(app: MatterWaveApp, pilot) -> None:
     await pilot.pause()
-    await app.workers.wait_for_complete()
-    await pilot.pause()
+    while list(app.workers):
+        await app.workers.wait_for_complete()
+        await pilot.pause()
 
 
 def test_each_mark_has_its_word_and_plain_has_only_the_word():

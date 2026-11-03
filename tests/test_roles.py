@@ -31,8 +31,9 @@ def role_file(state_dir: Path) -> Path:
 
 async def settle(app: MatterWaveApp, pilot) -> None:
     await pilot.pause()
-    await app.workers.wait_for_complete()
-    await pilot.pause()
+    while list(app.workers):
+        await app.workers.wait_for_complete()
+        await pilot.pause()
 
 
 def type_command(app: MatterWaveApp, pilot, command: str) -> None:

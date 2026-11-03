@@ -16,8 +16,9 @@ from .fake_api import FakeAPI, happy_script, message
 
 async def settle(app: MatterWaveApp, pilot) -> None:
     await pilot.pause()
-    await app.workers.wait_for_complete()
-    await pilot.pause()
+    while list(app.workers):
+        await app.workers.wait_for_complete()
+        await pilot.pause()
 
 
 def send_and_settle(app: MatterWaveApp, pilot, prompt: str = "hi") -> None:

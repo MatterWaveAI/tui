@@ -16,8 +16,9 @@ from .fake_api import FakeAPI, conversation, happy_script
 
 async def settle(app: MatterWaveApp, pilot) -> None:
     await pilot.pause()
-    await app.workers.wait_for_complete()
-    await pilot.pause()
+    while list(app.workers):
+        await app.workers.wait_for_complete()
+        await pilot.pause()
 
 
 def status(app: MatterWaveApp) -> str:

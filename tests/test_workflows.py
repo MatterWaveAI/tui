@@ -56,10 +56,22 @@ def test_ci_runs_on_develop_and_main_and_on_pull_requests_into_them():
 
 def test_a_tag_publishes_only_its_own_version_with_notes_and_an_sbom():
     publish = read("publish-pypi.yml")
+    assert "git fetch origin main" in publish
+    assert 'git merge-base --is-ancestor "$GITHUB_SHA" origin/main' in publish
     assert 'python scripts/release.py check-tag "$TAG"' in publish
     assert "--format cyclonedx1.5" in publish
     assert "python scripts/release.py notes > notes.md" in publish
     assert "gh release create" in publish and "release/sbom.cdx.json" in publish
+
+
+def test_releasing_guide_documents_branch_merge_version_changelog_and_tag():
+    releasing = (WORKFLOWS.parents[1] / "RELEASING.md").read_text(encoding="utf-8")
+    assert "develop" in releasing and "main" in releasing
+    assert "pyproject.toml" in releasing
+    assert "CHANGELOG.md" in releasing
+    assert "vX.Y.Z" in releasing
+    assert "publish-pypi" in releasing
+    assert 'git merge-base --is-ancestor "$GITHUB_SHA" origin/main' in releasing
 
 
 def test_ci_refuses_private_ticket_ids_in_tracked_files():

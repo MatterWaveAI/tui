@@ -46,6 +46,7 @@ from .agent.session import SessionOptions
 if TYPE_CHECKING:
     from .agent.screen import AgentScreen
 from .api import DEFAULT_BASE_URL, NOTIFICATIONS_PAGE, ChatAPI, Cut, Opened, StreamItem
+from .commands import PI_SLASH_COMMAND_SPECS, SLASH_COMMANDS
 from .dictation import MEDIA_TYPES, MicRecorder, media_type_for, mic_available
 from .export import conversation_markdown, export_filename, free_path
 from .failures import Failure, classify, retry_in
@@ -143,17 +144,6 @@ SCAN_POLLS_MAX = 60
 SETTINGS_FILE = "settings.json"
 # Coding-agent backends and interactive composer slash commands.
 AGENT_ENGINES: tuple[str, ...] = ("auto", "pi", "builtin")
-SLASH_COMMANDS: tuple[str, ...] = (
-    "/role",
-    "/shell",
-    "/temp",
-    "/pi",
-    "/pi-engine",
-    "/agent-engine",
-    "/pi-compact",
-    "/pi-status",
-    "/pi-new",
-)
 
 
 # --- per-device state (dismissed announcement ids) ----------------------------
@@ -758,11 +748,8 @@ class MatterWaveApp(App[None]):
                 self.get_key_display(replace(binding, key=k)) for k in keys.split(",")
             )
             rows.append((shown, binding.description or binding.action, binding.id or ""))
-        rows.append(("/pi <prompt>", "Run prompt with Pi 1.0 agent in transcript", ""))
-        rows.append(("/pi-engine", "Inspect or switch agent engine (auto, pi, builtin)", ""))
-        rows.append(("/pi-compact [instructions]", "Compact the Pi 1.0 RPC session context", ""))
-        rows.append(("/pi-status", "Inspect Pi 1.0 binary, engine, and session status", ""))
-        rows.append(("/pi-new", "Reset the Pi 1.0 RPC session", ""))
+        for spec in PI_SLASH_COMMAND_SPECS:
+            rows.append((spec.usage, spec.description, ""))
         return rows
 
     def action_help(self) -> None:
@@ -3188,25 +3175,22 @@ class MatterWaveApp(App[None]):
         False for an unknown one, whose text stays in the composer."""
         body = text[1:]
         first = body.split(" ", 1)[0]
-        if first not in (
-            "role",
-            "shell",
-            "temp",
-            "pi",
-            "pi-engine",
-            "agent-engine",
-            "pi-compact",
-            "pi-status",
-            "pi-new",
-        ):
+        if f"/{first}" not in SLASH_COMMANDS:
             self.notify(
-                f"Unknown command /{first}: /role, /shell, /temp, /pi, /pi-engine, /pi-compact and "
-                "/pi-status are the commands. Start with // to send a message that begins with /.",
+                f"Unknown command /{first}: /role, /shell, /temp, /pi, /pi-engine, /pi-model, "
+                "/pi-fork, /pi-compact and /pi-status are the commands. "
+                "Start with // to send a message that begins with /.",
                 severity="warning",
             )
             return False
         if first in ("pi-engine", "agent-engine"):
             self.set_agent_engine(body[len(first) :].strip())
+            return True
+        if first == "pi-model":
+            self.run_pi_model(body[len("pi-model") :].strip())
+            return True
+        if first == "pi-fork":
+            self.run_pi_fork(body[len("pi-fork") :].strip())
             return True
         if first == "pi-status":
             self.run_pi_status()
@@ -3315,6 +3299,199 @@ class MatterWaveApp(App[None]):
         )
         argv = build_pi_argv(pi_bin or "pi", mode="rpc", model=model)
         return PiRpcBridge(argv, env=env)
+
+    def run_pi_model(self, model_arg: str = "") -> None:
+        """Execute `/pi-model [[provider/]model]` to display or switch the active Pi 1.0 model."""
+        raw = model_arg.strip()
+        if not raw:
+            current = self.effective_model() or "default"
+            msg = (
+                f"Pi 1.0 active model: {current} (provider: matterwave). "
+                "Use /pi-model <model> to switch."
+            )
+            self.notify(msg)
+            self._append_pi_notice(msg)
+            return
+        if self.streaming:
+            self.notify(
+                "Wait for the current turn to finish, or press Esc to stop it.",
+                severity="warning",
+            )
+            return
+        if "/" in raw:
+            prov_part, mod_part = raw.split("/", 1)
+            provider = prov_part.strip() or "matterwave"
+            model = mod_part.strip() or raw
+        else:
+            provider = "matterwave"
+            model = raw
+        self.model = model
+        self.model_override = model
+        self.render_status()
+        pi_bin: str | None = None
+        if self._pi_bridge is None:
+            pi_bin = find_pi_binary(self._environ)
+            if pi_bin is None:
+                msg = (
+                    f"Pi 1.0 model set to {model} "
+                    f"(provider: {provider}; pi binary not found on PATH)."
+                )
+                self.notify(msg, severity="warning")
+                self._append_pi_notice(msg)
+                return
+        self.run_worker(
+            self._set_pi_model(model, provider=provider, pi_bin=pi_bin),
+            group="pi-model",
+            exclusive=True,
+        )
+
+    async def _set_pi_model(
+        self, model: str, *, provider: str = "matterwave", pi_bin: str | None = None
+    ) -> None:
+        bridge = self._pi_bridge
+        owns_bridge = False
+        if bridge is None:
+            bridge = self._create_pi_bridge(pi_bin)
+            owns_bridge = True
+        try:
+            if owns_bridge:
+                await bridge.start()
+            event = await bridge.set_model(model, provider=provider)
+        except Exception as exc:
+            msg = f"Pi model switch failed: {exc}"
+            self.notify(msg, severity="error")
+            self._append_pi_notice(msg)
+            return
+        finally:
+            if owns_bridge:
+                await bridge.close()
+
+        if event is not None and event.is_error:
+            err = event.error or "Pi RPC set_model failed"
+            msg = f"Pi model switch failed: {err}"
+            self.notify(msg, severity="error")
+            self._append_pi_notice(msg)
+            return
+
+        resolved_model = model
+        resolved_provider = provider
+        if event is not None:
+            raw_data = event.raw.get("data")
+            resolved_model = str(
+                event.raw.get("model")
+                or event.raw.get("modelId")
+                or (raw_data.get("model") if isinstance(raw_data, dict) else "")
+                or model
+            )
+            resolved_provider = str(
+                event.raw.get("provider")
+                or (raw_data.get("provider") if isinstance(raw_data, dict) else "")
+                or provider
+            )
+        self.model = resolved_model
+        self.model_override = resolved_model
+        self.render_status()
+        msg = f"Pi 1.0 model set to {resolved_model} (provider: {resolved_provider})."
+        self.notify(msg)
+        note = ConversationMessage(
+            id=f"_pi-model-{time.monotonic_ns()}",
+            conversation_id=self.conversation.id if self.conversation else "",
+            role="system",
+            parent_id=self.thread.leaf,
+            parts=[{"type": "text", "text": msg}],
+            content=msg,
+            created_at="",
+        )
+        self.thread.add(note)
+        self.thread.leaf = note.id
+        await self.render_thread()
+
+    def run_pi_fork(self, entry_id: str = "") -> None:
+        """Execute `/pi-fork [entry_id]` through `PiRpcBridge.fork_session(...)`."""
+        if self.streaming:
+            self.notify(
+                "Wait for the current turn to finish, or press Esc to stop it.",
+                severity="warning",
+            )
+            return
+        pi_bin: str | None = None
+        if self._pi_bridge is None:
+            pi_bin = find_pi_binary(self._environ)
+            if pi_bin is None:
+                msg = "pi binary not found on PATH (set MATTERWAVE_PI_BIN or install pi)."
+                self.notify(msg, severity="warning")
+                self._append_pi_notice(msg)
+                return
+        self.run_worker(
+            self._fork_pi_session(entry_id.strip() or None, pi_bin=pi_bin),
+            group="pi-fork",
+            exclusive=True,
+        )
+
+    async def _fork_pi_session(
+        self, entry_id: str | None = None, *, pi_bin: str | None = None
+    ) -> None:
+        bridge = self._pi_bridge
+        owns_bridge = False
+        if bridge is None:
+            bridge = self._create_pi_bridge(pi_bin)
+            owns_bridge = True
+        try:
+            if owns_bridge:
+                await bridge.start()
+            event = await bridge.fork_session(entry_id)
+        except Exception as exc:
+            msg = f"Pi session fork failed: {exc}"
+            self.notify(msg, severity="error")
+            self._append_pi_notice(msg)
+            return
+        finally:
+            if owns_bridge:
+                await bridge.close()
+
+        if event is not None and event.is_error:
+            err = event.error or "Pi RPC session fork failed"
+            msg = f"Pi session fork failed: {err}"
+            self.notify(msg, severity="error")
+            self._append_pi_notice(msg)
+            return
+
+        fork_id = entry_id or ""
+        fork_text = ""
+        if event is not None:
+            raw_data = event.raw.get("data")
+            fork_id = str(
+                event.raw.get("entryId")
+                or (raw_data.get("entryId") if isinstance(raw_data, dict) else "")
+                or fork_id
+            ).strip()
+            fork_text = str(
+                event.raw.get("text")
+                or (raw_data.get("text") if isinstance(raw_data, dict) else "")
+                or event.text
+                or ""
+            ).strip()
+        if fork_id and fork_text:
+            msg = f"Pi session forked at {fork_id}: {fork_text}"
+        elif fork_id:
+            msg = f"Pi session forked at {fork_id}."
+        elif fork_text:
+            msg = f"Pi session forked: {fork_text}"
+        else:
+            msg = "Pi session forked."
+        self.notify(msg)
+        note = ConversationMessage(
+            id=f"_pi-fork-{time.monotonic_ns()}",
+            conversation_id=self.conversation.id if self.conversation else "",
+            role="system",
+            parent_id=self.thread.leaf,
+            parts=[{"type": "text", "text": msg}],
+            content=msg,
+            created_at="",
+        )
+        self.thread.add(note)
+        self.thread.leaf = note.id
+        await self.render_thread()
 
     def run_pi_status(self) -> None:
         """Display `/pi-status`: binary availability, active engine, model, preset, and session."""

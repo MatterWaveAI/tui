@@ -34,15 +34,19 @@ class PiRpcEvent:
     raw: dict[str, Any] = field(default_factory=dict)
 
     def __getitem__(self, key: str) -> Any:
+        if key in self.raw:
+            return self.raw[key]
         if hasattr(self, key):
             return getattr(self, key)
-        return self.raw[key]
+        raise KeyError(key)
 
     def get(self, key: str, default: Any = None) -> Any:
+        if key in self.raw:
+            return self.raw[key]
         if hasattr(self, key):
             val = getattr(self, key)
             return default if val is None else val
-        return self.raw.get(key, default)
+        return default
 
 
 def find_pi_binary(environ: Mapping[str, str] | None = None) -> str | None:
@@ -284,7 +288,7 @@ class PiRpcBridge:
             if event is None or event.type in accepted:
                 return event
 
-    async def set_model(self, model: str, *, provider: str = "matterwave") -> PiRpcEvent | None:
+    async def set_model(self, model: str, provider: str = "matterwave") -> PiRpcEvent | None:
         """Send `{"type": "set_model", ...}` to switch the active model in `pi --mode rpc`."""
         await self.send_command(
             {
@@ -295,6 +299,14 @@ class PiRpcBridge:
             }
         )
         return await self._await_rpc_response("model_changed")
+
+    async def fork_session(self, entry_id: str | None = None) -> PiRpcEvent | None:
+        """Send `{"type": "fork", ...}` to fork the active Pi 1.0 RPC session branch."""
+        command: dict[str, Any] = {"type": "fork"}
+        if entry_id:
+            command["entryId"] = entry_id
+        await self.send_command(command)
+        return await self._await_rpc_response("forked", "session_forked")
 
     async def compact(self, custom_instructions: str | None = None) -> PiRpcEvent | None:
         """Send `{"type": "compact", ...}` to compact the active Pi 1.0 RPC session."""

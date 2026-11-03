@@ -15,6 +15,7 @@ from matterwave_tui import app as app_mod
 from matterwave_tui import cli
 from matterwave_tui.api import ChatAPI
 from matterwave_tui.app import AGENT_ENGINES, SLASH_COMMANDS, MatterWaveApp
+from matterwave_tui.commands import PI_SLASH_COMMAND_SPECS, SLASH_COMMAND_DESCRIPTIONS
 from matterwave_tui.pi_runner import (
     PiRpcBridge,
     build_pi_argv,
@@ -112,6 +113,16 @@ for raw in sys.stdin:
             "command": "new_session",
             "success": True,
             "data": {"cancelled": False},
+        }) + "\\n")
+        sys.stdout.flush()
+    elif ctype == "fork":
+        entry_id = cmd.get("entryId") or "entry-latest"
+        sys.stdout.write(json.dumps({
+            "type": "response",
+            "command": "fork",
+            "success": True,
+            "entryId": entry_id,
+            "data": {"entryId": entry_id, "text": f"forked from {entry_id}", "cancelled": False},
         }) + "\\n")
         sys.stdout.flush()
     elif ctype in ("steer", "follow_up"):
@@ -255,6 +266,17 @@ async def test_pi_rpc_bridge_prompt_tools_set_model_abort_and_shutdown() -> None
         assert reset_ack is not None
         assert reset_ack.type == "response"
         assert reset_ack.raw.get("command") == "new_session"
+
+        fork_ack = await bridge.fork_session("entry-42")
+        assert fork_ack is not None
+        assert fork_ack.type == "response"
+        assert fork_ack["command"] == "fork"
+        assert fork_ack.get("entryId") == "entry-42"
+
+        model_ack = await bridge.set_model("glm-4.6", "matterwave")
+        assert model_ack is not None
+        assert model_ack.get("model") == "glm-4.6"
+        assert model_ack.get("provider") == "matterwave"
 
     assert not bridge.running
 
@@ -552,3 +574,67 @@ async def test_interactive_tui_pi_compact_and_status_when_binary_missing(
         app.action_send()
         await _settle(app, pilot)
         assert any("pi binary not found on PATH" in s for s in shown)
+
+
+@pytest.mark.asyncio
+async def test_interactive_tui_pi_model_and_fork_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        app_mod,
+        "find_pi_binary",
+        lambda environ=None: sys.executable,
+    )
+    monkeypatch.setattr(
+        app_mod,
+        "build_pi_argv",
+        lambda pi_bin, **_: [sys.executable, "-u", "-c", MOCK_PI_RPC_SCRIPT],
+    )
+    api = FakeAPI()
+    app = MatterWaveApp(cast(ChatAPI, api))
+    shown: list[str] = []
+    app.notify = lambda message, **_: shown.append(str(message))  # type: ignore[method-assign]
+
+    assert "/pi-model" in SLASH_COMMANDS
+    assert "/pi-fork" in SLASH_COMMANDS
+    assert SLASH_COMMAND_DESCRIPTIONS["/pi-model"] == "Switch or display the active Pi 1.0 model"
+    assert SLASH_COMMAND_DESCRIPTIONS["/pi-fork"] == "Fork the current Pi 1.0 session branch"
+    assert any(spec.name == "/pi-model" for spec in PI_SLASH_COMMAND_SPECS)
+    assert any(spec.name == "/pi-fork" for spec in PI_SLASH_COMMAND_SPECS)
+
+    async with app.run_test() as pilot:
+        await _settle(app, pilot)
+        app.conversation = None
+        app.model = "glm-4.6"
+        composer = app.query_one("#composer", TextArea)
+
+        composer.text = "/pi-model"
+        app.action_send()
+        await _settle(app, pilot)
+        assert composer.text == ""
+        assert any("Pi 1.0 active model: glm-4.6" in s for s in shown)
+
+        shown.clear()
+        composer.text = "/pi-model kimi-k2.5"
+        app.action_send()
+        await _settle(app, pilot)
+        assert composer.text == ""
+        assert app.model == "kimi-k2.5"
+        assert any("Pi 1.0 model set to kimi-k2.5 (provider: matterwave)." in s for s in shown)
+
+        shown.clear()
+        composer.text = "/pi-model matterwave/glm-4.6"
+        app.action_send()
+        await _settle(app, pilot)
+        assert app.model == "glm-4.6"
+        assert any("Pi 1.0 model set to glm-4.6 (provider: matterwave)." in s for s in shown)
+
+        shown.clear()
+        composer.text = "/pi-fork entry-99"
+        app.action_send()
+        await _settle(app, pilot)
+        assert composer.text == ""
+        assert any("Pi session forked at entry-99: forked from entry-99" in s for s in shown)
+        views = list(app.query(MessageView))
+        assert views
+        assert "Pi session forked at entry-99: forked from entry-99" in views[-1].message.content

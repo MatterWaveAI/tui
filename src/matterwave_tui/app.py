@@ -45,7 +45,7 @@ from .agent.session import SessionOptions
 
 if TYPE_CHECKING:
     from .agent.screen import AgentScreen
-from .api import NOTIFICATIONS_PAGE, ChatAPI, Cut, Opened, StreamItem
+from .api import DEFAULT_BASE_URL, NOTIFICATIONS_PAGE, ChatAPI, Cut, Opened, StreamItem
 from .dictation import MEDIA_TYPES, MicRecorder, media_type_for, mic_available
 from .export import conversation_markdown, export_filename, free_path
 from .failures import Failure, classify, retry_in
@@ -57,6 +57,13 @@ from .models import (
     vision_capable_model_ids,
 )
 from .paths import migrate_legacy_state, state_dir
+from .pi_runner import (
+    PiRpcBridge,
+    PiRpcEvent,
+    build_pi_argv,
+    build_pi_launch_env,
+    find_pi_binary,
+)
 from .roles import load_roles, roles_path, save_roles
 from .screens import (
     Account,
@@ -134,6 +141,16 @@ SCAN_POLL_S = 1.5
 SCAN_POLLS_MAX = 60
 # What the app remembers between runs beside the roles: the theme.
 SETTINGS_FILE = "settings.json"
+# Coding-agent backends and interactive composer slash commands.
+AGENT_ENGINES: tuple[str, ...] = ("auto", "pi", "builtin")
+SLASH_COMMANDS: tuple[str, ...] = (
+    "/role",
+    "/shell",
+    "/temp",
+    "/pi",
+    "/pi-engine",
+    "/agent-engine",
+)
 
 
 # --- per-device state (dismissed announcement ids) ----------------------------
@@ -562,6 +579,9 @@ class MatterWaveApp(App[None]):
         # The environment the image and shell settings are read from: the
         # process's own, with the config file's filling its gaps.
         environ = os.environ if environ is None else environ
+        self._environ: Mapping[str, str] = environ
+        self.agent_engine: str = "auto"
+        self._pi_bridge: PiRpcBridge | None = None
         # The config file's theme, applied once the app is up.
         self.configured_theme = theme
         self.relogin_fn = relogin
@@ -735,6 +755,8 @@ class MatterWaveApp(App[None]):
                 self.get_key_display(replace(binding, key=k)) for k in keys.split(",")
             )
             rows.append((shown, binding.description or binding.action, binding.id or ""))
+        rows.append(("/pi <prompt>", "Run prompt with Pi 1.0 agent in transcript", ""))
+        rows.append(("/pi-engine", "Inspect or switch agent engine (auto, pi, builtin)", ""))
         return rows
 
     def action_help(self) -> None:
@@ -839,6 +861,9 @@ class MatterWaveApp(App[None]):
         self.open_agent(SessionOptions(root=Path.cwd()))
 
     async def on_unmount(self) -> None:
+        if self._pi_bridge is not None:
+            await self._pi_bridge.close()
+            self._pi_bridge = None
         await self.api.aclose()
 
     def post_display_hook(self) -> None:
@@ -976,6 +1001,8 @@ class MatterWaveApp(App[None]):
         temperature = self.temperatures.get(self._draft_key())
         if temperature is not None:
             bits.append(f"temperature {temperature:g}")
+        if self.agent_engine != "auto":
+            bits.append(f"engine {self.agent_engine}")
         return " │ ".join(bits)
 
     def render_status(self) -> None:
@@ -3155,13 +3182,19 @@ class MatterWaveApp(App[None]):
         False for an unknown one, whose text stays in the composer."""
         body = text[1:]
         first = body.split(" ", 1)[0]
-        if first not in ("role", "shell", "temp"):
+        if first not in ("role", "shell", "temp", "pi", "pi-engine", "agent-engine"):
             self.notify(
-                f"Unknown command /{first}: /role, /shell and /temp are the commands. "
-                "Start with // to send a message that begins with /.",
+                f"Unknown command /{first}: /role, /shell, /temp, /pi and /pi-engine are the "
+                "commands. Start with // to send a message that begins with /.",
                 severity="warning",
             )
             return False
+        if first in ("pi-engine", "agent-engine"):
+            self.set_agent_engine(body[len(first) :].strip())
+            return True
+        if first == "pi":
+            self.run_pi_prompt(body[len("pi") :].strip())
+            return True
         if first == "temp":
             self.set_temperature(body[len("temp") :].strip())
             return True
@@ -3191,6 +3224,224 @@ class MatterWaveApp(App[None]):
             return True
         self.apply_role(rest)
         return True
+
+    # --- Pi 1.0 RPC interactive turns & engine selection -------------------------
+
+    def set_agent_engine(self, value: str) -> None:
+        """Inspect or switch the active coding-agent backend (`auto`, `pi`, `builtin`)."""
+        choice = value.strip().lower()
+        if not choice:
+            resolved = (
+                ("pi" if find_pi_binary(self._environ) else "builtin")
+                if self.agent_engine == "auto"
+                else self.agent_engine
+            )
+            self.notify(
+                f"Agent engine: {self.agent_engine} (active: {resolved}). "
+                f"Use /pi-engine [{'|'.join(AGENT_ENGINES)}] to switch."
+            )
+            return
+        if choice not in AGENT_ENGINES:
+            self.notify(
+                f"Unknown agent engine {value.strip()!r}; choose {', '.join(AGENT_ENGINES)}.",
+                severity="warning",
+            )
+            return
+        self.agent_engine = choice
+        if choice == "pi" and self._pi_bridge is None and find_pi_binary(self._environ) is None:
+            self.notify(
+                "Agent engine set to pi (pi binary not found on PATH; set MATTERWAVE_PI_BIN or install pi).",
+                severity="warning",
+            )
+        else:
+            self.notify(f"Agent engine set to {choice}.")
+        self.render_status()
+
+    def run_pi_prompt(self, prompt: str) -> None:
+        """Execute `/pi <prompt>` through `PiRpcBridge`, streaming into the transcript."""
+        if not prompt:
+            self.notify("Usage: /pi <prompt> — run a prompt through Pi 1.0.", severity="warning")
+            return
+        if self.streaming:
+            self.notify(
+                "Wait for the current turn to finish, or press Esc to stop it.",
+                severity="warning",
+            )
+            return
+        pi_bin: str | None = None
+        if self._pi_bridge is None:
+            pi_bin = find_pi_binary(self._environ)
+            if pi_bin is None:
+                msg = "pi binary not found on PATH (set MATTERWAVE_PI_BIN or install pi)."
+                self.notify(msg, severity="warning")
+                note = ConversationMessage(
+                    id=f"_pi-notice-{time.monotonic_ns()}",
+                    conversation_id=self.conversation.id if self.conversation else "",
+                    role="system",
+                    parent_id=self.thread.leaf,
+                    parts=[{"type": "text", "text": msg}],
+                    content=msg,
+                    created_at="",
+                )
+                self.thread.add(note)
+                self.thread.leaf = note.id
+                self.run_worker(self.render_thread(), group="pi-notice")
+                return
+        self.run_worker(
+            self._consume_pi(prompt, pi_bin=pi_bin),
+            group="stream",
+            exclusive=True,
+        )
+
+    async def _consume_pi(self, prompt: str, *, pi_bin: str | None = None) -> None:
+        conv_id = self.conversation.id if self.conversation else ""
+        user_msg = ConversationMessage(
+            id=f"_pi-user-{time.monotonic_ns()}",
+            conversation_id=conv_id,
+            role="user",
+            parent_id=self.thread.leaf,
+            parts=[{"type": "text", "text": prompt}],
+            content=prompt,
+            created_at="",
+        )
+        self.thread.add(user_msg)
+        self.thread.leaf = user_msg.id
+
+        turn = object()
+        self._turn = turn
+        self.streaming = True
+        self.show_failure(None)
+        model = self.effective_model()
+        self.live = ConversationMessage(
+            id=LIVE_ID,
+            conversation_id=conv_id,
+            role="assistant",
+            parent_id=user_msg.id,
+            parts=[],
+            content="",
+            created_at="",
+            model=model,
+        )
+        await self.render_thread()
+        self.render_status()
+
+        bridge = self._pi_bridge
+        owns_bridge = False
+        if bridge is None:
+            cred = getattr(self.api, "_credential", None)
+            api_key = str(
+                getattr(cred, "token", "") or self._environ.get("MATTERWAVE_API_KEY") or ""
+            )
+            base_url = str(
+                getattr(self.api, "base_url", "")
+                or self._environ.get("MATTERWAVE_BASE_URL")
+                or DEFAULT_BASE_URL
+            )
+            env = build_pi_launch_env(
+                api_key,
+                base_url,
+                preset_id=self.active_preset_id(),
+                model=model,
+                temporary=self.temporary_chat,
+                base_env=self._environ,
+            )
+            argv = build_pi_argv(pi_bin or "pi", mode="rpc", model=model)
+            bridge = PiRpcBridge(argv, env=env)
+            owns_bridge = True
+
+        stopped = False
+        try:
+            if owns_bridge:
+                await bridge.start()
+            async for event in bridge.prompt(prompt):
+                if self._turn is not turn:
+                    break
+                await self._apply_pi_event(event)
+                if event.type in ("turn_end", "error"):
+                    break
+        except asyncio.CancelledError:
+            stopped = True
+            with contextlib.suppress(Exception):
+                await bridge.abort()
+            raise
+        except Exception as exc:
+            if self._turn is turn:
+                self.notify(f"Pi RPC failed: {exc}", severity="error")
+        finally:
+            if owns_bridge:
+                await bridge.close()
+            if self._turn is turn:
+                partial = self.live
+                self._turn = None
+                self.streaming = False
+                self.live = None
+                if partial is not None and (partial.parts or partial.content):
+                    reply = replace(
+                        partial,
+                        id=f"_pi-assistant-{time.monotonic_ns()}",
+                        truncated=stopped,
+                    )
+                    self.thread.add(reply)
+                    self.thread.leaf = reply.id
+                await self.render_thread()
+                self.render_status()
+
+    async def _apply_pi_event(self, event: PiRpcEvent) -> None:
+        live = self.live
+        if live is None:
+            return
+        if event.type == "text_delta":
+            if event.text:
+                if live.parts and live.parts[-1].get("type") == "text":
+                    live.parts[-1]["text"] = str(live.parts[-1].get("text") or "") + event.text
+                else:
+                    live.parts.append({"type": "text", "text": event.text})
+                self.live = replace(live, content=live.content + event.text)
+                self._live_dirty = True
+        elif event.type == "tool_start":
+            args_json = json.dumps(event.tool_args) if event.tool_args is not None else ""
+            call_part: dict[str, Any] = {
+                "type": "tool_call",
+                "name": event.tool_name or "tool",
+                "arguments": args_json,
+            }
+            if event.tool_call_id is not None:
+                call_part["id"] = event.tool_call_id
+            live.parts.append(call_part)
+            self._live_dirty = True
+            await self._redraw_live()
+        elif event.type == "tool_end":
+            if isinstance(event.tool_result, (dict, list)):
+                output = json.dumps(event.tool_result)
+            elif event.tool_result is not None:
+                output = str(event.tool_result)
+            else:
+                output = "done"
+            result_part: dict[str, Any] = {
+                "type": "tool_result",
+                "name": event.tool_name or "tool",
+                "output": output,
+                "is_error": event.is_error,
+            }
+            if event.tool_call_id is not None:
+                result_part["id"] = event.tool_call_id
+            live.parts.append(result_part)
+            self._live_dirty = True
+            await self._redraw_live()
+        elif event.type == "error":
+            err_msg = event.error or "Pi RPC error"
+            live.parts.append(
+                {
+                    "type": "tool_result",
+                    "name": event.tool_name or "pi",
+                    "output": err_msg,
+                    "is_error": True,
+                }
+            )
+            if not live.content:
+                self.live = replace(live, content=err_msg)
+            self.notify(f"Pi error: {err_msg}", severity="error")
+            self._live_dirty = True
 
     def action_roles(self) -> None:
         """The prompt library screen; the role picked there applies to the

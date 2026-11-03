@@ -6,16 +6,25 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from typing import Any, cast
 
 import pytest
+from textual.widgets import Markdown, OptionList, Static, TextArea
 
+from matterwave_tui import app as app_mod
 from matterwave_tui import cli
+from matterwave_tui.api import ChatAPI
+from matterwave_tui.app import AGENT_ENGINES, SLASH_COMMANDS, MatterWaveApp
 from matterwave_tui.pi_runner import (
     PiRpcBridge,
     build_pi_argv,
     build_pi_launch_env,
     find_pi_binary,
 )
+from matterwave_tui.screens import HelpScreen
+from matterwave_tui.widgets import MessageView
+
+from .fake_api import FakeAPI
 
 MOCK_PI_RPC_SCRIPT = """
 import json
@@ -197,7 +206,7 @@ def test_cli_pi_subcommand_interactive_and_rpc_oneshot(
         recorded["env"] = env
         return subprocess.CompletedProcess(argv, 0)
 
-    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    monkeypatch.setattr("matterwave_tui.cli.subprocess.run", fake_run)
     rc = cli.main(
         [
             "--base-url",
@@ -247,3 +256,143 @@ def test_cli_pi_subcommand_interactive_and_rpc_oneshot(
     )
     assert rc2 == 0
     assert capsys.readouterr().out == "Checking with glm-4.6: from cli\n"
+
+
+async def _settle(app: MatterWaveApp, pilot: Any) -> None:
+    await pilot.pause()
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_interactive_tui_pi_command_streams_text_and_tools_into_transcript(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        app_mod,
+        "find_pi_binary",
+        lambda environ=None: sys.executable,
+    )
+    monkeypatch.setattr(
+        app_mod,
+        "build_pi_argv",
+        lambda pi_bin, **_: [sys.executable, "-u", "-c", MOCK_PI_RPC_SCRIPT],
+    )
+    api = FakeAPI()
+    app = MatterWaveApp(cast(ChatAPI, api))
+    shown: list[str] = []
+    app.notify = lambda message, **_: shown.append(str(message))  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await _settle(app, pilot)
+        composer = app.query_one("#composer", TextArea)
+        composer.text = "/pi inspect README.md"
+        app.action_send()
+        await _settle(app, pilot)
+
+        assert composer.text == ""
+        assert api.sent == []
+
+        views = list(app.query(MessageView))
+        assert len(views) >= 2
+        user_view, assistant_view = views[-2], views[-1]
+        assert user_view.message.role == "user"
+        assert user_view.message.content == "inspect README.md"
+
+        assert assistant_view.message.role == "assistant"
+        assert "Checking " in assistant_view.message.content
+        assert "with glm-4.6: inspect README.md" in assistant_view.message.content
+        part_types = [p.get("type") for p in assistant_view.message.parts]
+        assert part_types == ["text", "tool_call", "tool_result", "text"]
+        assert assistant_view.message.parts[1]["name"] == "read"
+        assert "README.md" in assistant_view.message.parts[1]["arguments"]
+        assert '"lines": 10' in assistant_view.message.parts[2]["output"]
+
+        rendered_statics = [str(s.render()) for s in assistant_view.query(Static)]
+        assert any("read(" in s and "README.md" in s for s in rendered_statics)
+        assert any('"lines": 10' in s for s in rendered_statics)
+        rendered_md = [md.source for md in assistant_view.query(Markdown)]
+        assert any("with glm-4.6: inspect README.md" in m for m in rendered_md)
+
+        # Error from Pi RPC is surfaced clearly
+        composer.text = "/pi trigger error"
+        app.action_send()
+        await _settle(app, pilot)
+        assert any("boom" in s for s in shown)
+
+
+@pytest.mark.asyncio
+async def test_interactive_tui_pi_command_when_binary_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(app_mod, "find_pi_binary", lambda environ=None: None)
+    api = FakeAPI()
+    app = MatterWaveApp(cast(ChatAPI, api), environ={"PATH": ""})
+    shown: list[str] = []
+    app.notify = lambda message, **_: shown.append(str(message))  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await _settle(app, pilot)
+        composer = app.query_one("#composer", TextArea)
+        composer.text = "/pi fix the build"
+        app.action_send()
+        await _settle(app, pilot)
+
+        assert composer.text == ""
+        assert any("pi binary not found on PATH" in s for s in shown)
+        views = list(app.query(MessageView))
+        assert views
+        assert "pi binary not found on PATH" in views[-1].message.content
+
+
+@pytest.mark.asyncio
+async def test_interactive_tui_pi_engine_toggle_and_help_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(app_mod, "find_pi_binary", lambda environ=None: "/usr/local/bin/pi")
+    api = FakeAPI()
+    app = MatterWaveApp(cast(ChatAPI, api))
+    shown: list[str] = []
+    app.notify = lambda message, **_: shown.append(str(message))  # type: ignore[method-assign]
+
+    assert "/pi" in SLASH_COMMANDS
+    assert "/pi-engine" in SLASH_COMMANDS
+    assert AGENT_ENGINES == ("auto", "pi", "builtin")
+
+    async with app.run_test() as pilot:
+        await _settle(app, pilot)
+        assert app.agent_engine == "auto"
+
+        composer = app.query_one("#composer", TextArea)
+        composer.text = "/pi-engine"
+        app.action_send()
+        await _settle(app, pilot)
+        assert any("Agent engine: auto (active: pi)" in s for s in shown)
+
+        composer.text = "/pi-engine pi"
+        app.action_send()
+        await _settle(app, pilot)
+        assert app.agent_engine == "pi"
+        assert "engine pi" in app.status_text()
+        assert any("Agent engine set to pi." in s for s in shown)
+
+        composer.text = "/agent-engine builtin"
+        app.action_send()
+        await _settle(app, pilot)
+        assert app.agent_engine == "builtin"
+        assert "engine builtin" in app.status_text()
+
+        composer.text = "/pi-engine invalid"
+        app.action_send()
+        await _settle(app, pilot)
+        assert app.agent_engine == "builtin"
+        assert any("Unknown agent engine" in s for s in shown)
+
+        # Help overlay includes /pi and /pi-engine
+        await pilot.press("escape", "f1")
+        await _settle(app, pilot)
+        assert isinstance(app.screen, HelpScreen)
+        rows = app.screen.query_one("#help-rows", OptionList)
+        lines = [str(rows.get_option_at_index(i).prompt) for i in range(rows.option_count)]
+        assert any("/pi <prompt>" in line for line in lines)
+        assert any("/pi-engine" in line for line in lines)

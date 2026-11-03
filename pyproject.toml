@@ -90,3 +90,12 @@ ignore_missing_imports = true
 # Nor do the optional extras (the dictation microphone, sixel's codec).
 module = ["sounddevice.*", "PIL.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "tests.test_pi_runner"
+strict = true
+ignore_errors = false

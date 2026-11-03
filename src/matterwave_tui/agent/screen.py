@@ -77,6 +77,8 @@ SLASH_HELP = """Commands
   /trust                    trust this folder (load its context files and settings)
   /mcp                      MCP servers and their tools
   /agents                   subagent definitions
+  /pi <prompt>              run a prompt through Pi 1.0 RPC agent
+  /pi-engine [engine]       inspect or switch agent engine (auto, pi, builtin)
   /clear                    start a fresh run history
   /chat                     back to the chat view
 Keys
@@ -650,6 +652,9 @@ class AgentScreen(Screen[None]):
             "trust": self._cmd_trust,
             "mcp": self._cmd_mcp,
             "agents": self._cmd_agents,
+            "pi": self._cmd_pi,
+            "pi-engine": self._cmd_pi_engine,
+            "agent-engine": self._cmd_pi_engine,
             "clear": self._cmd_clear,
             "chat": self._cmd_chat,
         }
@@ -958,6 +963,115 @@ class AgentScreen(Screen[None]):
                 for d in session.subagents.values()
             )
         )
+
+    def _cmd_pi_engine(self, rest: str) -> None:
+        from ..app import AGENT_ENGINES, MatterWaveApp
+        from ..pi_runner import find_pi_binary
+
+        app = self.app if isinstance(self.app, MatterWaveApp) else None
+        environ = app._environ if app is not None else None
+        current = app.agent_engine if app is not None else "auto"
+        choice = rest.strip().lower()
+        if not choice:
+            resolved = (
+                ("pi" if find_pi_binary(environ) else "builtin") if current == "auto" else current
+            )
+            self.add_line(
+                f"Agent engine: {current} (active: {resolved}). "
+                f"Use /pi-engine [{'|'.join(AGENT_ENGINES)}] to switch.",
+                "notice",
+            )
+            return
+        if choice not in AGENT_ENGINES:
+            self.add_line(
+                f"Unknown agent engine {rest.strip()!r}; choose {', '.join(AGENT_ENGINES)}.",
+                "error",
+            )
+            return
+        if app is not None:
+            app.agent_engine = choice
+            app.render_status()
+        self.add_line(f"Agent engine set to {choice}.", "notice")
+
+    def _cmd_pi(self, rest: str) -> None:
+        from ..app import MatterWaveApp
+        from ..pi_runner import find_pi_binary
+
+        prompt = rest.strip()
+        if not prompt:
+            self.add_line("Usage: /pi <prompt> — run a prompt through Pi 1.0.", "error")
+            return
+        if self.running or self.busy:
+            self.notify("A run is going; Esc stops it." if self.running else "One moment.")
+            return
+        app = self.app if isinstance(self.app, MatterWaveApp) else None
+        environ = app._environ if app is not None else None
+        pi_bin = find_pi_binary(environ)
+        if (app is None or app._pi_bridge is None) and pi_bin is None:
+            self.add_line(
+                "pi binary not found on PATH (set MATTERWAVE_PI_BIN or install pi).",
+                "error",
+            )
+            return
+        self.add_line(f"› /pi {prompt}", "user")
+        self.run_worker(
+            self._run_pi_in_agent(prompt, pi_bin=pi_bin), group="agent-run", exclusive=True
+        )
+
+    async def _run_pi_in_agent(self, prompt: str, *, pi_bin: str | None = None) -> None:
+        import json
+
+        from ..api import DEFAULT_BASE_URL
+        from ..app import MatterWaveApp
+        from ..pi_runner import PiRpcBridge, build_pi_argv, build_pi_launch_env
+
+        app = self.app if isinstance(self.app, MatterWaveApp) else None
+        bridge = app._pi_bridge if app is not None else None
+        owns_bridge = False
+        if bridge is None:
+            environ = app._environ if app is not None else None
+            cred = getattr(self.wire, "_credential", None)
+            api_key = str(
+                getattr(cred, "token", "")
+                or (environ.get("MATTERWAVE_API_KEY") if environ else "")
+                or ""
+            )
+            base_url = str(getattr(self.wire, "base_url", "") or DEFAULT_BASE_URL)
+            model = self.session.model if self.session is not None else None
+            env = build_pi_launch_env(api_key, base_url, model=model, base_env=environ)
+            argv = build_pi_argv(pi_bin or "pi", mode="rpc", model=model)
+            bridge = PiRpcBridge(argv, env=env)
+            owns_bridge = True
+        self.running = True
+        self.state = "running"
+        self.render_status()
+        try:
+            if owns_bridge:
+                await bridge.start()
+            async for event in bridge.prompt(prompt):
+                if event.type == "text_delta" and event.text:
+                    self.stream_text(event.text, None)
+                elif event.type == "tool_start":
+                    args_str = json.dumps(event.tool_args) if event.tool_args else ""
+                    self.add_line(f"⚙ {event.tool_name or 'tool'}({args_str})", "tool", strict=True)
+                elif event.type == "tool_end":
+                    mark = "✗ " if event.is_error else "↳ "
+                    self.add_line(
+                        f"{mark}{event.tool_result}",
+                        "result error" if event.is_error else "result",
+                    )
+                elif event.type == "error":
+                    self.add_line(event.error or "Pi RPC error", "error")
+                    break
+                elif event.type == "turn_end":
+                    break
+        finally:
+            self.end_text()
+            if owns_bridge:
+                await bridge.close()
+            self.running = False
+            self.state = "idle"
+            self.render_status()
 
     def _cmd_clear(self, rest: str) -> None:
         session = self.session

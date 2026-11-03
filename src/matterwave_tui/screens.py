@@ -1091,8 +1091,8 @@ class HelpScreen(ModalScreen[None]):
                 id="help-rows",
             )
             yield Static(
-                "In the composer: /role, /shell and /temp are commands; // sends a leading "
-                'slash. Change a key in the config file: [keys] name = "ctrl+n".',
+                "In the composer: /role, /shell, /temp, /pi and /pi-engine are commands; "
+                '// sends a leading slash. Change a key in the config file: [keys] name = "ctrl+n".',
                 classes="hint",
                 markup=False,
             )

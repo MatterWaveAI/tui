@@ -79,6 +79,9 @@ SLASH_HELP = """Commands
   /agents                   subagent definitions
   /pi <prompt>              run a prompt through Pi 1.0 RPC agent
   /pi-engine [engine]       inspect or switch agent engine (auto, pi, builtin)
+  /pi-compact [instructions] compact the Pi 1.0 RPC session context
+  /pi-status                inspect Pi 1.0 binary, engine, and session status
+  /pi-new                   reset the Pi 1.0 RPC session
   /clear                    start a fresh run history
   /chat                     back to the chat view
 Keys
@@ -655,6 +658,9 @@ class AgentScreen(Screen[None]):
             "pi": self._cmd_pi,
             "pi-engine": self._cmd_pi_engine,
             "agent-engine": self._cmd_pi_engine,
+            "pi-compact": self._cmd_pi_compact,
+            "pi-status": self._cmd_pi_status,
+            "pi-new": self._cmd_pi_new,
             "clear": self._cmd_clear,
             "chat": self._cmd_chat,
         }
@@ -992,6 +998,153 @@ class AgentScreen(Screen[None]):
             app.agent_engine = choice
             app.render_status()
         self.add_line(f"Agent engine set to {choice}.", "notice")
+
+    def _cmd_pi_status(self, rest: str) -> None:
+        from ..app import MatterWaveApp
+        from ..pi_runner import find_pi_binary
+
+        app = self.app if isinstance(self.app, MatterWaveApp) else None
+        environ = app._environ if app is not None else None
+        current = app.agent_engine if app is not None else "auto"
+        pi_bin = find_pi_binary(environ)
+        resolved = ("pi" if pi_bin else "builtin") if current == "auto" else current
+        model = (
+            (self.session.model if self.session is not None else None)
+            or (app.effective_model() if app is not None else None)
+            or "default"
+        )
+        binary_label = pi_bin if pi_bin else "not found (set MATTERWAVE_PI_BIN or install pi)"
+        self.add_line(
+            f"Pi 1.0 status: engine={current} (active: {resolved}) | "
+            f"binary={binary_label} | model={model}",
+            "notice",
+        )
+
+    def _cmd_pi_compact(self, rest: str) -> None:
+        from ..app import MatterWaveApp
+        from ..pi_runner import find_pi_binary
+
+        if self.running or self.busy:
+            self.notify("A run is going; Esc stops it." if self.running else "One moment.")
+            return
+        app = self.app if isinstance(self.app, MatterWaveApp) else None
+        environ = app._environ if app is not None else None
+        pi_bin = find_pi_binary(environ)
+        if (app is None or app._pi_bridge is None) and pi_bin is None:
+            self.add_line(
+                "pi binary not found on PATH (set MATTERWAVE_PI_BIN or install pi).",
+                "error",
+            )
+            return
+        self.run_worker(
+            self._compact_pi_in_agent(rest.strip() or None, pi_bin=pi_bin),
+            group="agent-cmd",
+            exclusive=True,
+        )
+
+    async def _compact_pi_in_agent(
+        self, custom_instructions: str | None = None, *, pi_bin: str | None = None
+    ) -> None:
+        from ..api import DEFAULT_BASE_URL
+        from ..app import MatterWaveApp
+        from ..pi_runner import PiRpcBridge, build_pi_argv, build_pi_launch_env
+
+        app = self.app if isinstance(self.app, MatterWaveApp) else None
+        bridge = app._pi_bridge if app is not None else None
+        owns_bridge = False
+        if bridge is None:
+            environ = app._environ if app is not None else None
+            cred = getattr(self.wire, "_credential", None)
+            api_key = str(
+                getattr(cred, "token", "")
+                or (environ.get("MATTERWAVE_API_KEY") if environ else "")
+                or ""
+            )
+            base_url = str(getattr(self.wire, "base_url", "") or DEFAULT_BASE_URL)
+            model = self.session.model if self.session is not None else None
+            env = build_pi_launch_env(api_key, base_url, model=model, base_env=environ)
+            argv = build_pi_argv(pi_bin or "pi", mode="rpc", model=model)
+            bridge = PiRpcBridge(argv, env=env)
+            owns_bridge = True
+        self.busy = True
+        try:
+            if owns_bridge:
+                await bridge.start()
+            event = await bridge.compact(custom_instructions)
+            if event is not None and event.is_error:
+                self.add_line(
+                    f"Pi compaction failed: {event.error or 'Pi RPC compaction failed'}",
+                    "error",
+                )
+            else:
+                self.add_line("Pi session compacted.", "notice")
+        finally:
+            if owns_bridge:
+                await bridge.close()
+            self.busy = False
+            self.render_status()
+
+    def _cmd_pi_new(self, rest: str) -> None:
+        from ..app import MatterWaveApp
+        from ..pi_runner import find_pi_binary
+
+        if self.running or self.busy:
+            self.notify("A run is going; Esc stops it." if self.running else "One moment.")
+            return
+        app = self.app if isinstance(self.app, MatterWaveApp) else None
+        environ = app._environ if app is not None else None
+        pi_bin = find_pi_binary(environ)
+        if (app is None or app._pi_bridge is None) and pi_bin is None:
+            self.add_line(
+                "pi binary not found on PATH (set MATTERWAVE_PI_BIN or install pi).",
+                "error",
+            )
+            return
+        self.run_worker(
+            self._new_pi_in_agent(pi_bin=pi_bin),
+            group="agent-cmd",
+            exclusive=True,
+        )
+
+    async def _new_pi_in_agent(self, *, pi_bin: str | None = None) -> None:
+        from ..api import DEFAULT_BASE_URL
+        from ..app import MatterWaveApp
+        from ..pi_runner import PiRpcBridge, build_pi_argv, build_pi_launch_env
+
+        app = self.app if isinstance(self.app, MatterWaveApp) else None
+        bridge = app._pi_bridge if app is not None else None
+        owns_bridge = False
+        if bridge is None:
+            environ = app._environ if app is not None else None
+            cred = getattr(self.wire, "_credential", None)
+            api_key = str(
+                getattr(cred, "token", "")
+                or (environ.get("MATTERWAVE_API_KEY") if environ else "")
+                or ""
+            )
+            base_url = str(getattr(self.wire, "base_url", "") or DEFAULT_BASE_URL)
+            model = self.session.model if self.session is not None else None
+            env = build_pi_launch_env(api_key, base_url, model=model, base_env=environ)
+            argv = build_pi_argv(pi_bin or "pi", mode="rpc", model=model)
+            bridge = PiRpcBridge(argv, env=env)
+            owns_bridge = True
+        self.busy = True
+        try:
+            if owns_bridge:
+                await bridge.start()
+            event = await bridge.new_session()
+            if event is not None and event.is_error:
+                self.add_line(
+                    f"Pi session reset failed: {event.error or 'Pi RPC session reset failed'}",
+                    "error",
+                )
+            else:
+                self.add_line("Pi session reset.", "notice")
+        finally:
+            if owns_bridge:
+                await bridge.close()
+            self.busy = False
+            self.render_status()
 
     def _cmd_pi(self, rest: str) -> None:
         from ..app import MatterWaveApp

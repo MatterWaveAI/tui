@@ -277,6 +277,13 @@ class PiRpcBridge:
             return
         await self.send_command({"type": "abort"})
 
+    async def _await_rpc_response(self, *extra_types: str) -> PiRpcEvent | None:
+        accepted = {"response", "error", *extra_types}
+        while True:
+            event = await self.read_event()
+            if event is None or event.type in accepted:
+                return event
+
     async def set_model(self, model: str, *, provider: str = "matterwave") -> PiRpcEvent | None:
         """Send `{"type": "set_model", ...}` to switch the active model in `pi --mode rpc`."""
         await self.send_command(
@@ -287,14 +294,36 @@ class PiRpcBridge:
                 "model": model,
             }
         )
-        while True:
-            event = await self.read_event()
-            if (
-                event is None
-                or event.type in ("response", "error")
-                or event.type == "model_changed"
-            ):
-                return event
+        return await self._await_rpc_response("model_changed")
+
+    async def compact(self, custom_instructions: str | None = None) -> PiRpcEvent | None:
+        """Send `{"type": "compact", ...}` to compact the active Pi 1.0 RPC session."""
+        command: dict[str, Any] = {"type": "compact"}
+        if custom_instructions:
+            command["customInstructions"] = custom_instructions
+            command["instructions"] = custom_instructions
+        await self.send_command(command)
+        return await self._await_rpc_response("compacted", "auto_compaction_end")
+
+    async def get_state(self) -> PiRpcEvent | None:
+        """Send `{"type": "get_state"}` to inspect the active Pi 1.0 RPC session state."""
+        await self.send_command({"type": "get_state"})
+        return await self._await_rpc_response("state")
+
+    async def new_session(self) -> PiRpcEvent | None:
+        """Send `{"type": "new_session"}` to reset the active Pi 1.0 RPC session."""
+        await self.send_command({"type": "new_session"})
+        return await self._await_rpc_response("session_reset")
+
+    async def steer(self, message: str) -> PiRpcEvent | None:
+        """Send `{"type": "steer", "message": ...}` to steer an active Pi 1.0 turn."""
+        await self.send_command({"type": "steer", "message": message})
+        return await self._await_rpc_response()
+
+    async def follow_up(self, message: str) -> PiRpcEvent | None:
+        """Send `{"type": "follow_up", "message": ...}` to queue a follow-up prompt in Pi 1.0."""
+        await self.send_command({"type": "follow_up", "message": message})
+        return await self._await_rpc_response()
 
     async def close(self) -> None:
         """Close stdin and terminate the subprocess cleanly."""

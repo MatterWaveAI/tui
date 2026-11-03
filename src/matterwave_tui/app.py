@@ -150,6 +150,9 @@ SLASH_COMMANDS: tuple[str, ...] = (
     "/pi",
     "/pi-engine",
     "/agent-engine",
+    "/pi-compact",
+    "/pi-status",
+    "/pi-new",
 )
 
 
@@ -757,6 +760,9 @@ class MatterWaveApp(App[None]):
             rows.append((shown, binding.description or binding.action, binding.id or ""))
         rows.append(("/pi <prompt>", "Run prompt with Pi 1.0 agent in transcript", ""))
         rows.append(("/pi-engine", "Inspect or switch agent engine (auto, pi, builtin)", ""))
+        rows.append(("/pi-compact [instructions]", "Compact the Pi 1.0 RPC session context", ""))
+        rows.append(("/pi-status", "Inspect Pi 1.0 binary, engine, and session status", ""))
+        rows.append(("/pi-new", "Reset the Pi 1.0 RPC session", ""))
         return rows
 
     def action_help(self) -> None:
@@ -3182,15 +3188,34 @@ class MatterWaveApp(App[None]):
         False for an unknown one, whose text stays in the composer."""
         body = text[1:]
         first = body.split(" ", 1)[0]
-        if first not in ("role", "shell", "temp", "pi", "pi-engine", "agent-engine"):
+        if first not in (
+            "role",
+            "shell",
+            "temp",
+            "pi",
+            "pi-engine",
+            "agent-engine",
+            "pi-compact",
+            "pi-status",
+            "pi-new",
+        ):
             self.notify(
-                f"Unknown command /{first}: /role, /shell, /temp, /pi and /pi-engine are the "
-                "commands. Start with // to send a message that begins with /.",
+                f"Unknown command /{first}: /role, /shell, /temp, /pi, /pi-engine, /pi-compact and "
+                "/pi-status are the commands. Start with // to send a message that begins with /.",
                 severity="warning",
             )
             return False
         if first in ("pi-engine", "agent-engine"):
             self.set_agent_engine(body[len(first) :].strip())
+            return True
+        if first == "pi-status":
+            self.run_pi_status()
+            return True
+        if first == "pi-compact":
+            self.run_pi_compact(body[len("pi-compact") :].strip())
+            return True
+        if first == "pi-new":
+            self.run_pi_new()
             return True
         if first == "pi":
             self.run_pi_prompt(body[len("pi") :].strip())
@@ -3257,6 +3282,205 @@ class MatterWaveApp(App[None]):
             self.notify(f"Agent engine set to {choice}.")
         self.render_status()
 
+    def _append_pi_notice(self, text: str) -> None:
+        note = ConversationMessage(
+            id=f"_pi-notice-{time.monotonic_ns()}",
+            conversation_id=self.conversation.id if self.conversation else "",
+            role="system",
+            parent_id=self.thread.leaf,
+            parts=[{"type": "text", "text": text}],
+            content=text,
+            created_at="",
+        )
+        self.thread.add(note)
+        self.thread.leaf = note.id
+        self.run_worker(self.render_thread(), group="pi-notice")
+
+    def _create_pi_bridge(self, pi_bin: str | None) -> PiRpcBridge:
+        model = self.effective_model()
+        cred = getattr(self.api, "_credential", None)
+        api_key = str(getattr(cred, "token", "") or self._environ.get("MATTERWAVE_API_KEY") or "")
+        base_url = str(
+            getattr(self.api, "base_url", "")
+            or self._environ.get("MATTERWAVE_BASE_URL")
+            or DEFAULT_BASE_URL
+        )
+        env = build_pi_launch_env(
+            api_key,
+            base_url,
+            preset_id=self.active_preset_id(),
+            model=model,
+            temporary=self.temporary_chat,
+            base_env=self._environ,
+        )
+        argv = build_pi_argv(pi_bin or "pi", mode="rpc", model=model)
+        return PiRpcBridge(argv, env=env)
+
+    def run_pi_status(self) -> None:
+        """Display `/pi-status`: binary availability, active engine, model, preset, and session."""
+        pi_bin = find_pi_binary(self._environ)
+        resolved = (
+            ("pi" if pi_bin else "builtin") if self.agent_engine == "auto" else self.agent_engine
+        )
+        model = self.effective_model() or "default"
+        preset = self.active_preset()
+        preset_label = (
+            str(preset.get("name") or preset.get("id") or "none")
+            if preset is not None
+            else (self.active_preset_id() or "none")
+        )
+        binary_label = pi_bin if pi_bin else "not found (set MATTERWAVE_PI_BIN or install pi)"
+        session_label = "temporary" if self.temporary_chat else "persistent"
+        summary = (
+            f"Pi 1.0 status: engine={self.agent_engine} (active: {resolved}) | "
+            f"binary={binary_label} | model={model} | preset={preset_label} | "
+            f"session={session_label}"
+        )
+        self.notify(summary)
+        self._append_pi_notice(summary)
+
+    def run_pi_compact(self, instructions: str = "") -> None:
+        """Execute `/pi-compact [instructions]` through `PiRpcBridge.compact(...)`."""
+        if self.streaming:
+            self.notify(
+                "Wait for the current turn to finish, or press Esc to stop it.",
+                severity="warning",
+            )
+            return
+        pi_bin: str | None = None
+        if self._pi_bridge is None:
+            pi_bin = find_pi_binary(self._environ)
+            if pi_bin is None:
+                msg = "pi binary not found on PATH (set MATTERWAVE_PI_BIN or install pi)."
+                self.notify(msg, severity="warning")
+                self._append_pi_notice(msg)
+                return
+        self.run_worker(
+            self._compact_pi(instructions.strip() or None, pi_bin=pi_bin),
+            group="pi-compact",
+            exclusive=True,
+        )
+
+    async def _compact_pi(
+        self, custom_instructions: str | None = None, *, pi_bin: str | None = None
+    ) -> None:
+        bridge = self._pi_bridge
+        owns_bridge = False
+        if bridge is None:
+            bridge = self._create_pi_bridge(pi_bin)
+            owns_bridge = True
+        try:
+            if owns_bridge:
+                await bridge.start()
+            event = await bridge.compact(custom_instructions)
+        except Exception as exc:
+            msg = f"Pi compaction failed: {exc}"
+            self.notify(msg, severity="error")
+            self._append_pi_notice(msg)
+            return
+        finally:
+            if owns_bridge:
+                await bridge.close()
+
+        if event is not None and event.is_error:
+            err = event.error or "Pi RPC compaction failed"
+            msg = f"Pi compaction failed: {err}"
+            self.notify(msg, severity="error")
+            self._append_pi_notice(msg)
+            return
+
+        summary = ""
+        if event is not None:
+            raw_data = event.raw.get("data")
+            summary = str(
+                event.raw.get("summary")
+                or (raw_data.get("summary") if isinstance(raw_data, dict) else "")
+                or event.text
+                or ""
+            ).strip()
+        if summary:
+            msg = f"Pi session compacted: {summary}"
+        elif custom_instructions:
+            msg = f"Pi session compacted ({custom_instructions})."
+        else:
+            msg = "Pi session compacted."
+        self.notify(msg)
+        note = ConversationMessage(
+            id=f"_pi-compact-{time.monotonic_ns()}",
+            conversation_id=self.conversation.id if self.conversation else "",
+            role="system",
+            parent_id=self.thread.leaf,
+            parts=[{"type": "text", "text": msg}],
+            content=msg,
+            created_at="",
+        )
+        self.thread.add(note)
+        self.thread.leaf = note.id
+        await self.render_thread()
+
+    def run_pi_new(self) -> None:
+        """Execute `/pi-new` through `PiRpcBridge.new_session()`."""
+        if self.streaming:
+            self.notify(
+                "Wait for the current turn to finish, or press Esc to stop it.",
+                severity="warning",
+            )
+            return
+        pi_bin: str | None = None
+        if self._pi_bridge is None:
+            pi_bin = find_pi_binary(self._environ)
+            if pi_bin is None:
+                msg = "pi binary not found on PATH (set MATTERWAVE_PI_BIN or install pi)."
+                self.notify(msg, severity="warning")
+                self._append_pi_notice(msg)
+                return
+        self.run_worker(
+            self._new_pi_session(pi_bin=pi_bin),
+            group="pi-new",
+            exclusive=True,
+        )
+
+    async def _new_pi_session(self, *, pi_bin: str | None = None) -> None:
+        bridge = self._pi_bridge
+        owns_bridge = False
+        if bridge is None:
+            bridge = self._create_pi_bridge(pi_bin)
+            owns_bridge = True
+        try:
+            if owns_bridge:
+                await bridge.start()
+            event = await bridge.new_session()
+        except Exception as exc:
+            msg = f"Pi session reset failed: {exc}"
+            self.notify(msg, severity="error")
+            self._append_pi_notice(msg)
+            return
+        finally:
+            if owns_bridge:
+                await bridge.close()
+
+        if event is not None and event.is_error:
+            err = event.error or "Pi RPC session reset failed"
+            msg = f"Pi session reset failed: {err}"
+            self.notify(msg, severity="error")
+            self._append_pi_notice(msg)
+            return
+
+        msg = "Pi session reset."
+        self.notify(msg)
+        note = ConversationMessage(
+            id=f"_pi-new-{time.monotonic_ns()}",
+            conversation_id=self.conversation.id if self.conversation else "",
+            role="system",
+            parent_id=self.thread.leaf,
+            parts=[{"type": "text", "text": msg}],
+            content=msg,
+            created_at="",
+        )
+        self.thread.add(note)
+        self.thread.leaf = note.id
+        await self.render_thread()
+
     def run_pi_prompt(self, prompt: str) -> None:
         """Execute `/pi <prompt>` through `PiRpcBridge`, streaming into the transcript."""
         if not prompt:
@@ -3274,18 +3498,7 @@ class MatterWaveApp(App[None]):
             if pi_bin is None:
                 msg = "pi binary not found on PATH (set MATTERWAVE_PI_BIN or install pi)."
                 self.notify(msg, severity="warning")
-                note = ConversationMessage(
-                    id=f"_pi-notice-{time.monotonic_ns()}",
-                    conversation_id=self.conversation.id if self.conversation else "",
-                    role="system",
-                    parent_id=self.thread.leaf,
-                    parts=[{"type": "text", "text": msg}],
-                    content=msg,
-                    created_at="",
-                )
-                self.thread.add(note)
-                self.thread.leaf = note.id
-                self.run_worker(self.render_thread(), group="pi-notice")
+                self._append_pi_notice(msg)
                 return
         self.run_worker(
             self._consume_pi(prompt, pi_bin=pi_bin),

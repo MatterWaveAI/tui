@@ -82,6 +82,46 @@ for raw in sys.stdin:
         sys.stdout.write(json.dumps({"type": "response", "command": "abort", "success": True}) + "\\n")
         sys.stdout.write(json.dumps({"type": "turn_end", "aborted": True}) + "\\n")
         sys.stdout.flush()
+    elif ctype == "compact":
+        instructions = cmd.get("customInstructions") or cmd.get("instructions") or ""
+        sys.stdout.write(json.dumps({
+            "type": "response",
+            "command": "compact",
+            "success": True,
+            "summary": f"compacted ({instructions})" if instructions else "compacted 4 turns",
+            "tokensBefore": 4200,
+            "tokensAfter": 900,
+        }) + "\\n")
+        sys.stdout.flush()
+    elif ctype == "get_state":
+        sys.stdout.write(json.dumps({
+            "type": "response",
+            "command": "get_state",
+            "success": True,
+            "data": {
+                "model": current_model,
+                "provider": "matterwave",
+                "isStreaming": False,
+                "messageCount": 4,
+            },
+        }) + "\\n")
+        sys.stdout.flush()
+    elif ctype == "new_session":
+        sys.stdout.write(json.dumps({
+            "type": "response",
+            "command": "new_session",
+            "success": True,
+            "data": {"cancelled": False},
+        }) + "\\n")
+        sys.stdout.flush()
+    elif ctype in ("steer", "follow_up"):
+        sys.stdout.write(json.dumps({
+            "type": "response",
+            "command": ctype,
+            "success": True,
+            "message": cmd.get("message", ""),
+        }) + "\\n")
+        sys.stdout.flush()
 """
 
 
@@ -188,6 +228,33 @@ async def test_pi_rpc_bridge_prompt_tools_set_model_abort_and_shutdown() -> None
         abort_end = await bridge.read_event()
         assert abort_ack is not None and abort_ack.type == "response"
         assert abort_end is not None and abort_end.type == "turn_end"
+
+        compact_ack = await bridge.compact("keep test output")
+        assert compact_ack is not None
+        assert compact_ack.type == "response"
+        assert compact_ack.raw.get("summary") == "compacted (keep test output)"
+
+        state_ack = await bridge.get_state()
+        assert state_ack is not None
+        assert state_ack.type == "response"
+        assert state_ack.raw.get("data", {}).get("model") == "kimi-k2.5"
+
+        steer_ack = await bridge.steer("focus on pi_runner.py")
+        assert steer_ack is not None
+        assert steer_ack.type == "response"
+        assert steer_ack.raw.get("command") == "steer"
+        assert steer_ack.raw.get("message") == "focus on pi_runner.py"
+
+        followup_ack = await bridge.follow_up("then run pytest")
+        assert followup_ack is not None
+        assert followup_ack.type == "response"
+        assert followup_ack.raw.get("command") == "follow_up"
+        assert followup_ack.raw.get("message") == "then run pytest"
+
+        reset_ack = await bridge.new_session()
+        assert reset_ack is not None
+        assert reset_ack.type == "response"
+        assert reset_ack.raw.get("command") == "new_session"
 
     assert not bridge.running
 
@@ -396,3 +463,92 @@ async def test_interactive_tui_pi_engine_toggle_and_help_discovery(
         lines = [str(rows.get_option_at_index(i).prompt) for i in range(rows.option_count)]
         assert any("/pi <prompt>" in line for line in lines)
         assert any("/pi-engine" in line for line in lines)
+        assert any("/pi-compact" in line for line in lines)
+        assert any("/pi-status" in line for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_interactive_tui_pi_compact_status_and_new_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        app_mod,
+        "find_pi_binary",
+        lambda environ=None: sys.executable,
+    )
+    monkeypatch.setattr(
+        app_mod,
+        "build_pi_argv",
+        lambda pi_bin, **_: [sys.executable, "-u", "-c", MOCK_PI_RPC_SCRIPT],
+    )
+    api = FakeAPI()
+    app = MatterWaveApp(cast(ChatAPI, api))
+    shown: list[str] = []
+    app.notify = lambda message, **_: shown.append(str(message))  # type: ignore[method-assign]
+
+    assert "/pi-compact" in SLASH_COMMANDS
+    assert "/pi-status" in SLASH_COMMANDS
+    assert "/pi-new" in SLASH_COMMANDS
+
+    async with app.run_test() as pilot:
+        await _settle(app, pilot)
+        app.conversation = None
+        app.model = "glm-4.6"
+        app.selected_preset_id = "preset-ops"
+        composer = app.query_one("#composer", TextArea)
+
+        composer.text = "/pi-status"
+        app.action_send()
+        await _settle(app, pilot)
+        assert composer.text == ""
+        assert any(
+            "Pi 1.0 status: engine=auto (active: pi)" in s and "model=glm-4.6" in s for s in shown
+        )
+        views = list(app.query(MessageView))
+        assert views
+        assert "Pi 1.0 status:" in views[-1].message.content
+        assert "preset=preset-ops" in views[-1].message.content
+
+        composer.text = "/pi-compact retain failure tracebacks"
+        app.action_send()
+        await _settle(app, pilot)
+        assert composer.text == ""
+        assert any(
+            "Pi session compacted: compacted (retain failure tracebacks)" in s for s in shown
+        )
+        views = list(app.query(MessageView))
+        assert "compacted (retain failure tracebacks)" in views[-1].message.content
+
+        composer.text = "/pi-new"
+        app.action_send()
+        await _settle(app, pilot)
+        assert composer.text == ""
+        assert any("Pi session reset." in s for s in shown)
+        views = list(app.query(MessageView))
+        assert "Pi session reset." in views[-1].message.content
+
+
+@pytest.mark.asyncio
+async def test_interactive_tui_pi_compact_and_status_when_binary_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(app_mod, "find_pi_binary", lambda environ=None: None)
+    api = FakeAPI()
+    app = MatterWaveApp(cast(ChatAPI, api), environ={"PATH": ""})
+    shown: list[str] = []
+    app.notify = lambda message, **_: shown.append(str(message))  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await _settle(app, pilot)
+        composer = app.query_one("#composer", TextArea)
+
+        composer.text = "/pi-status"
+        app.action_send()
+        await _settle(app, pilot)
+        assert any("active: builtin" in s and "not found" in s for s in shown)
+
+        shown.clear()
+        composer.text = "/pi-compact"
+        app.action_send()
+        await _settle(app, pilot)
+        assert any("pi binary not found on PATH" in s for s in shown)

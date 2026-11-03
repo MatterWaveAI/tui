@@ -7,8 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-03
+
 ### Added
 
+- SDK 0.5.0 client parity (`MatterWaveClient` and `HttpChatAPI`): async helpers
+  for web search (`search_web` -> `POST /v1/search`), RAG retrieval
+  (`query_rag` -> `POST /v1/rag/query`, `list_rag_collections` ->
+  `GET /v1/rag/collections`), MCP Server Registry (`list_mcp_servers` ->
+  `GET /v1/mcp/servers`, `call_mcp_tool` -> `POST /v1/mcp/servers/{id}/call`),
+  multi-file edit sessions (`create_edit_session` -> `POST /v1/edit-sessions`),
+  and Agent Command Center runs (`list_agent_runs` -> `GET /api/v1/runs`), with
+  graceful HTTP fallback via `httpx`.
+- Interactive composer slash commands and `/help` discovery for `/search <query>`,
+  `/rag [collection_id] <query>`, `/mcp [server_id]`, and `/runs [status]`.
 - Organization presets (`M`, or "Choose preset…" on the command palette
   when the organisation offers presets): picking a preset sets `preset_id`
   on the conversation (`PATCH /api/conversations/{id}`, or `POST
@@ -461,7 +473,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The package depends on the published `matterwave-sdk` instead of a
   sibling path that only existed in the platform monorepo, so it installs.
 
-[Unreleased]: https://github.com/MatterWaveAI/tui/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/MatterWaveAI/tui/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/MatterWaveAI/tui/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/MatterWaveAI/tui/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/MatterWaveAI/tui/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/MatterWaveAI/tui/compare/v0.2.1...v0.3.0

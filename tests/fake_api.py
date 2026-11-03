@@ -337,6 +337,54 @@ class FakeAPI:
         self.usage_reads = 0
         self.budget_reads = 0
         self.streams_closed = 0
+        self.web_searches: list[tuple[str, int]] = []
+        self.web_search_results: list[dict[str, Any]] = [
+            {
+                "title": "MatterWave Docs",
+                "url": "https://docs.matterwave.test/search",
+                "snippet": "Documentation for MatterWave web search and citations.",
+            }
+        ]
+        self.rag_collections: list[dict[str, Any]] = [
+            {"id": "col-docs", "name": "Engineering Docs", "document_count": 12}
+        ]
+        self.rag_queries: list[tuple[str, str, int]] = []
+        self.rag_results: list[dict[str, Any]] = [
+            {
+                "id": "chunk-1",
+                "score": 0.94,
+                "text": "Architecture overview for the RAG pipeline.",
+                "source": "architecture.md",
+            }
+        ]
+        self.mcp_server_rows: list[dict[str, Any]] = [
+            {
+                "id": "srv-github",
+                "name": "GitHub MCP",
+                "status": "connected",
+                "tools": [
+                    {"name": "list_issues", "description": "List repository issues"},
+                    {"name": "get_pull_request", "description": "Fetch pull request details"},
+                ],
+            }
+        ]
+        self.mcp_tool_calls: list[tuple[str, str, dict[str, Any]]] = []
+        self.edit_sessions_created: list[tuple[str, list[str]]] = []
+        self.agent_run_rows: list[dict[str, Any]] = [
+            {
+                "id": "run-101",
+                "agent_id": "agent-coder",
+                "status": "running",
+                "goal": "Implement parity slash commands",
+            },
+            {
+                "id": "run-100",
+                "agent_id": "agent-reviewer",
+                "status": "completed",
+                "goal": "Verify SDK dependency floor",
+            },
+        ]
+        self.agent_runs_queries: list[tuple[str | None, str | None]] = []
 
     async def me(self) -> Me:
         return Me.from_dict({"subject": "u", "kind": "user"})
@@ -951,6 +999,63 @@ class FakeAPI:
         self.sent.append((conversation_id, f"regen:{message_id}", model))
         self.temperatures_sent.append(temperature)
         return self._play()
+
+    async def search_web(self, query: str, max_results: int = 5) -> dict[str, Any]:
+        self.web_searches.append((query, max_results))
+        return {
+            "query": query,
+            "results": [dict(r) for r in self.web_search_results[:max_results]],
+        }
+
+    async def query_rag(
+        self, collection_id: str, query: str, top_k: int = 5
+    ) -> dict[str, Any]:
+        self.rag_queries.append((collection_id, query, top_k))
+        return {
+            "collection_id": collection_id,
+            "query": query,
+            "results": [dict(r) for r in self.rag_results[:top_k]],
+        }
+
+    async def list_rag_collections(self) -> dict[str, Any]:
+        return {"collections": [dict(c) for c in self.rag_collections]}
+
+    async def list_mcp_servers(self) -> dict[str, Any]:
+        return {"servers": [copy.deepcopy(s) for s in self.mcp_server_rows]}
+
+    async def call_mcp_tool(
+        self, server_id: str, tool_name: str, arguments: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        args = dict(arguments or {})
+        self.mcp_tool_calls.append((server_id, tool_name, args))
+        return {
+            "server_id": server_id,
+            "tool_name": tool_name,
+            "output": f"Executed {tool_name} on {server_id}",
+            "is_error": False,
+        }
+
+    async def create_edit_session(self, goal: str, files: list[str]) -> dict[str, Any]:
+        file_list = list(files)
+        self.edit_sessions_created.append((goal, file_list))
+        return {
+            "id": f"es-{len(self.edit_sessions_created)}",
+            "goal": goal,
+            "files": file_list,
+            "status": "active",
+        }
+
+    async def list_agent_runs(
+        self, agent_id: str | None = None, status: str | None = None
+    ) -> dict[str, Any]:
+        self.agent_runs_queries.append((agent_id, status))
+        rows = [
+            dict(r)
+            for r in self.agent_run_rows
+            if (not agent_id or r.get("agent_id") == agent_id)
+            and (not status or r.get("status") == status)
+        ]
+        return {"runs": rows}
 
     async def aclose(self) -> None:
         return None

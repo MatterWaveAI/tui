@@ -44,6 +44,39 @@ PI_SLASH_COMMAND_SPECS: tuple[SlashCommandSpec, ...] = (
     SlashCommandSpec("/pi-new", "/pi-new", "Reset the Pi 1.0 RPC session"),
 )
 
+WAVE_SLASH_COMMAND_SPECS: tuple[SlashCommandSpec, ...] = (
+    SlashCommandSpec(
+        "/search",
+        "/search <query>",
+        "Search the web and render citations and snippets into the transcript",
+    ),
+    SlashCommandSpec(
+        "/rag",
+        "/rag [collection_id] <query>",
+        "Query a RAG collection, or list RAG collections when invoked with no arguments",
+    ),
+    SlashCommandSpec(
+        "/mcp",
+        "/mcp [server_id]",
+        "List registered MCP servers and their tools",
+    ),
+    SlashCommandSpec(
+        "/runs",
+        "/runs [status]",
+        "List recent Agent Command Center runs with status, agent ID, and run ID",
+    ),
+    SlashCommandSpec(
+        "/help",
+        "/help",
+        "Show keybindings and interactive composer slash commands",
+    ),
+)
+
+SLASH_COMMAND_SPECS: tuple[SlashCommandSpec, ...] = (
+    *PI_SLASH_COMMAND_SPECS,
+    *WAVE_SLASH_COMMAND_SPECS,
+)
+
 SLASH_COMMANDS: tuple[str, ...] = (
     "/role",
     "/shell",
@@ -56,6 +89,11 @@ SLASH_COMMANDS: tuple[str, ...] = (
     "/pi-compact",
     "/pi-status",
     "/pi-new",
+    "/search",
+    "/rag",
+    "/mcp",
+    "/runs",
+    "/help",
 )
 
 SLASH_COMMAND_DESCRIPTIONS: dict[str, str] = {
@@ -63,5 +101,5 @@ SLASH_COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/shell": "Toggle shell assistant mode",
     "/temp": "Set or inspect conversation sampling temperature",
     "/agent-engine": "Inspect or switch agent engine (auto, pi, builtin)",
-    **{spec.name: spec.description for spec in PI_SLASH_COMMAND_SPECS},
+    **{spec.name: spec.description for spec in SLASH_COMMAND_SPECS},
 }

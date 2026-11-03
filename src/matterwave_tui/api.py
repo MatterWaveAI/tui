@@ -290,6 +290,26 @@ class ChatAPI(Protocol):
         temperature: float | None = None,
     ) -> AsyncIterator[StreamItem]: ...
 
+    async def search_web(self, query: str, max_results: int = 5) -> dict[str, Any]: ...
+
+    async def query_rag(
+        self, collection_id: str, query: str, top_k: int = 5
+    ) -> dict[str, Any]: ...
+
+    async def list_rag_collections(self) -> dict[str, Any]: ...
+
+    async def list_mcp_servers(self) -> dict[str, Any]: ...
+
+    async def call_mcp_tool(
+        self, server_id: str, tool_name: str, arguments: dict[str, Any] | None = None
+    ) -> dict[str, Any]: ...
+
+    async def create_edit_session(self, goal: str, files: list[str]) -> dict[str, Any]: ...
+
+    async def list_agent_runs(
+        self, agent_id: str | None = None, status: str | None = None
+    ) -> dict[str, Any]: ...
+
     async def aclose(self) -> None: ...
 
 
@@ -1080,6 +1100,108 @@ class HttpChatAPI:
         except McpToolError as exc:
             return str(exc), True
         return result.text, False
+
+    # --- platform wave endpoints (/v1/search, /v1/rag, /v1/mcp, /v1/edit-sessions, /api/v1/runs) ---
+
+    async def _v1_json(
+        self,
+        client: _Client,
+        method: str,
+        path: str,
+        *,
+        body: dict[str, Any] | None = None,
+        params: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Send a JSON request through the SDK transport with graceful httpx fallback."""
+        if isinstance(self._http, httpx.AsyncClient):
+            response = await client._send(
+                sdk_base.Request(method, path, body, True, False, params=params or {})
+            )
+        else:
+            url = f"{str(self.base_url).rstrip('/')}{path}"
+            headers = {"User-Agent": USER_AGENT}
+            if self._credential.token:
+                headers["Authorization"] = f"Bearer {self._credential.token}"
+            response = await self._http.request(
+                method,
+                url,
+                json=body,
+                params=params,
+                headers=headers,
+            )
+        if not response.content:
+            return {}
+        parsed = response.json()
+        if isinstance(parsed, dict):
+            return parsed
+        if isinstance(parsed, list):
+            return {"data": parsed}
+        return {"result": parsed}
+
+    async def search_web(self, query: str, max_results: int = 5) -> dict[str, Any]:
+        """`POST /v1/search`: web search with citations and snippets."""
+        return await self._v1_json(
+            self._reads,
+            "POST",
+            "/v1/search",
+            body={"query": query, "max_results": max_results},
+        )
+
+    async def query_rag(
+        self, collection_id: str, query: str, top_k: int = 5
+    ) -> dict[str, Any]:
+        """`POST /v1/rag/query`: retrieve relevant chunks from a RAG collection."""
+        return await self._v1_json(
+            self._reads,
+            "POST",
+            "/v1/rag/query",
+            body={"collection_id": collection_id, "query": query, "top_k": top_k},
+        )
+
+    async def list_rag_collections(self) -> dict[str, Any]:
+        """`GET /v1/rag/collections`: list available RAG collections."""
+        return await self._v1_json(self._reads, "GET", "/v1/rag/collections")
+
+    async def list_mcp_servers(self) -> dict[str, Any]:
+        """`GET /v1/mcp/servers`: list registered MCP servers and their tools."""
+        return await self._v1_json(self._reads, "GET", "/v1/mcp/servers")
+
+    async def call_mcp_tool(
+        self, server_id: str, tool_name: str, arguments: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """`POST /v1/mcp/servers/{server_id}/call`: invoke a tool on a registered MCP server."""
+        safe_id = quote(server_id, safe="")
+        return await self._v1_json(
+            self._writes,
+            "POST",
+            f"/v1/mcp/servers/{safe_id}/call",
+            body={"tool_name": tool_name, "arguments": arguments or {}},
+        )
+
+    async def create_edit_session(self, goal: str, files: list[str]) -> dict[str, Any]:
+        """`POST /v1/edit-sessions`: start a multi-file edit session."""
+        return await self._v1_json(
+            self._writes,
+            "POST",
+            "/v1/edit-sessions",
+            body={"goal": goal, "files": list(files)},
+        )
+
+    async def list_agent_runs(
+        self, agent_id: str | None = None, status: str | None = None
+    ) -> dict[str, Any]:
+        """`GET /api/v1/runs`: list recent Agent Command Center runs."""
+        params: dict[str, str] = {}
+        if agent_id:
+            params["agent_id"] = agent_id
+        if status:
+            params["status"] = status
+        return await self._v1_json(
+            self._reads,
+            "GET",
+            "/api/v1/runs",
+            params=params or None,
+        )
 
     # --- the stream ----------------------------------------------------------
 

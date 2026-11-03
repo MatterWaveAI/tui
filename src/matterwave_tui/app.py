@@ -46,7 +46,7 @@ from .agent.session import SessionOptions
 if TYPE_CHECKING:
     from .agent.screen import AgentScreen
 from .api import DEFAULT_BASE_URL, NOTIFICATIONS_PAGE, ChatAPI, Cut, Opened, StreamItem
-from .commands import PI_SLASH_COMMAND_SPECS, SLASH_COMMANDS
+from .commands import PI_SLASH_COMMAND_SPECS, SLASH_COMMAND_SPECS, SLASH_COMMANDS
 from .dictation import MEDIA_TYPES, MicRecorder, media_type_for, mic_available
 from .export import conversation_markdown, export_filename, free_path
 from .failures import Failure, classify, retry_in
@@ -749,7 +749,7 @@ class MatterWaveApp(App[None]):
                 self.get_key_display(replace(binding, key=k)) for k in keys.split(",")
             )
             rows.append((shown, binding.description or binding.action, binding.id or ""))
-        for spec in PI_SLASH_COMMAND_SPECS:
+        for spec in SLASH_COMMAND_SPECS:
             rows.append((spec.usage, spec.description, ""))
         return rows
 
@@ -3219,12 +3219,27 @@ class MatterWaveApp(App[None]):
         first = body.split(" ", 1)[0]
         if f"/{first}" not in SLASH_COMMANDS:
             self.notify(
-                f"Unknown command /{first}: /role, /shell, /temp, /pi, /pi-engine, /pi-model, "
-                "/pi-fork, /pi-compact and /pi-status are the commands. "
-                "Start with // to send a message that begins with /.",
+                f"Unknown command /{first}: /role, /shell, /temp, /search, /rag, /mcp, /runs, "
+                "/help, /pi, /pi-engine, /pi-model, /pi-fork, /pi-compact and /pi-status are "
+                "the commands. Start with // to send a message that begins with /.",
                 severity="warning",
             )
             return False
+        if first == "help":
+            self.run_help_command()
+            return True
+        if first == "search":
+            self.run_search_command(body[len("search") :].strip())
+            return True
+        if first == "rag":
+            self.run_rag_command(body[len("rag") :].strip())
+            return True
+        if first == "mcp":
+            self.run_mcp_command(body[len("mcp") :].strip())
+            return True
+        if first == "runs":
+            self.run_runs_command(body[len("runs") :].strip())
+            return True
         if first in ("pi-engine", "agent-engine"):
             self.set_agent_engine(body[len(first) :].strip())
             return True
@@ -3275,6 +3290,158 @@ class MatterWaveApp(App[None]):
             return True
         self.apply_role(rest)
         return True
+
+    # --- Web search, RAG, MCP registry & Agent runs slash commands ---------------
+
+    def run_help_command(self) -> None:
+        """Open `/help` (`HelpScreen`) and append a slash-command summary into the transcript."""
+        lines = ["Interactive slash commands:"]
+        for spec in SLASH_COMMAND_SPECS:
+            lines.append(f"  {spec.usage:<28} {spec.description}")
+        summary = "\n".join(lines)
+        self.notify("Opened help (? / F1).")
+        self._append_pi_notice(summary)
+        self.action_help()
+
+    def run_search_command(self, query: str) -> None:
+        """Execute `/search <query>` via `search_web(query)` and render citations into transcript."""
+        cleaned = query.strip()
+        if not cleaned:
+            msg = "Usage: /search <query> — search the web and render citations."
+            self.notify(msg, severity="warning")
+            self._append_pi_notice(msg)
+            return
+        self.run_worker(
+            self._execute_search_command(cleaned),
+            group="slash-search",
+            exclusive=True,
+        )
+
+    async def _execute_search_command(self, query: str) -> None:
+        try:
+            body = await self.api.search_web(query)
+        except Exception as exc:
+            msg = f"Web search failed: {exc}"
+            self.notify(msg, severity="error")
+            self._append_pi_notice(msg)
+            return
+        msg = _format_web_search_results(query, body)
+        self.notify(msg.splitlines()[0])
+        note = ConversationMessage(
+            id=f"_search-{time.monotonic_ns()}",
+            conversation_id=self.conversation.id if self.conversation else "",
+            role="system",
+            parent_id=self.thread.leaf,
+            parts=[{"type": "text", "text": msg}],
+            content=msg,
+            created_at="",
+        )
+        self.thread.add(note)
+        self.thread.leaf = note.id
+        await self.render_thread()
+
+    def run_rag_command(self, args: str = "") -> None:
+        """Execute `/rag [collection_id] <query>` (or list collections when called with no args)."""
+        cleaned = args.strip()
+        self.run_worker(
+            self._execute_rag_command(cleaned),
+            group="slash-rag",
+            exclusive=True,
+        )
+
+    async def _execute_rag_command(self, cleaned: str) -> None:
+        try:
+            if not cleaned:
+                body = await self.api.list_rag_collections()
+                msg = _format_rag_collections(body)
+            else:
+                parts = cleaned.split(None, 1)
+                if len(parts) == 2:
+                    collection_id, query = parts[0], parts[1].strip()
+                else:
+                    collection_id, query = "default", parts[0]
+                body = await self.api.query_rag(collection_id, query)
+                msg = _format_rag_query_results(collection_id, query, body)
+        except Exception as exc:
+            msg = f"RAG request failed: {exc}"
+            self.notify(msg, severity="error")
+            self._append_pi_notice(msg)
+            return
+        self.notify(msg.splitlines()[0])
+        note = ConversationMessage(
+            id=f"_rag-{time.monotonic_ns()}",
+            conversation_id=self.conversation.id if self.conversation else "",
+            role="system",
+            parent_id=self.thread.leaf,
+            parts=[{"type": "text", "text": msg}],
+            content=msg,
+            created_at="",
+        )
+        self.thread.add(note)
+        self.thread.leaf = note.id
+        await self.render_thread()
+
+    def run_mcp_command(self, server_id: str = "") -> None:
+        """Execute `/mcp [server_id]` to list registered MCP servers and their tools."""
+        self.run_worker(
+            self._execute_mcp_command(server_id.strip()),
+            group="slash-mcp",
+            exclusive=True,
+        )
+
+    async def _execute_mcp_command(self, server_id: str) -> None:
+        try:
+            body = await self.api.list_mcp_servers()
+        except Exception as exc:
+            msg = f"MCP server listing failed: {exc}"
+            self.notify(msg, severity="error")
+            self._append_pi_notice(msg)
+            return
+        msg = _format_mcp_servers(server_id, body)
+        self.notify(msg.splitlines()[0])
+        note = ConversationMessage(
+            id=f"_mcp-{time.monotonic_ns()}",
+            conversation_id=self.conversation.id if self.conversation else "",
+            role="system",
+            parent_id=self.thread.leaf,
+            parts=[{"type": "text", "text": msg}],
+            content=msg,
+            created_at="",
+        )
+        self.thread.add(note)
+        self.thread.leaf = note.id
+        await self.render_thread()
+
+    def run_runs_command(self, status_filter: str = "") -> None:
+        """Execute `/runs [status]` to list recent Agent Command Center runs."""
+        self.run_worker(
+            self._execute_runs_command(status_filter.strip()),
+            group="slash-runs",
+            exclusive=True,
+        )
+
+    async def _execute_runs_command(self, status_filter: str) -> None:
+        try:
+            body = await self.api.list_agent_runs(status=status_filter or None)
+        except Exception as exc:
+            msg = f"Agent runs request failed: {exc}"
+            self.notify(msg, severity="error")
+            self._append_pi_notice(msg)
+            return
+        msg = _format_agent_runs(status_filter, body)
+        self.notify(msg.splitlines()[0])
+        note = ConversationMessage(
+            id=f"_runs-{time.monotonic_ns()}",
+            conversation_id=self.conversation.id if self.conversation else "",
+            role="system",
+            parent_id=self.thread.leaf,
+            parts=[{"type": "text", "text": msg}],
+            content=msg,
+            created_at="",
+        )
+        self.thread.add(note)
+        self.thread.leaf = note.id
+        await self.render_thread()
 
     # --- Pi 1.0 RPC interactive turns & engine selection -------------------------
 
@@ -4387,3 +4554,118 @@ def _part_from(frame: fr.PartStartFrame) -> dict[str, Any]:
     if frame.type == "tool_result":
         part["is_error"] = frame.is_error
     return part
+
+
+def _extract_dict_rows(body: dict[str, Any], *keys: str) -> list[dict[str, Any]]:
+    for key in keys:
+        raw = body.get(key)
+        if isinstance(raw, list):
+            return [row for row in raw if isinstance(row, dict)]
+    return []
+
+
+def _format_web_search_results(query: str, body: dict[str, Any]) -> str:
+    rows = _extract_dict_rows(body, "results", "data", "citations")
+    if not rows:
+        return f"Web search for {query!r}: no results."
+    lines = [f"Web search results for {query!r} ({len(rows)}):"]
+    for idx, item in enumerate(rows, 1):
+        title = str(item.get("title") or item.get("name") or item.get("url") or f"Result {idx}")
+        url = str(item.get("url") or item.get("href") or "")
+        snippet = str(item.get("snippet") or item.get("content") or item.get("text") or "").strip()
+        head = f"  [{idx}] {title}" + (f" ({url})" if url else "")
+        lines.append(head)
+        if snippet:
+            lines.append(f"      {snippet}")
+    return "\n".join(lines)
+
+
+def _format_rag_collections(body: dict[str, Any]) -> str:
+    rows = _extract_dict_rows(body, "collections", "data")
+    if not rows:
+        return "RAG collections: none available."
+    lines = [f"RAG collections ({len(rows)}):"]
+    for item in rows:
+        cid = str(item.get("id") or item.get("collection_id") or "?")
+        name = str(item.get("name") or item.get("title") or cid)
+        count = (
+            item.get("document_count")
+            if item.get("document_count") is not None
+            else item.get("count")
+        )
+        suffix = f" ({count} docs)" if count is not None else ""
+        lines.append(f"  • {cid}: {name}{suffix}")
+    return "\n".join(lines)
+
+
+def _format_rag_query_results(collection_id: str, query: str, body: dict[str, Any]) -> str:
+    rows = _extract_dict_rows(body, "results", "chunks", "data")
+    if not rows:
+        return f"RAG query in {collection_id} for {query!r}: no matching chunks."
+    lines = [f"RAG results from {collection_id} for {query!r} ({len(rows)}):"]
+    for idx, item in enumerate(rows, 1):
+        source = str(
+            item.get("source")
+            or item.get("title")
+            or item.get("document_id")
+            or item.get("id")
+            or f"chunk-{idx}"
+        )
+        score = item.get("score")
+        score_str = f" (score={score:.2f})" if isinstance(score, int | float) else ""
+        text = str(item.get("text") or item.get("content") or item.get("snippet") or "").strip()
+        lines.append(f"  [{idx}] {source}{score_str}")
+        if text:
+            lines.append(f"      {text}")
+    return "\n".join(lines)
+
+
+def _format_mcp_servers(server_id: str, body: dict[str, Any]) -> str:
+    rows = _extract_dict_rows(body, "servers", "data")
+    if server_id:
+        rows = [
+            r
+            for r in rows
+            if str(r.get("id") or "") == server_id or str(r.get("name") or "") == server_id
+        ]
+    if not rows:
+        return (
+            f"MCP server {server_id!r}: not found."
+            if server_id
+            else "MCP servers: none registered."
+        )
+    lines = [f"MCP servers ({len(rows)}):"]
+    for srv in rows:
+        sid = str(srv.get("id") or srv.get("name") or "?")
+        name = str(srv.get("name") or sid)
+        status = str(srv.get("status") or "registered")
+        raw_tools = srv.get("tools")
+        tool_labels: list[str] = []
+        if isinstance(raw_tools, list):
+            for tool in raw_tools:
+                if isinstance(tool, dict):
+                    tname = str(tool.get("name") or "?")
+                    tdesc = str(tool.get("description") or "").strip()
+                    tool_labels.append(f"{tname} ({tdesc})" if tdesc else tname)
+                else:
+                    tool_labels.append(str(tool))
+        tools_str = ", ".join(tool_labels) if tool_labels else "no tools"
+        lines.append(f"  • {sid} ({name}) [{status}] — tools: {tools_str}")
+    return "\n".join(lines)
+
+
+def _format_agent_runs(status_filter: str, body: dict[str, Any]) -> str:
+    rows = _extract_dict_rows(body, "runs", "data")
+    if status_filter:
+        rows = [r for r in rows if str(r.get("status") or "") == status_filter]
+    if not rows:
+        return f"Agent runs ({status_filter}): none." if status_filter else "Agent runs: none."
+    lines = [f"Agent runs ({len(rows)}):"]
+    for run in rows:
+        rid = str(run.get("id") or run.get("run_id") or "?")
+        aid = str(run.get("agent_id") or run.get("agent") or "default")
+        st = str(run.get("status") or "unknown")
+        goal = str(run.get("goal") or run.get("title") or run.get("prompt") or "").strip()
+        tail = f" — {goal}" if goal else ""
+        lines.append(f"  • {rid} | agent={aid} | status={st}{tail}")
+    return "\n".join(lines)

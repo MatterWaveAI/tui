@@ -75,7 +75,10 @@ SLASH_HELP = """Commands
   /init                     draft a MATTERWAVE.md for this repository
   /resume [id]              list this folder's stored runs, or continue one
   /trust                    trust this folder (load its context files and settings)
-  /mcp                      MCP servers and their tools
+  /mcp [server_id]          MCP servers and their tools
+  /search <query>           search the web and render citations and snippets
+  /rag [collection] <query> query RAG collections, or list collections with no args
+  /runs [status]            list recent Agent Command Center runs
   /agents                   subagent definitions
   /pi <prompt>              run a prompt through Pi 1.0 RPC agent
   /pi-engine [engine]       inspect or switch agent engine (auto, pi, builtin)
@@ -656,6 +659,9 @@ class AgentScreen(Screen[None]):
             "resume": self._cmd_resume,
             "trust": self._cmd_trust,
             "mcp": self._cmd_mcp,
+            "search": self._cmd_search,
+            "rag": self._cmd_rag,
+            "runs": self._cmd_runs,
             "agents": self._cmd_agents,
             "pi": self._cmd_pi,
             "pi-engine": self._cmd_pi_engine,
@@ -957,6 +963,40 @@ class AgentScreen(Screen[None]):
             lines.append("  (none connected)")
         lines.extend(session.mcp.notices)
         self.add_line("\n".join(lines))
+
+    def _cmd_search(self, rest: str) -> None:
+        from ..app import MatterWaveApp
+
+        query = rest.strip()
+        if not query:
+            self.add_line("Usage: /search <query> — search the web and show citations.", "error")
+            return
+        app = self.app if isinstance(self.app, MatterWaveApp) else None
+        if app is not None:
+            app.run_search_command(query)
+        self.add_line(f"Searching web for {query!r}…", "notice")
+
+    def _cmd_rag(self, rest: str) -> None:
+        from ..app import MatterWaveApp
+
+        app = self.app if isinstance(self.app, MatterWaveApp) else None
+        if app is not None:
+            app.run_rag_command(rest.strip())
+        self.add_line(
+            f"Querying RAG ({rest.strip()})…" if rest.strip() else "Listing RAG collections…",
+            "notice",
+        )
+
+    def _cmd_runs(self, rest: str) -> None:
+        from ..app import MatterWaveApp
+
+        app = self.app if isinstance(self.app, MatterWaveApp) else None
+        if app is not None:
+            app.run_runs_command(rest.strip())
+        self.add_line(
+            f"Listing agent runs ({rest.strip()})…" if rest.strip() else "Listing agent runs…",
+            "notice",
+        )
 
     def _cmd_agents(self, rest: str) -> None:
         session = self.session

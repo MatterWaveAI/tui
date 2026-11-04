@@ -141,9 +141,7 @@ async def test_matterwave_client_httpx_fallback_when_sdk_mock_lacks_methods() ->
         mcp_srvs = await client.list_mcp_servers()
         assert mcp_srvs["servers"][0]["id"] == "srv-linear"
 
-        mcp_call = await client.call_mcp_tool(
-            "srv-linear", "list_issues", {"team": "platform"}
-        )
+        mcp_call = await client.call_mcp_tool("srv-linear", "list_issues", {"team": "platform"})
         assert mcp_call["output"] == "3 open issues"
 
         edit_sess = await client.create_edit_session(
@@ -200,9 +198,7 @@ async def test_matterwave_client_delegates_to_sdk_methods_when_present() -> None
             calls.append(("search_web", (query, max_results)))
             return {"results": [{"title": "From SDK", "url": "https://sdk.test", "snippet": query}]}
 
-        async def query_rag(
-            self, collection_id: str, query: str, top_k: int = 5
-        ) -> dict[str, Any]:
+        async def query_rag(self, collection_id: str, query: str, top_k: int = 5) -> dict[str, Any]:
             calls.append(("query_rag", (collection_id, query, top_k)))
             return {"results": [{"id": "c1", "text": query, "score": 0.99}]}
 

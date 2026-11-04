@@ -385,6 +385,87 @@ class FakeAPI:
             },
         ]
         self.agent_runs_queries: list[tuple[str | None, str | None]] = []
+        self.connector_catalog_queries: list[tuple[str | None, str | None]] = []
+        self.connector_catalog_rows: list[dict[str, Any]] = [
+            {
+                "provider_id": "github",
+                "name": "GitHub",
+                "category": "developer",
+                "auth_types": ["oauth2", "pat"],
+                "api_base_url": "https://api.github.com",
+            },
+            {
+                "provider_id": "slack",
+                "name": "Slack",
+                "category": "communication",
+                "auth_types": ["oauth2"],
+                "api_base_url": "https://slack.com/api",
+            },
+        ]
+        self.oauth_proxy_calls: list[tuple[str, str, str, dict[str, Any] | None]] = []
+        self.decision_trail_queries: list[str] = []
+        self.decision_trail_nodes: list[dict[str, Any]] = [
+            {
+                "id": "node-1",
+                "type": "plan",
+                "label": "Select search and analysis tools",
+                "step_id": "step-1",
+                "confidence": 0.96,
+                "outcome": "completed",
+                "rationale": "High-confidence tool selection for repository audit.",
+            },
+            {
+                "id": "node-2",
+                "type": "tool_call",
+                "label": "Run static verification",
+                "step_id": "step-2",
+                "confidence": 0.92,
+                "outcome": "completed",
+                "rationale": "All checks passed with zero warnings.",
+            },
+        ]
+        self.replay_calls: list[tuple[str, str]] = []
+        self.replay_differences: list[dict[str, Any]] = [
+            {
+                "step_id": "step-2",
+                "field": "tool_output",
+                "original": "cached-v1",
+                "replayed": "recomputed-v2",
+                "significance": "minor",
+            }
+        ]
+        self.checkpoint_queries: list[str] = []
+        self.checkpoint_rows: list[dict[str, Any]] = [
+            {
+                "checkpoint_id": "ckpt-1",
+                "run_id": "run-101",
+                "step_id": "step-1",
+                "step_index": 1,
+                "timestamp": "2026-11-03T12:00:00Z",
+            },
+            {
+                "checkpoint_id": "ckpt-2",
+                "run_id": "run-101",
+                "step_id": "step-2",
+                "step_index": 2,
+                "timestamp": "2026-11-03T12:01:00Z",
+            },
+        ]
+        self.resume_run_calls: list[tuple[str, str | None]] = []
+        self.reliability_queries: list[str | None] = []
+        self.reliability_payload: dict[str, Any] = {
+            "sr": 0.98,
+            "cr": 0.96,
+            "pc": 0.94,
+            "hir": 0.04,
+            "ma": 0.95,
+            "tcl": 142.5,
+            "wct": 1280.0,
+            "total_runs": 50,
+            "window": "7d",
+        }
+        self.guardrail_evaluations: list[tuple[str, str]] = []
+        self.tool_plans: list[str] = []
 
     async def me(self) -> Me:
         return Me.from_dict({"subject": "u", "kind": "user"})
@@ -1007,9 +1088,7 @@ class FakeAPI:
             "results": [dict(r) for r in self.web_search_results[:max_results]],
         }
 
-    async def query_rag(
-        self, collection_id: str, query: str, top_k: int = 5
-    ) -> dict[str, Any]:
+    async def query_rag(self, collection_id: str, query: str, top_k: int = 5) -> dict[str, Any]:
         self.rag_queries.append((collection_id, query, top_k))
         return {
             "collection_id": collection_id,
@@ -1056,6 +1135,120 @@ class FakeAPI:
             and (not status or r.get("status") == status)
         ]
         return {"runs": rows}
+
+    async def list_connector_catalog(
+        self, category: str | None = None, q: str | None = None
+    ) -> dict[str, Any]:
+        self.connector_catalog_queries.append((category, q))
+        rows = [
+            dict(r)
+            for r in self.connector_catalog_rows
+            if (not category or str(r.get("category") or "").lower() == category.lower())
+            and (
+                not q
+                or q.lower() in str(r.get("provider_id") or "").lower()
+                or q.lower() in str(r.get("name") or "").lower()
+            )
+        ]
+        return {"connectors": rows, "data": rows, "total": len(rows)}
+
+    async def proxy_oauth_request(
+        self,
+        credential_id: str,
+        endpoint: str,
+        method: str = "GET",
+        body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.oauth_proxy_calls.append((credential_id, endpoint, method.upper(), body))
+        return {
+            "credential_id": credential_id,
+            "provider_id": "github",
+            "method": method.upper(),
+            "target_url": endpoint,
+            "status_code": 200,
+            "auto_refreshed": False,
+            "data": {"ok": True},
+        }
+
+    async def get_run_decision_trail(self, run_id: str) -> dict[str, Any]:
+        self.decision_trail_queries.append(run_id)
+        return {
+            "run_id": run_id,
+            "nodes": [dict(n) for n in self.decision_trail_nodes],
+            "edges": [],
+        }
+
+    async def replay_run(self, run_id: str, mode: str = "simulated") -> dict[str, Any]:
+        self.replay_calls.append((run_id, mode))
+        return {
+            "replay_id": f"rep-{run_id}",
+            "run_id": run_id,
+            "mode": mode,
+            "success": True,
+            "differences": [dict(d) for d in self.replay_differences],
+        }
+
+    async def list_run_checkpoints(self, run_id: str) -> dict[str, Any]:
+        self.checkpoint_queries.append(run_id)
+        rows = [dict(c) for c in self.checkpoint_rows]
+        return {"run_id": run_id, "checkpoints": rows, "data": rows}
+
+    async def resume_run(self, run_id: str, checkpoint_id: str | None = None) -> dict[str, Any]:
+        self.resume_run_calls.append((run_id, checkpoint_id))
+        return {
+            "run_id": f"{run_id}-resumed",
+            "source_run_id": run_id,
+            "resumed_from_checkpoint_id": checkpoint_id or "ckpt-2",
+            "resumed_from_step": "step-2",
+            "state": "running",
+        }
+
+    async def get_reliability_metrics(self, agent_id: str | None = None) -> dict[str, Any]:
+        self.reliability_queries.append(agent_id)
+        return {**self.reliability_payload, "agent_id": agent_id}
+
+    async def evaluate_guardrails(self, content: str, rail_type: str = "input") -> dict[str, Any]:
+        self.guardrail_evaluations.append((content, rail_type))
+        blocked = "unsafe" in content.lower() or "drop table" in content.lower()
+        return {
+            "rail_type": rail_type,
+            "action": "block" if blocked else "allow",
+            "allowed": not blocked,
+            "modified_content": content,
+            "refusal_message": "Blocked by input safety policy." if blocked else None,
+            "triggered_rails": ["input_safety"] if blocked else [],
+            "violations": (
+                [
+                    {
+                        "rail_id": "input_safety",
+                        "rail_type": rail_type,
+                        "category": "safety",
+                        "severity": "high",
+                        "message": "Unsafe pattern detected",
+                    }
+                ]
+                if blocked
+                else []
+            ),
+        }
+
+    async def plan_tools(self, goal: str) -> dict[str, Any]:
+        self.tool_plans.append(goal)
+        return {
+            "plan_id": f"plan-{len(self.tool_plans)}",
+            "task": goal,
+            "goal": goal,
+            "steps": [
+                {
+                    "step_id": "step-1",
+                    "tool_name": "search_web",
+                    "description": f"Research {goal}",
+                    "arguments": {"query": goal},
+                    "depends_on": [],
+                }
+            ],
+            "confidence": 0.93,
+        }
 
     async def aclose(self) -> None:
         return None

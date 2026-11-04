@@ -66,6 +66,36 @@ WAVE_SLASH_COMMAND_SPECS: tuple[SlashCommandSpec, ...] = (
         "List recent Agent Command Center runs with status, agent ID, and run ID",
     ),
     SlashCommandSpec(
+        "/connectors",
+        "/connectors [category]",
+        "List providers from the Universal Connector Catalog",
+    ),
+    SlashCommandSpec(
+        "/trail",
+        "/trail <run_id>",
+        "Render the decision trail nodes and confidence scores for a run",
+    ),
+    SlashCommandSpec(
+        "/replay",
+        "/replay <run_id> [mode]",
+        "Replay a run (simulated, strict, or counterfactual) and display differences",
+    ),
+    SlashCommandSpec(
+        "/checkpoints",
+        "/checkpoints <run_id> [resume <checkpoint_id>]",
+        "List checkpoints for a run or resume a run from a checkpoint",
+    ),
+    SlashCommandSpec(
+        "/reliability",
+        "/reliability [agent_id]",
+        "Display the 7 ia_modules reliability metrics (SR, CR, PC, HIR, MA, TCL, WCT)",
+    ),
+    SlashCommandSpec(
+        "/guardrails",
+        "/guardrails <text>",
+        "Evaluate text against the platform Guardrails engine",
+    ),
+    SlashCommandSpec(
         "/help",
         "/help",
         "Show keybindings and interactive composer slash commands",
@@ -93,6 +123,12 @@ SLASH_COMMANDS: tuple[str, ...] = (
     "/rag",
     "/mcp",
     "/runs",
+    "/connectors",
+    "/trail",
+    "/replay",
+    "/checkpoints",
+    "/reliability",
+    "/guardrails",
     "/help",
 )
 

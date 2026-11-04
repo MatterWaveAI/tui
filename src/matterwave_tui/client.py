@@ -83,7 +83,7 @@ class MatterWaveClient(HttpChatAPI):
             debug_log=debug_log,
         )
 
-    def _sdk_callable(self, * dotted_paths: str) -> Any | None:
+    def _sdk_callable(self, *dotted_paths: str) -> Any | None:
         """Return the first callable attribute found on `self._sdk`, or None if absent."""
         sdk = self._sdk
         if sdk is None:
@@ -114,16 +114,12 @@ class MatterWaveClient(HttpChatAPI):
                 return _normalize_result(res)
         return await super().search_web(query, max_results=max_results)
 
-    async def query_rag(
-        self, collection_id: str, query: str, top_k: int = 5
-    ) -> dict[str, Any]:
+    async def query_rag(self, collection_id: str, query: str, top_k: int = 5) -> dict[str, Any]:
         """Query a RAG collection via SDK method if available, falling back to `POST /v1/rag/query`."""
         fn = self._sdk_callable("query_rag", "rag.query")
         if fn is not None:
             try:
-                res = await _maybe_await(
-                    fn(collection_id=collection_id, query=query, top_k=top_k)
-                )
+                res = await _maybe_await(fn(collection_id=collection_id, query=query, top_k=top_k))
                 return _normalize_result(res)
             except TypeError:
                 res = await _maybe_await(fn(collection_id, query, top_k))
@@ -188,6 +184,135 @@ class MatterWaveClient(HttpChatAPI):
                 res = await _maybe_await(fn(agent_id, status))
                 return _normalize_result(res)
         return await super().list_agent_runs(agent_id=agent_id, status=status)
+
+    async def list_connector_catalog(
+        self, category: str | None = None, q: str | None = None
+    ) -> dict[str, Any]:
+        """List providers in the Universal Connector Catalog via SDK or `GET /api/v1/connectors/catalog`."""
+        fn = self._sdk_callable(
+            "list_connector_catalog", "connectors.list_catalog", "connectors.catalog"
+        )
+        if fn is not None:
+            try:
+                res = await _maybe_await(fn(category=category, q=q))
+                return _normalize_result(res)
+            except TypeError:
+                res = await _maybe_await(fn(category, q))
+                return _normalize_result(res)
+        return await super().list_connector_catalog(category=category, q=q)
+
+    async def proxy_oauth_request(
+        self,
+        credential_id: str,
+        endpoint: str,
+        method: str = "GET",
+        body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Proxy an OAuth request via SDK or `POST /api/v1/oauth/proxy/{credential_id}`."""
+        fn = self._sdk_callable("proxy_oauth_request", "oauth.proxy", "oauth.proxy_request")
+        if fn is not None:
+            try:
+                res = await _maybe_await(
+                    fn(
+                        credential_id=credential_id,
+                        endpoint=endpoint,
+                        method=method,
+                        body=body,
+                    )
+                )
+                return _normalize_result(res)
+            except TypeError:
+                res = await _maybe_await(fn(credential_id, endpoint, method, body))
+                return _normalize_result(res)
+        return await super().proxy_oauth_request(credential_id, endpoint, method=method, body=body)
+
+    async def get_run_decision_trail(self, run_id: str) -> dict[str, Any]:
+        """Fetch the decision trail for a run via SDK or `GET /api/v1/runs/{run_id}/decision-trail`."""
+        fn = self._sdk_callable(
+            "get_run_decision_trail", "runs.decision_trail", "runs.get_decision_trail"
+        )
+        if fn is not None:
+            try:
+                res = await _maybe_await(fn(run_id=run_id))
+                return _normalize_result(res)
+            except TypeError:
+                res = await _maybe_await(fn(run_id))
+                return _normalize_result(res)
+        return await super().get_run_decision_trail(run_id)
+
+    async def replay_run(self, run_id: str, mode: str = "simulated") -> dict[str, Any]:
+        """Replay a run via SDK or `POST /api/v1/runs/{run_id}/replay`."""
+        fn = self._sdk_callable("replay_run", "runs.replay")
+        if fn is not None:
+            try:
+                res = await _maybe_await(fn(run_id=run_id, mode=mode))
+                return _normalize_result(res)
+            except TypeError:
+                res = await _maybe_await(fn(run_id, mode))
+                return _normalize_result(res)
+        return await super().replay_run(run_id, mode=mode)
+
+    async def list_run_checkpoints(self, run_id: str) -> dict[str, Any]:
+        """List checkpoints for a run via SDK or `GET /api/v1/runs/{run_id}/checkpoints`."""
+        fn = self._sdk_callable("list_run_checkpoints", "runs.list_checkpoints", "runs.checkpoints")
+        if fn is not None:
+            try:
+                res = await _maybe_await(fn(run_id=run_id))
+                return _normalize_result(res)
+            except TypeError:
+                res = await _maybe_await(fn(run_id))
+                return _normalize_result(res)
+        return await super().list_run_checkpoints(run_id)
+
+    async def resume_run(self, run_id: str, checkpoint_id: str | None = None) -> dict[str, Any]:
+        """Resume a run from a checkpoint via SDK or `POST /api/v1/runs/{run_id}/resume`."""
+        fn = self._sdk_callable("resume_run", "runs.resume")
+        if fn is not None:
+            try:
+                res = await _maybe_await(fn(run_id=run_id, checkpoint_id=checkpoint_id))
+                return _normalize_result(res)
+            except TypeError:
+                res = await _maybe_await(fn(run_id, checkpoint_id))
+                return _normalize_result(res)
+        return await super().resume_run(run_id, checkpoint_id=checkpoint_id)
+
+    async def get_reliability_metrics(self, agent_id: str | None = None) -> dict[str, Any]:
+        """Fetch reliability metrics via SDK or `GET /api/v1/reliability/metrics`."""
+        fn = self._sdk_callable(
+            "get_reliability_metrics", "reliability.metrics", "reliability.get_metrics"
+        )
+        if fn is not None:
+            try:
+                res = await _maybe_await(fn(agent_id=agent_id))
+                return _normalize_result(res)
+            except TypeError:
+                res = await _maybe_await(fn(agent_id))
+                return _normalize_result(res)
+        return await super().get_reliability_metrics(agent_id=agent_id)
+
+    async def evaluate_guardrails(self, content: str, rail_type: str = "input") -> dict[str, Any]:
+        """Evaluate content against guardrails via SDK or `POST /api/v1/guardrails/evaluate`."""
+        fn = self._sdk_callable("evaluate_guardrails", "guardrails.evaluate")
+        if fn is not None:
+            try:
+                res = await _maybe_await(fn(content=content, rail_type=rail_type))
+                return _normalize_result(res)
+            except TypeError:
+                res = await _maybe_await(fn(content, rail_type))
+                return _normalize_result(res)
+        return await super().evaluate_guardrails(content, rail_type=rail_type)
+
+    async def plan_tools(self, goal: str) -> dict[str, Any]:
+        """Build a tool execution plan via SDK or `POST /api/v1/tools/plan`."""
+        fn = self._sdk_callable("plan_tools", "tools.plan")
+        if fn is not None:
+            try:
+                res = await _maybe_await(fn(goal=goal))
+                return _normalize_result(res)
+            except TypeError:
+                res = await _maybe_await(fn(goal))
+                return _normalize_result(res)
+        return await super().plan_tools(goal)
 
 
 __all__ = ["MatterWaveClient"]

@@ -79,6 +79,12 @@ SLASH_HELP = """Commands
   /search <query>           search the web and render citations and snippets
   /rag [collection] <query> query RAG collections, or list collections with no args
   /runs [status]            list recent Agent Command Center runs
+  /connectors [category]    list providers from the Universal Connector Catalog
+  /trail <run_id>           render the decision trail for a run
+  /replay <run_id> [mode]   replay a run (simulated, strict, counterfactual)
+  /checkpoints <run_id>     list or resume run checkpoints
+  /reliability [agent_id]   display the 7 ia_modules reliability metrics
+  /guardrails <text>        evaluate text against the Guardrails engine
   /agents                   subagent definitions
   /pi <prompt>              run a prompt through Pi 1.0 RPC agent
   /pi-engine [engine]       inspect or switch agent engine (auto, pi, builtin)
@@ -662,6 +668,12 @@ class AgentScreen(Screen[None]):
             "search": self._cmd_search,
             "rag": self._cmd_rag,
             "runs": self._cmd_runs,
+            "connectors": self._cmd_connectors,
+            "trail": self._cmd_trail,
+            "replay": self._cmd_replay,
+            "checkpoints": self._cmd_checkpoints,
+            "reliability": self._cmd_reliability,
+            "guardrails": self._cmd_guardrails,
             "agents": self._cmd_agents,
             "pi": self._cmd_pi,
             "pi-engine": self._cmd_pi_engine,
@@ -997,6 +1009,89 @@ class AgentScreen(Screen[None]):
             f"Listing agent runs ({rest.strip()})…" if rest.strip() else "Listing agent runs…",
             "notice",
         )
+
+    def _cmd_connectors(self, rest: str) -> None:
+        from ..app import MatterWaveApp
+
+        cleaned = rest.strip()
+        app = self.app if isinstance(self.app, MatterWaveApp) else None
+        if app is not None:
+            app.run_connectors_command(cleaned)
+        self.add_line(
+            f"Listing connector catalog ({cleaned})…" if cleaned else "Listing connector catalog…",
+            "notice",
+        )
+
+    def _cmd_trail(self, rest: str) -> None:
+        from ..app import MatterWaveApp
+
+        cleaned = rest.strip()
+        if not cleaned:
+            self.add_line("Usage: /trail <run_id> — render the decision trail for a run.", "error")
+            return
+        app = self.app if isinstance(self.app, MatterWaveApp) else None
+        if app is not None:
+            app.run_trail_command(cleaned)
+        self.add_line(f"Fetching decision trail for {cleaned}…", "notice")
+
+    def _cmd_replay(self, rest: str) -> None:
+        from ..app import MatterWaveApp
+
+        cleaned = rest.strip()
+        if not cleaned:
+            self.add_line(
+                "Usage: /replay <run_id> [simulated|strict|counterfactual] — replay a run and display differences.",
+                "error",
+            )
+            return
+        app = self.app if isinstance(self.app, MatterWaveApp) else None
+        if app is not None:
+            app.run_replay_command(cleaned)
+        self.add_line(f"Replaying run ({cleaned})…", "notice")
+
+    def _cmd_checkpoints(self, rest: str) -> None:
+        from ..app import MatterWaveApp
+
+        cleaned = rest.strip()
+        if not cleaned:
+            self.add_line(
+                "Usage: /checkpoints <run_id> [resume <checkpoint_id>] — list or resume run checkpoints.",
+                "error",
+            )
+            return
+        app = self.app if isinstance(self.app, MatterWaveApp) else None
+        if app is not None:
+            app.run_checkpoints_command(cleaned)
+        self.add_line(f"Checkpoints ({cleaned})…", "notice")
+
+    def _cmd_reliability(self, rest: str) -> None:
+        from ..app import MatterWaveApp
+
+        cleaned = rest.strip()
+        app = self.app if isinstance(self.app, MatterWaveApp) else None
+        if app is not None:
+            app.run_reliability_command(cleaned)
+        self.add_line(
+            f"Fetching reliability metrics ({cleaned})…"
+            if cleaned
+            else "Fetching reliability metrics…",
+            "notice",
+        )
+
+    def _cmd_guardrails(self, rest: str) -> None:
+        from ..app import MatterWaveApp
+
+        cleaned = rest.strip()
+        if not cleaned:
+            self.add_line(
+                "Usage: /guardrails <text> — evaluate text against the platform Guardrails engine.",
+                "error",
+            )
+            return
+        app = self.app if isinstance(self.app, MatterWaveApp) else None
+        if app is not None:
+            app.run_guardrails_command(cleaned)
+        self.add_line("Evaluating guardrails…", "notice")
 
     def _cmd_agents(self, rest: str) -> None:
         session = self.session

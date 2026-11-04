@@ -292,9 +292,7 @@ class ChatAPI(Protocol):
 
     async def search_web(self, query: str, max_results: int = 5) -> dict[str, Any]: ...
 
-    async def query_rag(
-        self, collection_id: str, query: str, top_k: int = 5
-    ) -> dict[str, Any]: ...
+    async def query_rag(self, collection_id: str, query: str, top_k: int = 5) -> dict[str, Any]: ...
 
     async def list_rag_collections(self) -> dict[str, Any]: ...
 
@@ -309,6 +307,34 @@ class ChatAPI(Protocol):
     async def list_agent_runs(
         self, agent_id: str | None = None, status: str | None = None
     ) -> dict[str, Any]: ...
+
+    async def list_connector_catalog(
+        self, category: str | None = None, q: str | None = None
+    ) -> dict[str, Any]: ...
+
+    async def proxy_oauth_request(
+        self,
+        credential_id: str,
+        endpoint: str,
+        method: str = "GET",
+        body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]: ...
+
+    async def get_run_decision_trail(self, run_id: str) -> dict[str, Any]: ...
+
+    async def replay_run(self, run_id: str, mode: str = "simulated") -> dict[str, Any]: ...
+
+    async def list_run_checkpoints(self, run_id: str) -> dict[str, Any]: ...
+
+    async def resume_run(self, run_id: str, checkpoint_id: str | None = None) -> dict[str, Any]: ...
+
+    async def get_reliability_metrics(self, agent_id: str | None = None) -> dict[str, Any]: ...
+
+    async def evaluate_guardrails(
+        self, content: str, rail_type: str = "input"
+    ) -> dict[str, Any]: ...
+
+    async def plan_tools(self, goal: str) -> dict[str, Any]: ...
 
     async def aclose(self) -> None: ...
 
@@ -1147,9 +1173,7 @@ class HttpChatAPI:
             body={"query": query, "max_results": max_results},
         )
 
-    async def query_rag(
-        self, collection_id: str, query: str, top_k: int = 5
-    ) -> dict[str, Any]:
+    async def query_rag(self, collection_id: str, query: str, top_k: int = 5) -> dict[str, Any]:
         """`POST /v1/rag/query`: retrieve relevant chunks from a RAG collection."""
         return await self._v1_json(
             self._reads,
@@ -1201,6 +1225,115 @@ class HttpChatAPI:
             "GET",
             "/api/v1/runs",
             params=params or None,
+        )
+
+    async def list_connector_catalog(
+        self, category: str | None = None, q: str | None = None
+    ) -> dict[str, Any]:
+        """`GET /api/v1/connectors/catalog`: list providers in the Universal Connector Catalog."""
+        params: dict[str, str] = {}
+        if category:
+            params["category"] = category
+        if q:
+            params["q"] = q
+        return await self._v1_json(
+            self._reads,
+            "GET",
+            "/api/v1/connectors/catalog",
+            params=params or None,
+        )
+
+    async def proxy_oauth_request(
+        self,
+        credential_id: str,
+        endpoint: str,
+        method: str = "GET",
+        body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """`POST /api/v1/oauth/proxy/{credential_id}`: proxy an OAuth request through the broker."""
+        safe_id = quote(credential_id, safe="")
+        payload: dict[str, Any] = {
+            "endpoint": endpoint,
+            "method": method.upper(),
+        }
+        if body is not None:
+            payload["body"] = body
+        return await self._v1_json(
+            self._writes,
+            "POST",
+            f"/api/v1/oauth/proxy/{safe_id}",
+            body=payload,
+        )
+
+    async def get_run_decision_trail(self, run_id: str) -> dict[str, Any]:
+        """`GET /api/v1/runs/{run_id}/decision-trail`: fetch the decision trail graph for a run."""
+        safe_id = quote(run_id, safe="")
+        return await self._v1_json(
+            self._reads,
+            "GET",
+            f"/api/v1/runs/{safe_id}/decision-trail",
+        )
+
+    async def replay_run(self, run_id: str, mode: str = "simulated") -> dict[str, Any]:
+        """`POST /api/v1/runs/{run_id}/replay`: replay a run in simulated, strict, or counterfactual mode."""
+        safe_id = quote(run_id, safe="")
+        return await self._v1_json(
+            self._writes,
+            "POST",
+            f"/api/v1/runs/{safe_id}/replay",
+            body={"mode": mode},
+        )
+
+    async def list_run_checkpoints(self, run_id: str) -> dict[str, Any]:
+        """`GET /api/v1/runs/{run_id}/checkpoints`: list persisted checkpoints for a run."""
+        safe_id = quote(run_id, safe="")
+        return await self._v1_json(
+            self._reads,
+            "GET",
+            f"/api/v1/runs/{safe_id}/checkpoints",
+        )
+
+    async def resume_run(self, run_id: str, checkpoint_id: str | None = None) -> dict[str, Any]:
+        """`POST /api/v1/runs/{run_id}/resume`: resume a run from a checkpoint."""
+        safe_id = quote(run_id, safe="")
+        payload: dict[str, Any] = {}
+        if checkpoint_id is not None:
+            payload["checkpoint_id"] = checkpoint_id
+        return await self._v1_json(
+            self._writes,
+            "POST",
+            f"/api/v1/runs/{safe_id}/resume",
+            body=payload,
+        )
+
+    async def get_reliability_metrics(self, agent_id: str | None = None) -> dict[str, Any]:
+        """`GET /api/v1/reliability/metrics`: fetch the 7 ia_modules reliability metrics."""
+        params: dict[str, str] = {}
+        if agent_id:
+            params["agent_id"] = agent_id
+        return await self._v1_json(
+            self._reads,
+            "GET",
+            "/api/v1/reliability/metrics",
+            params=params or None,
+        )
+
+    async def evaluate_guardrails(self, content: str, rail_type: str = "input") -> dict[str, Any]:
+        """`POST /api/v1/guardrails/evaluate`: evaluate content against the Guardrails engine."""
+        return await self._v1_json(
+            self._writes,
+            "POST",
+            "/api/v1/guardrails/evaluate",
+            body={"content": content, "rail_type": rail_type},
+        )
+
+    async def plan_tools(self, goal: str) -> dict[str, Any]:
+        """`POST /api/v1/tools/plan`: build an execution plan of tool calls for a goal."""
+        return await self._v1_json(
+            self._writes,
+            "POST",
+            "/api/v1/tools/plan",
+            body={"goal": goal},
         )
 
     # --- the stream ----------------------------------------------------------

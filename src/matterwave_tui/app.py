@@ -46,7 +46,12 @@ from .agent.session import SessionOptions
 if TYPE_CHECKING:
     from .agent.screen import AgentScreen
 from .api import DEFAULT_BASE_URL, NOTIFICATIONS_PAGE, ChatAPI, Cut, Opened, StreamItem
-from .commands import PI_SLASH_COMMAND_SPECS, SLASH_COMMAND_SPECS, SLASH_COMMANDS
+from .commands import (
+    SLASH_COMMAND_SPECS as SLASH_COMMAND_SPECS,
+)
+from .commands import (
+    SLASH_COMMANDS as SLASH_COMMANDS,
+)
 from .dictation import MEDIA_TYPES, MicRecorder, media_type_for, mic_available
 from .export import conversation_markdown, export_filename, free_path
 from .failures import Failure, classify, retry_in
@@ -3240,6 +3245,24 @@ class MatterWaveApp(App[None]):
         if first == "runs":
             self.run_runs_command(body[len("runs") :].strip())
             return True
+        if first == "connectors":
+            self.run_connectors_command(body[len("connectors") :].strip())
+            return True
+        if first == "trail":
+            self.run_trail_command(body[len("trail") :].strip())
+            return True
+        if first == "replay":
+            self.run_replay_command(body[len("replay") :].strip())
+            return True
+        if first == "checkpoints":
+            self.run_checkpoints_command(body[len("checkpoints") :].strip())
+            return True
+        if first == "reliability":
+            self.run_reliability_command(body[len("reliability") :].strip())
+            return True
+        if first == "guardrails":
+            self.run_guardrails_command(body[len("guardrails") :].strip())
+            return True
         if first in ("pi-engine", "agent-engine"):
             self.set_agent_engine(body[len(first) :].strip())
             return True
@@ -3432,6 +3455,236 @@ class MatterWaveApp(App[None]):
         self.notify(msg.splitlines()[0])
         note = ConversationMessage(
             id=f"_runs-{time.monotonic_ns()}",
+            conversation_id=self.conversation.id if self.conversation else "",
+            role="system",
+            parent_id=self.thread.leaf,
+            parts=[{"type": "text", "text": msg}],
+            content=msg,
+            created_at="",
+        )
+        self.thread.add(note)
+        self.thread.leaf = note.id
+        await self.render_thread()
+
+    def run_connectors_command(self, category: str = "") -> None:
+        """Execute `/connectors [category]` to list providers from the Universal Connector Catalog."""
+        self.run_worker(
+            self._execute_connectors_command(category.strip()),
+            group="slash-connectors",
+            exclusive=True,
+        )
+
+    async def _execute_connectors_command(self, category: str) -> None:
+        try:
+            body = await self.api.list_connector_catalog(category=category or None)
+        except Exception as exc:
+            msg = f"Connector catalog request failed: {exc}"
+            self.notify(msg, severity="error")
+            self._append_pi_notice(msg)
+            return
+        msg = _format_connector_catalog(category, body)
+        self.notify(msg.splitlines()[0])
+        note = ConversationMessage(
+            id=f"_connectors-{time.monotonic_ns()}",
+            conversation_id=self.conversation.id if self.conversation else "",
+            role="system",
+            parent_id=self.thread.leaf,
+            parts=[{"type": "text", "text": msg}],
+            content=msg,
+            created_at="",
+        )
+        self.thread.add(note)
+        self.thread.leaf = note.id
+        await self.render_thread()
+
+    def run_trail_command(self, run_id: str) -> None:
+        """Execute `/trail <run_id>` to render the decision trail for a run."""
+        cleaned = run_id.strip()
+        if not cleaned:
+            msg = "Usage: /trail <run_id> — render the decision trail for a run."
+            self.notify(msg, severity="warning")
+            self._append_pi_notice(msg)
+            return
+        self.run_worker(
+            self._execute_trail_command(cleaned),
+            group="slash-trail",
+            exclusive=True,
+        )
+
+    async def _execute_trail_command(self, run_id: str) -> None:
+        try:
+            body = await self.api.get_run_decision_trail(run_id)
+        except Exception as exc:
+            msg = f"Decision trail request failed: {exc}"
+            self.notify(msg, severity="error")
+            self._append_pi_notice(msg)
+            return
+        msg = _format_decision_trail(run_id, body)
+        self.notify(msg.splitlines()[0])
+        note = ConversationMessage(
+            id=f"_trail-{time.monotonic_ns()}",
+            conversation_id=self.conversation.id if self.conversation else "",
+            role="system",
+            parent_id=self.thread.leaf,
+            parts=[{"type": "text", "text": msg}],
+            content=msg,
+            created_at="",
+        )
+        self.thread.add(note)
+        self.thread.leaf = note.id
+        await self.render_thread()
+
+    def run_replay_command(self, args: str) -> None:
+        """Execute `/replay <run_id> [mode]` to replay a run and display differences."""
+        parts = args.strip().split()
+        if not parts:
+            msg = "Usage: /replay <run_id> [simulated|strict|counterfactual] — replay a run and display differences."
+            self.notify(msg, severity="warning")
+            self._append_pi_notice(msg)
+            return
+        run_id = parts[0]
+        mode = parts[1].lower() if len(parts) > 1 else "simulated"
+        if mode not in ("simulated", "strict", "counterfactual"):
+            msg = f"Invalid replay mode {mode!r}; choose simulated, strict, or counterfactual."
+            self.notify(msg, severity="warning")
+            self._append_pi_notice(msg)
+            return
+        self.run_worker(
+            self._execute_replay_command(run_id, mode),
+            group="slash-replay",
+            exclusive=True,
+        )
+
+    async def _execute_replay_command(self, run_id: str, mode: str) -> None:
+        try:
+            body = await self.api.replay_run(run_id, mode=mode)
+        except Exception as exc:
+            msg = f"Run replay failed: {exc}"
+            self.notify(msg, severity="error")
+            self._append_pi_notice(msg)
+            return
+        msg = _format_replay_result(run_id, mode, body)
+        self.notify(msg.splitlines()[0])
+        note = ConversationMessage(
+            id=f"_replay-{time.monotonic_ns()}",
+            conversation_id=self.conversation.id if self.conversation else "",
+            role="system",
+            parent_id=self.thread.leaf,
+            parts=[{"type": "text", "text": msg}],
+            content=msg,
+            created_at="",
+        )
+        self.thread.add(note)
+        self.thread.leaf = note.id
+        await self.render_thread()
+
+    def run_checkpoints_command(self, args: str) -> None:
+        """Execute `/checkpoints <run_id> [resume <checkpoint_id>]` to list or resume checkpoints."""
+        parts = args.strip().split()
+        if not parts:
+            msg = "Usage: /checkpoints <run_id> [resume <checkpoint_id>] — list or resume run checkpoints."
+            self.notify(msg, severity="warning")
+            self._append_pi_notice(msg)
+            return
+        run_id = parts[0]
+        resume_mode = len(parts) >= 2 and parts[1].lower() == "resume"
+        checkpoint_id = parts[2] if len(parts) >= 3 else None
+        self.run_worker(
+            self._execute_checkpoints_command(
+                run_id, resume_mode=resume_mode, checkpoint_id=checkpoint_id
+            ),
+            group="slash-checkpoints",
+            exclusive=True,
+        )
+
+    async def _execute_checkpoints_command(
+        self, run_id: str, *, resume_mode: bool, checkpoint_id: str | None
+    ) -> None:
+        try:
+            if resume_mode:
+                body = await self.api.resume_run(run_id, checkpoint_id=checkpoint_id)
+                msg = _format_resume_run(run_id, checkpoint_id, body)
+            else:
+                body = await self.api.list_run_checkpoints(run_id)
+                msg = _format_run_checkpoints(run_id, body)
+        except Exception as exc:
+            msg = f"Checkpoints request failed: {exc}"
+            self.notify(msg, severity="error")
+            self._append_pi_notice(msg)
+            return
+        self.notify(msg.splitlines()[0])
+        note = ConversationMessage(
+            id=f"_checkpoints-{time.monotonic_ns()}",
+            conversation_id=self.conversation.id if self.conversation else "",
+            role="system",
+            parent_id=self.thread.leaf,
+            parts=[{"type": "text", "text": msg}],
+            content=msg,
+            created_at="",
+        )
+        self.thread.add(note)
+        self.thread.leaf = note.id
+        await self.render_thread()
+
+    def run_reliability_command(self, agent_id: str = "") -> None:
+        """Execute `/reliability [agent_id]` to display the 7 ia_modules reliability metrics."""
+        self.run_worker(
+            self._execute_reliability_command(agent_id.strip()),
+            group="slash-reliability",
+            exclusive=True,
+        )
+
+    async def _execute_reliability_command(self, agent_id: str) -> None:
+        try:
+            body = await self.api.get_reliability_metrics(agent_id=agent_id or None)
+        except Exception as exc:
+            msg = f"Reliability metrics request failed: {exc}"
+            self.notify(msg, severity="error")
+            self._append_pi_notice(msg)
+            return
+        msg = _format_reliability_metrics(agent_id, body)
+        self.notify(msg.splitlines()[0])
+        note = ConversationMessage(
+            id=f"_reliability-{time.monotonic_ns()}",
+            conversation_id=self.conversation.id if self.conversation else "",
+            role="system",
+            parent_id=self.thread.leaf,
+            parts=[{"type": "text", "text": msg}],
+            content=msg,
+            created_at="",
+        )
+        self.thread.add(note)
+        self.thread.leaf = note.id
+        await self.render_thread()
+
+    def run_guardrails_command(self, content: str) -> None:
+        """Execute `/guardrails <text>` to evaluate text against the platform Guardrails engine."""
+        cleaned = content.strip()
+        if not cleaned:
+            msg = (
+                "Usage: /guardrails <text> — evaluate text against the platform Guardrails engine."
+            )
+            self.notify(msg, severity="warning")
+            self._append_pi_notice(msg)
+            return
+        self.run_worker(
+            self._execute_guardrails_command(cleaned),
+            group="slash-guardrails",
+            exclusive=True,
+        )
+
+    async def _execute_guardrails_command(self, content: str) -> None:
+        try:
+            body = await self.api.evaluate_guardrails(content)
+        except Exception as exc:
+            msg = f"Guardrails evaluation failed: {exc}"
+            self.notify(msg, severity="error")
+            self._append_pi_notice(msg)
+            return
+        msg = _format_guardrails_evaluation(content, body)
+        self.notify(msg.splitlines()[0])
+        note = ConversationMessage(
+            id=f"_guardrails-{time.monotonic_ns()}",
             conversation_id=self.conversation.id if self.conversation else "",
             role="system",
             parent_id=self.thread.leaf,
@@ -4668,4 +4921,168 @@ def _format_agent_runs(status_filter: str, body: dict[str, Any]) -> str:
         goal = str(run.get("goal") or run.get("title") or run.get("prompt") or "").strip()
         tail = f" — {goal}" if goal else ""
         lines.append(f"  • {rid} | agent={aid} | status={st}{tail}")
+    return "\n".join(lines)
+
+
+def _format_connector_catalog(category: str, body: dict[str, Any]) -> str:
+    rows = _extract_dict_rows(body, "connectors", "providers", "catalog", "data")
+    if category:
+        rows = [
+            r
+            for r in rows
+            if not r.get("category") or str(r.get("category") or "").lower() == category.lower()
+        ]
+    if not rows:
+        return (
+            f"Connector catalog ({category}): no providers."
+            if category
+            else "Connector catalog: no providers."
+        )
+    header = (
+        f"Connector catalog ({category}, {len(rows)}):"
+        if category
+        else f"Connector catalog ({len(rows)}):"
+    )
+    lines = [header]
+    for item in rows:
+        pid = str(item.get("provider_id") or item.get("id") or "?")
+        name = str(item.get("name") or pid)
+        cat = str(item.get("category") or "general")
+        auth_raw = item.get("auth_types")
+        if isinstance(auth_raw, list) and auth_raw:
+            auth = ", ".join(str(a) for a in auth_raw)
+        else:
+            auth = str(item.get("auth_type") or "oauth2")
+        lines.append(f"  • {pid} ({name}) [{cat}] — auth: {auth}")
+    return "\n".join(lines)
+
+
+def _format_decision_trail(run_id: str, body: dict[str, Any]) -> str:
+    nodes = _extract_dict_rows(body, "nodes", "steps", "data")
+    if not nodes:
+        return f"Decision trail for {run_id}: no decision nodes."
+    lines = [f"Decision trail for {run_id} ({len(nodes)} nodes):"]
+    for idx, node in enumerate(nodes, 1):
+        nid = str(node.get("id") or node.get("step_id") or f"node-{idx}")
+        ntype = str(node.get("type") or node.get("kind") or "step")
+        label = str(node.get("label") or node.get("name") or nid)
+        conf = node.get("confidence")
+        conf_str = f"confidence={conf:.2f}" if isinstance(conf, int | float) else ""
+        outcome = str(node.get("outcome") or node.get("status") or "").strip()
+        rationale = str(node.get("rationale") or node.get("reason") or "").strip()
+        meta_bits = [b for b in (ntype, conf_str, outcome) if b]
+        meta = f" [{' | '.join(meta_bits)}]" if meta_bits else ""
+        lines.append(f"  [{idx}] {nid}: {label}{meta}")
+        if rationale:
+            lines.append(f"      {rationale}")
+    return "\n".join(lines)
+
+
+def _format_replay_result(run_id: str, mode: str, body: dict[str, Any]) -> str:
+    replay_id = str(body.get("replay_id") or body.get("id") or "replay-1")
+    actual_mode = str(body.get("mode") or mode or "simulated")
+    success = body.get("success")
+    status_str = (
+        ("success" if success else "failed")
+        if isinstance(success, bool)
+        else str(body.get("status") or "completed")
+    )
+    diffs = _extract_dict_rows(body, "differences", "diffs", "data")
+    lines = [
+        f"Replay {replay_id} for {run_id} (mode={actual_mode}, status={status_str}, differences={len(diffs)}):"
+    ]
+    if not diffs:
+        lines.append("  No differences detected.")
+    else:
+        for idx, diff in enumerate(diffs, 1):
+            step = str(diff.get("step_id") or diff.get("step") or f"step-{idx}")
+            field = str(diff.get("field") or "output")
+            orig = diff.get("original")
+            repl = diff.get("replayed")
+            sig = str(diff.get("significance") or "").strip()
+            sig_str = f" [{sig}]" if sig else ""
+            lines.append(f"  [{idx}] {step}.{field}: {orig!r} -> {repl!r}{sig_str}")
+    return "\n".join(lines)
+
+
+def _format_run_checkpoints(run_id: str, body: dict[str, Any]) -> str:
+    rows = _extract_dict_rows(body, "checkpoints", "data")
+    if not rows:
+        return f"Checkpoints for {run_id}: none recorded."
+    lines = [f"Checkpoints for {run_id} ({len(rows)}):"]
+    for row in rows:
+        cid = str(row.get("checkpoint_id") or row.get("id") or "?")
+        step = str(row.get("step_id") or row.get("step") or "?")
+        idx = row.get("step_index")
+        idx_str = f" (step #{idx})" if idx is not None else ""
+        ts = str(row.get("timestamp") or row.get("created_at") or "").strip()
+        ts_str = f" @ {ts}" if ts else ""
+        lines.append(f"  • {cid}: step={step}{idx_str}{ts_str}")
+    return "\n".join(lines)
+
+
+def _format_resume_run(run_id: str, checkpoint_id: str | None, body: dict[str, Any]) -> str:
+    new_run_id = str(body.get("run_id") or body.get("id") or run_id)
+    ckpt = str(
+        body.get("resumed_from_checkpoint_id")
+        or body.get("checkpoint_id")
+        or checkpoint_id
+        or "latest"
+    )
+    step = str(body.get("resumed_from_step") or body.get("step_id") or "").strip()
+    state = str(body.get("state") or body.get("status") or "resumed")
+    step_bit = f" (step={step})" if step else ""
+    return f"Resumed run {run_id} from checkpoint {ckpt}{step_bit} -> run={new_run_id} [{state}]."
+
+
+def _format_reliability_metrics(agent_id: str, body: dict[str, Any]) -> str:
+    source = body.get("metrics") if isinstance(body.get("metrics"), dict) else body
+    target = str(body.get("agent_id") or agent_id or "all agents")
+    total_runs = body.get("total_runs")
+    runs_bit = f", runs={total_runs}" if total_runs is not None else ""
+    lines = [f"Reliability metrics ({target}{runs_bit}):"]
+    metric_specs = (
+        ("SR", "sr", "Success Rate"),
+        ("CR", "cr", "Completion Rate"),
+        ("PC", "pc", "Plan Compliance"),
+        ("HIR", "hir", "Human Intervention Rate"),
+        ("MA", "ma", "Model Accuracy"),
+        ("TCL", "tcl", "Tool Call Latency"),
+        ("WCT", "wct", "Wall Clock Time"),
+    )
+    for code, key, label in metric_specs:
+        val = source.get(key) if isinstance(source, dict) else None
+        if val is None and isinstance(source, dict):
+            val = source.get(code)
+        if isinstance(val, int | float):
+            val_str = f"{val:.2f}" if isinstance(val, float) else str(val)
+        else:
+            val_str = str(val) if val is not None else "n/a"
+        lines.append(f"  • {code} ({label}): {val_str}")
+    return "\n".join(lines)
+
+
+def _format_guardrails_evaluation(content: str, body: dict[str, Any]) -> str:
+    allowed = body.get("allowed", True)
+    verdict = "allowed" if allowed else "blocked"
+    action = str(body.get("action") or ("allow" if allowed else "block"))
+    rail_type = str(body.get("rail_type") or "input")
+    triggered = body.get("triggered_rails")
+    rails_str = (
+        ", ".join(str(r) for r in triggered)
+        if isinstance(triggered, list) and triggered
+        else "none"
+    )
+    lines = [
+        f"Guardrails evaluation ({rail_type}): verdict={verdict} | action={action} | triggered={rails_str}"
+    ]
+    refusal = body.get("refusal_message")
+    if refusal:
+        lines.append(f"  Refusal: {refusal}")
+    violations = _extract_dict_rows(body, "violations", "data")
+    for v in violations:
+        rid = str(v.get("rail_id") or v.get("category") or "rail")
+        sev = str(v.get("severity") or "warning")
+        msg = str(v.get("message") or "").strip()
+        lines.append(f"  • [{sev}] {rid}: {msg}" if msg else f"  • [{sev}] {rid}")
     return "\n".join(lines)

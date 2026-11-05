@@ -466,6 +466,9 @@ class FakeAPI:
         }
         self.guardrail_evaluations: list[tuple[str, str]] = []
         self.tool_plans: list[str] = []
+        self.rerank_calls: list[tuple[str, list[str], str]] = []
+        self.speech_calls: list[tuple[str, str, str]] = []
+        self.grt_suite_queries: int = 0
 
     async def me(self) -> Me:
         return Me.from_dict({"subject": "u", "kind": "user"})
@@ -1248,6 +1251,65 @@ class FakeAPI:
                 }
             ],
             "confidence": 0.93,
+        }
+
+    async def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        model: str = "MatterWaveAI/grt-30m-reranker",
+    ) -> dict[str, Any]:
+        docs = list(documents)
+        self.rerank_calls.append((query, docs, model))
+        q_tokens = {tok.lower() for tok in query.split() if tok}
+        scored: list[dict[str, Any]] = []
+        for idx, doc in enumerate(docs):
+            d_tokens = {tok.lower().strip(".,;:!?") for tok in doc.split() if tok}
+            overlap = len(q_tokens & d_tokens)
+            score = round(min(0.99, 0.50 + 0.20 * overlap - 0.02 * idx), 4)
+            scored.append(
+                {
+                    "index": idx,
+                    "relevance_score": score,
+                    "score": score,
+                    "document": {"text": doc},
+                }
+            )
+        scored.sort(key=lambda item: float(item["relevance_score"]), reverse=True)
+        return {
+            "model": model,
+            "query": query,
+            "results": scored,
+            "data": scored,
+        }
+
+    async def synthesize_speech(
+        self,
+        text: str,
+        model: str = "MatterWaveAI/grt-30m-tts",
+        voice: str = "aurora",
+    ) -> dict[str, Any]:
+        self.speech_calls.append((text, model, voice))
+        return {
+            "model": model,
+            "voice": voice,
+            "format": "wav",
+            "sample_rate_hz": 24000,
+            "duration_ms": max(150, len(text.split()) * 220),
+            "audio_base64": "UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=",
+        }
+
+    async def get_grt_suite(self) -> dict[str, Any]:
+        from matterwave_tui.models import GRT_HF_MODELS, GRT_HF_ORG, GRT_HF_ORG_URL
+
+        self.grt_suite_queries += 1
+        models = [dict(m) for m in GRT_HF_MODELS]
+        return {
+            "organization": GRT_HF_ORG,
+            "hf_url": GRT_HF_ORG_URL,
+            "total": len(models),
+            "models": models,
+            "data": models,
         }
 
     async def aclose(self) -> None:

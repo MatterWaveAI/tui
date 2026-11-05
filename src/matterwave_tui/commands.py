@@ -96,6 +96,16 @@ WAVE_SLASH_COMMAND_SPECS: tuple[SlashCommandSpec, ...] = (
         "Evaluate text against the platform Guardrails engine",
     ),
     SlashCommandSpec(
+        "/rerank",
+        "/rerank <query> | <doc1> ; <doc2>",
+        "Rerank candidate documents against a query using MatterWaveAI/grt-30m-reranker",
+    ),
+    SlashCommandSpec(
+        "/tts",
+        "/tts <text>",
+        "Synthesize speech audio from text using MatterWaveAI/grt-30m-tts",
+    ),
+    SlashCommandSpec(
         "/help",
         "/help",
         "Show keybindings and interactive composer slash commands",
@@ -129,6 +139,8 @@ SLASH_COMMANDS: tuple[str, ...] = (
     "/checkpoints",
     "/reliability",
     "/guardrails",
+    "/rerank",
+    "/tts",
     "/help",
 )
 

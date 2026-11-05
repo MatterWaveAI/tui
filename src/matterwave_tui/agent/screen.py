@@ -85,6 +85,8 @@ SLASH_HELP = """Commands
   /checkpoints <run_id>     list or resume run checkpoints
   /reliability [agent_id]   display the 7 ia_modules reliability metrics
   /guardrails <text>        evaluate text against the Guardrails engine
+  /rerank <q> | <d1> ; <d2> rerank candidate documents with MatterWaveAI/grt-30m-reranker
+  /tts <text>               synthesize speech audio with MatterWaveAI/grt-30m-tts
   /agents                   subagent definitions
   /pi <prompt>              run a prompt through Pi 1.0 RPC agent
   /pi-engine [engine]       inspect or switch agent engine (auto, pi, builtin)
@@ -674,6 +676,8 @@ class AgentScreen(Screen[None]):
             "checkpoints": self._cmd_checkpoints,
             "reliability": self._cmd_reliability,
             "guardrails": self._cmd_guardrails,
+            "rerank": self._cmd_rerank,
+            "tts": self._cmd_tts,
             "agents": self._cmd_agents,
             "pi": self._cmd_pi,
             "pi-engine": self._cmd_pi_engine,
@@ -1092,6 +1096,37 @@ class AgentScreen(Screen[None]):
         if app is not None:
             app.run_guardrails_command(cleaned)
         self.add_line("Evaluating guardrails…", "notice")
+
+    def _cmd_rerank(self, rest: str) -> None:
+        from ..app import MatterWaveApp
+
+        cleaned = rest.strip()
+        if "|" not in cleaned:
+            self.add_line(
+                "Usage: /rerank <query> | <doc1> ; <doc2> — rerank candidate documents "
+                "with MatterWaveAI/grt-30m-reranker.",
+                "error",
+            )
+            return
+        app = self.app if isinstance(self.app, MatterWaveApp) else None
+        if app is not None:
+            app.run_rerank_command(cleaned)
+        self.add_line("Reranking candidate documents…", "notice")
+
+    def _cmd_tts(self, rest: str) -> None:
+        from ..app import MatterWaveApp
+
+        cleaned = rest.strip()
+        if not cleaned:
+            self.add_line(
+                "Usage: /tts <text> — synthesize speech audio with MatterWaveAI/grt-30m-tts.",
+                "error",
+            )
+            return
+        app = self.app if isinstance(self.app, MatterWaveApp) else None
+        if app is not None:
+            app.run_tts_command(cleaned)
+        self.add_line("Synthesizing speech audio…", "notice")
 
     def _cmd_agents(self, rest: str) -> None:
         session = self.session

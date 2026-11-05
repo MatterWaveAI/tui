@@ -336,6 +336,22 @@ class ChatAPI(Protocol):
 
     async def plan_tools(self, goal: str) -> dict[str, Any]: ...
 
+    async def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        model: str = "MatterWaveAI/grt-30m-reranker",
+    ) -> dict[str, Any]: ...
+
+    async def synthesize_speech(
+        self,
+        text: str,
+        model: str = "MatterWaveAI/grt-30m-tts",
+        voice: str = "aurora",
+    ) -> dict[str, Any]: ...
+
+    async def get_grt_suite(self) -> dict[str, Any]: ...
+
     async def aclose(self) -> None: ...
 
 
@@ -1334,6 +1350,42 @@ class HttpChatAPI:
             "POST",
             "/api/v1/tools/plan",
             body={"goal": goal},
+        )
+
+    async def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        model: str = "MatterWaveAI/grt-30m-reranker",
+    ) -> dict[str, Any]:
+        """`POST /v1/rerank`: score and rank candidate documents against a query."""
+        return await self._v1_json(
+            self._writes,
+            "POST",
+            "/v1/rerank",
+            body={"query": query, "documents": list(documents), "model": model},
+        )
+
+    async def synthesize_speech(
+        self,
+        text: str,
+        model: str = "MatterWaveAI/grt-30m-tts",
+        voice: str = "aurora",
+    ) -> dict[str, Any]:
+        """`POST /v1/audio/speech`: synthesize speech audio from text."""
+        return await self._v1_json(
+            self._writes,
+            "POST",
+            "/v1/audio/speech",
+            body={"input": text, "text": text, "model": model, "voice": voice},
+        )
+
+    async def get_grt_suite(self) -> dict[str, Any]:
+        """`GET /api/v1/models/grt-suite`: fetch the 9-model MatterWaveAI GRT Hugging Face suite."""
+        return await self._v1_json(
+            self._reads,
+            "GET",
+            "/api/v1/models/grt-suite",
         )
 
     # --- the stream ----------------------------------------------------------

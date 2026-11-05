@@ -314,5 +314,47 @@ class MatterWaveClient(HttpChatAPI):
                 return _normalize_result(res)
         return await super().plan_tools(goal)
 
+    async def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        model: str = "MatterWaveAI/grt-30m-reranker",
+    ) -> dict[str, Any]:
+        """Rerank documents against a query via SDK or `POST /v1/rerank`."""
+        fn = self._sdk_callable("rerank", "rerank_documents")
+        if fn is not None:
+            try:
+                res = await _maybe_await(fn(query=query, documents=list(documents), model=model))
+                return _normalize_result(res)
+            except TypeError:
+                res = await _maybe_await(fn(query, list(documents), model))
+                return _normalize_result(res)
+        return await super().rerank(query, documents, model=model)
+
+    async def synthesize_speech(
+        self,
+        text: str,
+        model: str = "MatterWaveAI/grt-30m-tts",
+        voice: str = "aurora",
+    ) -> dict[str, Any]:
+        """Synthesize speech audio from text via SDK or `POST /v1/audio/speech`."""
+        fn = self._sdk_callable("synthesize_speech", "audio.speech", "speech")
+        if fn is not None:
+            try:
+                res = await _maybe_await(fn(text=text, model=model, voice=voice))
+                return _normalize_result(res)
+            except TypeError:
+                res = await _maybe_await(fn(text, model, voice))
+                return _normalize_result(res)
+        return await super().synthesize_speech(text, model=model, voice=voice)
+
+    async def get_grt_suite(self) -> dict[str, Any]:
+        """Fetch the 9-model GRT Hugging Face suite via SDK or `GET /api/v1/models/grt-suite`."""
+        fn = self._sdk_callable("get_grt_suite", "models.grt_suite", "models.get_grt_suite")
+        if fn is not None:
+            res = await _maybe_await(fn())
+            return _normalize_result(res)
+        return await super().get_grt_suite()
+
 
 __all__ = ["MatterWaveClient"]

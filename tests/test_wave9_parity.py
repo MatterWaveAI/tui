@@ -17,6 +17,7 @@ from matterwave_tui.commands import (
     SLASH_COMMAND_SPECS,
     SLASH_COMMANDS,
 )
+from matterwave_tui.models import GRT_HF_MODELS, GRT_HF_ORG, GRT_HF_ORG_URL
 from matterwave_tui.screens import HelpScreen
 from matterwave_tui.widgets import MessageView
 from tests.fake_api import FakeAPI
@@ -480,3 +481,170 @@ async def test_interactive_wave9_slash_commands() -> None:
         app.action_send()
         await _settle(app, pilot)
         assert isinstance(app.screen, HelpScreen)
+
+
+@pytest.mark.asyncio
+async def test_grt_9_model_suite_rerank_and_tts_client_and_slash_commands() -> None:
+    """Verify the 9-model MatterWaveAI GRT HF suite, client methods, and `/rerank` & `/tts`."""
+    assert GRT_HF_ORG == "MatterWaveAI"
+    assert GRT_HF_ORG_URL == "https://huggingface.co/MatterWaveAI"
+    assert len(GRT_HF_MODELS) == 9
+    expected_repos = {
+        "MatterWaveAI/grt-30m",
+        "MatterWaveAI/grt-30m-chat",
+        "MatterWaveAI/grt-30m-mor",
+        "MatterWaveAI/grt-30m-embedding",
+        "MatterWaveAI/grt-30m-reranker",
+        "MatterWaveAI/grt-30m-vl",
+        "MatterWaveAI/grt-30m-tts",
+        "MatterWaveAI/grt-30m-omni",
+        "MatterWaveAI/grt-30m-tokenizer",
+    }
+    assert {m["repo_id"] for m in GRT_HF_MODELS} == expected_repos
+
+    for cmd in ("/rerank", "/tts"):
+        assert cmd in SLASH_COMMANDS
+        assert cmd in SLASH_COMMAND_DESCRIPTIONS
+        assert any(spec.name == cmd for spec in SLASH_COMMAND_SPECS)
+
+    recorded: list[tuple[str, str, dict[str, Any] | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content) if request.content else None
+        recorded.append((request.method, request.url.path, body))
+        if request.method == "POST" and request.url.path == "/v1/rerank":
+            return httpx.Response(
+                200,
+                json={
+                    "model": body["model"] if body else "MatterWaveAI/grt-30m-reranker",
+                    "results": [
+                        {
+                            "index": 1,
+                            "relevance_score": 0.94,
+                            "document": {"text": body["documents"][1] if body else "doc2"},
+                        },
+                        {
+                            "index": 0,
+                            "relevance_score": 0.51,
+                            "document": {"text": body["documents"][0] if body else "doc1"},
+                        },
+                    ],
+                },
+            )
+        if request.method == "POST" and request.url.path == "/v1/audio/speech":
+            return httpx.Response(
+                200,
+                json={
+                    "model": body["model"] if body else "MatterWaveAI/grt-30m-tts",
+                    "voice": body["voice"] if body else "aurora",
+                    "format": "wav",
+                    "sample_rate_hz": 24000,
+                    "duration_ms": 660,
+                    "audio_base64": "UklGRg==",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/api/v1/models/grt-suite":
+            return httpx.Response(
+                200,
+                json={
+                    "organization": GRT_HF_ORG,
+                    "hf_url": GRT_HF_ORG_URL,
+                    "total": 9,
+                    "models": [dict(m) for m in GRT_HF_MODELS],
+                },
+            )
+        return httpx.Response(404, json={"detail": "Not found"})
+
+    class BareSdk:
+        base_url = "https://matterwave.test"
+        api_key = "mw_test_token"
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http_client:
+        client = MatterWaveClient(BareSdk(), http_client=http_client)
+        reranked = await client.rerank("vector search", ["irrelevant", "vector search index"])
+        assert reranked["results"][0]["index"] == 1
+        speech = await client.synthesize_speech("Hello MatterWave", voice="aurora")
+        assert speech["model"] == "MatterWaveAI/grt-30m-tts"
+        assert speech["voice"] == "aurora"
+        suite = await client.get_grt_suite()
+        assert suite["total"] == 9
+        assert len(suite["models"]) == 9
+
+    assert recorded == [
+        (
+            "POST",
+            "/v1/rerank",
+            {
+                "query": "vector search",
+                "documents": ["irrelevant", "vector search index"],
+                "model": "MatterWaveAI/grt-30m-reranker",
+            },
+        ),
+        (
+            "POST",
+            "/v1/audio/speech",
+            {
+                "input": "Hello MatterWave",
+                "text": "Hello MatterWave",
+                "model": "MatterWaveAI/grt-30m-tts",
+                "voice": "aurora",
+            },
+        ),
+        ("GET", "/api/v1/models/grt-suite", None),
+    ]
+
+    api = FakeAPI()
+    suite_fake = await api.get_grt_suite()
+    assert suite_fake["total"] == 9
+    assert api.grt_suite_queries == 1
+
+    app = MatterWaveApp(cast(ChatAPI, api))
+    shown: list[str] = []
+    app.notify = lambda message, **_: shown.append(str(message))  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await _settle(app, pilot)
+        composer = app.query_one("#composer", TextArea)
+
+        shown.clear()
+        composer.text = "/rerank missing pipe"
+        app.action_send()
+        await _settle(app, pilot)
+        assert any("Usage: /rerank <query> | <doc1> ; <doc2>" in s for s in shown)
+
+        composer.text = "/rerank neural reranker | Legacy keyword index ; Neural reranker scoring"
+        app.action_send()
+        await _settle(app, pilot)
+        assert api.rerank_calls == [
+            (
+                "neural reranker",
+                ["Legacy keyword index", "Neural reranker scoring"],
+                "MatterWaveAI/grt-30m-reranker",
+            )
+        ]
+        views = list(app.query(MessageView))
+        last_text = views[-1].message.content
+        assert (
+            "Rerank results for 'neural reranker' (MatterWaveAI/grt-30m-reranker, 2 docs):"
+            in last_text
+        )
+        assert "[1] doc#1" in last_text
+        assert "Neural reranker scoring" in last_text
+
+        shown.clear()
+        composer.text = "/tts"
+        app.action_send()
+        await _settle(app, pilot)
+        assert any("Usage: /tts <text>" in s for s in shown)
+
+        composer.text = "/tts Welcome to the MatterWave GRT suite"
+        app.action_send()
+        await _settle(app, pilot)
+        assert api.speech_calls == [
+            ("Welcome to the MatterWave GRT suite", "MatterWaveAI/grt-30m-tts", "aurora")
+        ]
+        views = list(app.query(MessageView))
+        last_text = views[-1].message.content
+        assert "Synthesized speech (MatterWaveAI/grt-30m-tts, voice=aurora" in last_text
+        assert "Welcome to the MatterWave GRT suite" in last_text

@@ -3263,6 +3263,12 @@ class MatterWaveApp(App[None]):
         if first == "guardrails":
             self.run_guardrails_command(body[len("guardrails") :].strip())
             return True
+        if first == "rerank":
+            self.run_rerank_command(body[len("rerank") :].strip())
+            return True
+        if first == "tts":
+            self.run_tts_command(body[len("tts") :].strip())
+            return True
         if first in ("pi-engine", "agent-engine"):
             self.set_agent_engine(body[len(first) :].strip())
             return True
@@ -3685,6 +3691,94 @@ class MatterWaveApp(App[None]):
         self.notify(msg.splitlines()[0])
         note = ConversationMessage(
             id=f"_guardrails-{time.monotonic_ns()}",
+            conversation_id=self.conversation.id if self.conversation else "",
+            role="system",
+            parent_id=self.thread.leaf,
+            parts=[{"type": "text", "text": msg}],
+            content=msg,
+            created_at="",
+        )
+        self.thread.add(note)
+        self.thread.leaf = note.id
+        await self.render_thread()
+
+    def run_rerank_command(self, args: str) -> None:
+        """Execute `/rerank <query> | <doc1> ; <doc2>` via `MatterWaveAI/grt-30m-reranker`."""
+        cleaned = args.strip()
+        if "|" not in cleaned:
+            msg = (
+                "Usage: /rerank <query> | <doc1> ; <doc2> — rerank candidate documents "
+                "with MatterWaveAI/grt-30m-reranker."
+            )
+            self.notify(msg, severity="warning")
+            self._append_pi_notice(msg)
+            return
+        query_part, docs_part = cleaned.split("|", 1)
+        query = query_part.strip()
+        documents = [doc.strip() for doc in docs_part.split(";") if doc.strip()]
+        if not query or not documents:
+            msg = (
+                "Usage: /rerank <query> | <doc1> ; <doc2> — provide a non-empty query "
+                "and at least one document."
+            )
+            self.notify(msg, severity="warning")
+            self._append_pi_notice(msg)
+            return
+        self.run_worker(
+            self._execute_rerank_command(query, documents),
+            group="slash-rerank",
+            exclusive=True,
+        )
+
+    async def _execute_rerank_command(self, query: str, documents: list[str]) -> None:
+        try:
+            body = await self.api.rerank(query, documents)
+        except Exception as exc:
+            msg = f"Document reranking failed: {exc}"
+            self.notify(msg, severity="error")
+            self._append_pi_notice(msg)
+            return
+        msg = _format_rerank_results(query, body)
+        self.notify(msg.splitlines()[0])
+        note = ConversationMessage(
+            id=f"_rerank-{time.monotonic_ns()}",
+            conversation_id=self.conversation.id if self.conversation else "",
+            role="system",
+            parent_id=self.thread.leaf,
+            parts=[{"type": "text", "text": msg}],
+            content=msg,
+            created_at="",
+        )
+        self.thread.add(note)
+        self.thread.leaf = note.id
+        await self.render_thread()
+
+    def run_tts_command(self, text: str) -> None:
+        """Execute `/tts <text>` to synthesize speech audio via `MatterWaveAI/grt-30m-tts`."""
+        cleaned = text.strip()
+        if not cleaned:
+            msg = "Usage: /tts <text> — synthesize speech audio with MatterWaveAI/grt-30m-tts."
+            self.notify(msg, severity="warning")
+            self._append_pi_notice(msg)
+            return
+        self.run_worker(
+            self._execute_tts_command(cleaned),
+            group="slash-tts",
+            exclusive=True,
+        )
+
+    async def _execute_tts_command(self, text: str) -> None:
+        try:
+            body = await self.api.synthesize_speech(text)
+        except Exception as exc:
+            msg = f"Speech synthesis failed: {exc}"
+            self.notify(msg, severity="error")
+            self._append_pi_notice(msg)
+            return
+        msg = _format_tts_result(text, body)
+        self.notify(msg.splitlines()[0])
+        note = ConversationMessage(
+            id=f"_tts-{time.monotonic_ns()}",
             conversation_id=self.conversation.id if self.conversation else "",
             role="system",
             parent_id=self.thread.leaf,
@@ -5086,3 +5180,35 @@ def _format_guardrails_evaluation(content: str, body: dict[str, Any]) -> str:
         msg = str(v.get("message") or "").strip()
         lines.append(f"  • [{sev}] {rid}: {msg}" if msg else f"  • [{sev}] {rid}")
     return "\n".join(lines)
+
+
+def _format_rerank_results(query: str, body: dict[str, Any]) -> str:
+    model = str(body.get("model") or "MatterWaveAI/grt-30m-reranker")
+    rows = _extract_dict_rows(body, "results", "data", "rankings")
+    if not rows:
+        return f"Rerank for {query!r} ({model}): no results."
+    lines = [f"Rerank results for {query!r} ({model}, {len(rows)} docs):"]
+    for idx, item in enumerate(rows, 1):
+        orig_idx = item.get("index", idx - 1)
+        score = item.get("relevance_score", item.get("score"))
+        score_str = f"score={score:.4f}" if isinstance(score, int | float) else "score=n/a"
+        doc_val = item.get("document")
+        if isinstance(doc_val, dict):
+            doc_text = str(doc_val.get("text") or doc_val.get("content") or "")
+        else:
+            doc_text = str(doc_val or item.get("text") or "")
+        lines.append(f"  [{idx}] doc#{orig_idx} ({score_str}): {doc_text}")
+    return "\n".join(lines)
+
+
+def _format_tts_result(text: str, body: dict[str, Any]) -> str:
+    model = str(body.get("model") or "MatterWaveAI/grt-30m-tts")
+    voice = str(body.get("voice") or "aurora")
+    fmt = str(body.get("format") or body.get("audio_format") or "wav")
+    sample_rate = body.get("sample_rate_hz") or body.get("sample_rate") or 24000
+    duration_ms = body.get("duration_ms")
+    dur_str = f", duration={duration_ms}ms" if duration_ms is not None else ""
+    return (
+        f"Synthesized speech ({model}, voice={voice}, format={fmt}, "
+        f"sample_rate={sample_rate}Hz{dur_str}) for {text!r}."
+    )
